@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ApprovalDecisionSchema, ApprovalRequestSchema, DelegationRequestSchema, PaneBindingSchema, RoleMessageSchema,
   type ApprovalDecision, type PaneBinding } from "@bflow/contracts";
 import { draft } from "../../../specification/test/fixtures.js";
-import { AgenticJournal, type JournalState } from "../../src/agentic/journal.js";
+import { AgenticJournal, digest, type JournalState } from "../../src/agentic/journal.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import type { AgenticRuntimePorts } from "../../src/agentic/ports.js";
 import { USER_DECISION_TOOL, guardDirectUserInteraction, parseUserDecisionToolInput } from "../../src/agentic/decision-routing.js";
@@ -100,6 +100,65 @@ describe("P30 T9b tool guard and MCP tool surface", () => {
 });
 
 describe.skipIf(process.platform !== "linux")("P30 T9b runtime user decisions", () => {
+  it("lets Coordinator resolve a human question during its manual pause without resuming the run", async () => {
+    const f = await fixture();
+    const action = { actionId: `next-${digest(["run-1", "allocation-blocked"])}`, kind: "resume_coordinator" as const, owner: "coordinator" as const,
+      reason: "Separate plan decision required", sourceMessageId: "allocation-blocked", createdAt: T0,
+      state: "pending" as const, previousStatus: "implementing" as const, recovery: "manual" as const, resumeAttempts: 0 };
+    await f.journal.exclusive(async (state, save) => {
+      state.runs[0]!.status = "escalated";
+      state.runs[0]!.pendingAction = action;
+      await save();
+    });
+    const receipt = await request(f.runtime(), coordinatorPane());
+    const approvalId = (receipt as { approvalId: string }).approvalId;
+    expect(await request(f.runtime(), coordinatorPane())).toEqual(receipt);
+    await expect(request(f.runtime(), developerPane())).rejects.toThrow("paused awaiting resume");
+    f.setNow(T1);
+    await expect(deliver(f.runtime(), answer(approvalId, { decidedBy: "intruder", idempotencyKey: "intruder-answer" })))
+      .rejects.toThrow("not authenticated");
+    await deliver(f.runtime(), answer(approvalId));
+    const full = await f.journal.exclusive(async state => state);
+    expect(full.runs[0]).toMatchObject({ status: "escalated", pendingAction: action,
+      userDecisions: { [approvalId]: { status: "answered", answer: { outcome: "approved" } } } });
+    expect(full.outbound.filter(out => out.message.type === "approval.request")).toHaveLength(1);
+    expect(full.outbound.some(out => out.message.type === "task.assignment")).toBe(false);
+    await expect(deliver(f.runtime(), answer("unknown-approval", { idempotencyKey: "unknown-answer" })))
+      .rejects.toThrow("paused awaiting resume");
+    await expect(deliver(f.runtime(), answer(approvalId, { idempotencyKey: "new-answer-to-resolved-question" })))
+      .rejects.toThrow("paused awaiting resume");
+  });
+
+  it.each(["completed", "failed", "cancelled", "superseded", "reconcile_delivery"] as const)("preserves v2 Coordinator communication rules for %s", async condition => {
+    const f = await fixture();
+    await f.journal.exclusive(async (state, save) => {
+      const run = state.runs[0]!;
+      run.status = ["completed", "failed", "cancelled"].includes(condition)
+        ? condition as "completed" | "failed" | "cancelled" : "escalated";
+      run.cancelled = condition === "cancelled";
+      if (condition === "superseded") run.supersededBy = "run-follow-up";
+      run.pendingAction = { actionId: `next-${digest(["run-1", "allocation-blocked"])}`,
+        kind: condition === "reconcile_delivery" ? "reconcile_delivery" : "resume_coordinator", owner: "coordinator",
+        reason: "Pause", sourceMessageId: "allocation-blocked", createdAt: T0, state: "pending",
+        previousStatus: "implementing", recovery: "manual", resumeAttempts: 0 };
+      if (condition === "superseded") delete run.pendingAction;
+      await save();
+    });
+    if (condition === "reconcile_delivery") {
+      const receipt = await request(f.runtime(), coordinatorPane());
+      expect(receipt).toMatchObject({ status: "pending" });
+      const full = await f.journal.exclusive(async state => state);
+      expect(full.runs[0]!.status).toBe("escalated");
+      expect(full.runs[0]!.pendingAction?.kind).toBe("reconcile_delivery");
+      expect(full.outbound.some(out => out.message.type === "task.assignment")).toBe(false);
+    } else {
+      await expect(request(f.runtime(), coordinatorPane())).rejects.toThrow(condition === "superseded" ? /continued as follow-up/ : /Run is/);
+      const full = await f.journal.exclusive(async state => state);
+      expect(full.runs[0]!.userDecisions).toBeUndefined();
+      expect(full.outbound.some(out => out.message.type === "approval.request")).toBe(false);
+    }
+  });
+
   it("records a pending decision and emits exactly one approval.request to Conversation", async () => {
     const f = await fixture(); const runtime = f.runtime();
     const receipt = await request(runtime, developerPane());

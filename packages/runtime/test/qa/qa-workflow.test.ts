@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DeterministicWorkflowEngine } from "@bflow/core";
 import { openSqliteRunStore } from "@bflow/persistence";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
-import { ResolvedToolGrantSchema, type ArtifactStore, type ResolvedToolGrant, type RunStore } from "@bflow/contracts";
+import { ApprovalDecisionSchema, ResolvedToolGrantSchema, type ApprovalDecision, type ArtifactStore, type ResolvedToolGrant, type RunStore, type WorkflowEngine } from "@bflow/contracts";
 import {
   QA_BROWSER_TOOL_ID, QA_HTTP_TOOL_ID, QaScopeDenied, QaWorkflowRejected, QaWorkflowRuntime, createHttpQaTool, planQaWorkflow, verifyQaDesign,
   type QaAssignment, type QaBrowserTool, type QaHttpTool, type QaIntakeInput, type QaReconciliation, type QaRolePort, type QaTestDesign
@@ -112,11 +112,12 @@ function grants(ops: string[] = ["http_read", "http_mutate"], tool = QA_HTTP_TOO
     requiredness: "required", role: "qa", scope: { kind: "session", machineId: "m1", repositoryId: "repo1", workspaceRoot: repo, sessionId: "session-1" },
     triggers: ["explicit"], serviceId: tool, operations: ops })];
 }
-async function open(roles: QaRolePort, options: { http?: QaHttpTool | null; browser?: QaBrowserTool; grants?: ResolvedToolGrant[]; leases?: AppCheckBrowserLeases; humans?: string[] } = {}) {
+async function open(roles: QaRolePort, options: { http?: QaHttpTool | null; browser?: QaBrowserTool; grants?: ResolvedToolGrant[]; leases?: AppCheckBrowserLeases; humans?: string[];
+  engine?: WorkflowEngine; authorize?: (decision: ApprovalDecision) => boolean | Promise<boolean> } = {}) {
   const runStore = unwrap(openSqliteRunStore({ filename: join(state, "runs.db") })) as unknown as RunStore;
   const artifactStore = unwrap(await openFilesystemArtifactStore({ root: join(state, "artifacts"), storeId: "qa" })) as ArtifactStore;
-  return QaWorkflowRuntime.open({ engine: new DeterministicWorkflowEngine(), runStore, artifactStore, roles, repositoryRoot: repo,
-    journalPath: join(state, "qa-journal.json"), authorizeHuman: decision => (options.humans ?? ["user:anh"]).includes(decision.decidedBy), now,
+  return QaWorkflowRuntime.open({ engine: options.engine ?? new DeterministicWorkflowEngine(), runStore, artifactStore, roles, repositoryRoot: repo,
+    journalPath: join(state, "qa-journal.json"), authorizeHuman: options.authorize ?? (decision => (options.humans ?? ["user:anh"]).includes(decision.decidedBy)), now,
     tools: { ...(options.http === null ? {} : { http: options.http ?? createHttpQaTool() }), ...(options.browser ? { browser: options.browser } : {}) },
     grants: options.grants ?? grants(),
     leases: options.leases ?? new AppCheckBrowserLeases(join(state, "leases")), leaseTtlMs: 60_000,
@@ -149,6 +150,44 @@ afterEach(async () => {
 });
 
 describe("QA-only workflow on a real app fixture", () => {
+  it("applies the exact authenticated design decision and does not repeat target execution on replay", async () => {
+    const app = await startApp(), engine = new DeterministicWorkflowEngine(), seen: ApprovalDecision[] = [];
+    const runtime = await open(new FixtureRoles(() => app.origin), { engine, authorize: decision => {
+      seen.push(structuredClone(decision)); return decision.decidedBy === "user:anh" && decision.idempotencyKey === "human-exact-qa";
+    } });
+    await runtime.start({ runId: "qa-exact", intake: intake(app.origin) }); const waiting = await runtime.drive("qa-exact");
+    const apply = Reflect.get(runtime, "applyHumanDecision"); expect(apply).toBeTypeOf("function");
+    const decision = ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: waiting.approval!.approvalId, runId: "qa-exact",
+      sessionId: "session-1", target: { type: "task", taskId: "design-review" }, revision: waiting.design!.version,
+      generation: unwrap(await engine.getSnapshot("qa-exact"))!.tasks.find(task => task.taskId === "design-review")!.generation,
+      decision: "approved", decidedBy: "user:anh", decidedAt: now(), reason: "Actual reviewed QA design", feedbackArtifacts: [],
+      idempotencyKey: "human-exact-qa", metadata: { approvalScope: "qa_test_design", designDigest: waiting.design!.digest, originalTag: "retain" } });
+    expect((await apply.call(runtime, decision)).status).toBe("reported");
+    expect(seen).toEqual([decision]);
+    const recorded = JSON.parse(await readFile(join(state, "qa-journal.json"), "utf8"));
+    expect(recorded.runs[0].approval.decision).toEqual(decision);
+    const mutations = runtime.status("qa-exact").execution!.mutations;
+    expect((await apply.call(runtime, decision)).status).toBe("reported");
+    expect(runtime.status("qa-exact").execution!.mutations).toEqual(mutations);
+    expect((await app.stats()).requests.filter(item => item === "POST /api/carts")).toHaveLength(1);
+  });
+
+  it("refuses a design decision with wrong digest/target/generation before any target execution", async () => {
+    const app = await startApp(), engine = new DeterministicWorkflowEngine(), runtime = await open(new FixtureRoles(() => app.origin), { engine });
+    await runtime.start({ runId: "qa-exact-denials", intake: intake(app.origin) }); const waiting = await runtime.drive("qa-exact-denials");
+    const apply = Reflect.get(runtime, "applyHumanDecision"); expect(apply).toBeTypeOf("function");
+    const decision = ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: waiting.approval!.approvalId, runId: "qa-exact-denials",
+      sessionId: "session-1", target: { type: "task", taskId: "design-review" }, revision: waiting.design!.version,
+      generation: unwrap(await engine.getSnapshot("qa-exact-denials"))!.tasks.find(task => task.taskId === "design-review")!.generation,
+      decision: "approved", decidedBy: "user:anh", decidedAt: now(), feedbackArtifacts: [], idempotencyKey: "human-qa-wrong",
+      metadata: { approvalScope: "qa_test_design", designDigest: waiting.design!.digest } });
+    for (const bad of [{ ...decision, metadata: { ...decision.metadata, designDigest: "f".repeat(64) } },
+      { ...decision, target: { type: "task", taskId: "execution" } }, { ...decision, generation: decision.generation + 1 }])
+      await expect(apply.call(runtime, ApprovalDecisionSchema.parse(bad))).rejects.toThrow();
+    expect(runtime.status("qa-exact-denials").status).toBe("awaiting_design_approval");
+    expect(runtime.status("qa-exact-denials").execution).toBeUndefined();
+  });
+
   it("designs, reviews independently, executes, adjudicates and reports without touching the product", async () => {
     const app = await startApp();
     const roles = new FixtureRoles(() => app.origin);

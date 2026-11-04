@@ -719,6 +719,13 @@ export class AgenticJournal {
   private static readonly queues = new Map<string, Promise<unknown>>();
   private static readonly heldDirectories = new AsyncLocalStorage<ReadonlySet<string>>();
   async exclusive<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>): Promise<T> {
+    return this.access(action);
+  }
+  /** Select under the same lock; clone only the selected value. No write callback or mutable cached state escapes. */
+  async project<T>(select: (state: Readonly<JournalState>) => T): Promise<T> {
+    return this.access(async state => structuredClone(select(state)), true);
+  }
+  private async access<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>, readOnly = false): Promise<T> {
     const active = AgenticJournal.heldDirectories.getStore();
     if (active?.has(this.directory)) {
       throw new Error(`Re-entrant AgenticJournal lock acquisition on ${this.directory}`);
@@ -728,7 +735,7 @@ export class AgenticJournal {
     const previous = AgenticJournal.queues.get(this.directory) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(() =>
       AgenticJournal.heldDirectories.run(nextHeld, async () => {
-        try { return await this.locked(action); }
+        try { return await this.locked(action, readOnly); }
         finally { nextHeld.delete(this.directory); }
       })
     );
@@ -754,7 +761,7 @@ export class AgenticJournal {
       backoffMs = Math.min(250, backoffMs * 2);
     }
   }
-  private async locked<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>): Promise<T> {
+  private async locked<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>, readOnly = false): Promise<T> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const lock = await open(join(this.directory, "lock"), constants.O_CREAT | constants.O_RDWR | (constants.O_NOFOLLOW ?? 0), 0o600);
     try {
@@ -764,10 +771,10 @@ export class AgenticJournal {
       const statePath = join(this.directory, "state.json");
       try {
         const bytes = await readRegularJournalFile(statePath);
-        if (this.validatedSnapshot?.bytes.equals(bytes)) state = structuredClone(this.validatedSnapshot.value);
+        if (this.validatedSnapshot?.bytes.equals(bytes)) state = readOnly ? this.validatedSnapshot.value : structuredClone(this.validatedSnapshot.value);
         else {
           state = parseAgenticJournalState(JSON.parse(bytes.toString("utf8")), this.repository);
-          this.validatedSnapshot = { bytes: Buffer.from(bytes), value: structuredClone(state) };
+          this.validatedSnapshot = { bytes: Buffer.from(bytes), value: readOnly ? state : structuredClone(state) };
         }
         baseline = this.validatedSnapshot.value; durableBytes = bytes;
       } catch (e) {
@@ -775,7 +782,16 @@ export class AgenticJournal {
         delete this.validatedSnapshot;
         state = { version: 1, repository: this.repository, runs: [], outbound: [], inbox: [], pendingCore: [], pendingVerifications: [] };
       }
+      if (readOnly) {
+        const freeze = (value: unknown): void => {
+          if (!value || typeof value !== "object" || Object.isFrozen(value)) return;
+          for (const child of Object.values(value)) freeze(child);
+          Object.freeze(value);
+        };
+        freeze(state);
+      }
       return await action(state, async () => {
+        if (readOnly) throw new Error("Read-only journal projection cannot save");
         // Only ever raised: a v8 journal written by a Director host must not be relabelled v7 by a later profile write.
         if (state.version < 7 && (state.runs.some(run => run.roleProfiles?.length || Object.keys(run.roleProfileDefaults ?? {}).length) ||
             state.outbound.some(out => out.roleProfile || out.executorLineage || out.profileAllocationTaskId))) state.version = 7;

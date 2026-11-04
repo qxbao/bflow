@@ -143,14 +143,17 @@ exit 2
     expect(feedback.independentAcceptanceEvidence).toBe(false);
     expect((await ledger.list())[0]).toMatchObject({ status: "completed", consumption: { status: "consumed", source: "host_context" } });
   });
-  it.each([["refactoring", "node_tap"], ["documentation", "node_tap"], ["refactoring", "vitest_json"], ["documentation", "vitest_json"]] as const)("requires real passing verification for %s with %s", async (taskType, reporter) => {
-    const f = await fixture(taskType, reporter); expect(f.strategy.tddDecision.mode).not.toBe("required");
-    expect(() => assertEvidenceComplete(f.strategy)).toThrow();
-    await expect(f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "verification" })).rejects.toThrow("Behavioral acceptance failed");
-    await writeFile(join(f.cwd, "source.cjs"), "module.exports=x=>x*2;\n"); f.commit("working behavior");
-    const result = await f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "verification" }); f.accept(result.result);
-    expect(() => assertEvidenceComplete(f.strategy)).not.toThrow();
-  });
+  for (const reporter of ["node_tap", "vitest_json"] as const) {
+    it.each(["refactoring", "documentation"] as const)(`requires real passing verification for %s with ${reporter}`, async taskType => {
+      const f = await fixture(taskType, reporter); expect(f.strategy.tddDecision.mode).not.toBe("required");
+      expect(() => assertEvidenceComplete(f.strategy)).toThrow();
+      await expect(f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "verification" })).rejects.toThrow("Behavioral acceptance failed");
+      await writeFile(join(f.cwd, "source.cjs"), "module.exports=x=>x*2;\n"); f.commit("working behavior");
+      const result = await f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "verification" }); f.accept(result.result);
+      expect(() => assertEvidenceComplete(f.strategy)).not.toThrow();
+    // Two sequential Vitest measurements each retain their 15 s runner deadline, plus fixture/Git/artifact work.
+    }, reporter === "vitest_json" ? 60_000 : undefined);
+  }
   it.each(["node_tap", "vitest_json"] as const)("%s measures task and workflow gates at the exact committed revision and blocks regressions", async reporter => {
     const f = await fixture("bugfix", reporter);
     const definition = f.host.behavioralChecks()[0]!;

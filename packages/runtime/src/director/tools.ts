@@ -32,6 +32,8 @@ export interface DirectorWorkStart {
   readonly priority: z.infer<typeof DelegationRequestSchema>["priority"];
   /** Timestamp of the user message that authorized the work, so a replay builds the identical delegation. */
   readonly requestedAt: string;
+  /** Native family for this run; the host validates it against the session pack. */
+  readonly nativeFamily?: "implementation" | "analysis" | "qa";
 }
 type AcceptanceCriterionVerificationMethod = z.infer<typeof AcceptanceCriterionSchema>["verificationMethod"];
 /** Hands a new run to the same delegation path Conversation uses. Throws with a redacted reason on admission refusal. */
@@ -95,11 +97,13 @@ export const DIRECTOR_OWN_TOOLS: readonly { name: string; description: string }[
   { name: "unpark_task", description: "Mở lại task đã treo và lên lịch thử mới qua Runtime. Arguments: runId, taskId." },
   { name: "read_mailbox", description: "Read the Director mailbox page by page. Arguments: afterSeq (optional, default 0), audience (optional director|user, default director), limit (optional, at most 200). Items are summaries; use inspect tools for detail." },
   { name: "read_coordinator_guide", description: "Read the Coordinator planning guide that the Director follows when decomposing work. Arguments: none." },
-  { name: "start_work", description: "Create a new run through the same delegation path Conversation uses. In a Director session you decompose the work yourself: after start_work call planning_reference and read_coordinator_guide, then assess, propose_workflow and request_specialist; specialist results arrive in director_wait mailbox items. Clarify acceptance criteria with the user first. Arguments: title, objective, acceptanceCriteria (array of {description, verificationMethod: unit_test|integration_test|e2e_test|typecheck|lint|static_analysis|manual_review}, at least one), sddLevel (lightweight|full), kind (optional feature|bugfix|refactor|spike, default feature), priority (optional low|normal|high|critical, default normal), userMessageSeq (seq of the user message that asked for this work; it must be a real user message in the transcript). Calling again for the same user message, even from a new Director session, returns the same runId and creates no second run. Returns {runId, correlationId, status: queued}." }
+  { name: "start_work", description: "Create a new run through the same delegation path Conversation uses. For implementation runs in a Director session, decompose the work yourself: after start_work call planning_reference and read_coordinator_guide, then assess, propose_workflow and request_specialist; specialist results arrive in director_wait mailbox items. For analysis-only work, pass nativeFamily: analysis, read inspect(runId) then call start_extension with the pinned intake; no Developer DAG. Clarify acceptance criteria with the user first. Arguments: title, objective, acceptanceCriteria (array of {description, verificationMethod: unit_test|integration_test|e2e_test|typecheck|lint|static_analysis|manual_review}, at least one), sddLevel (lightweight|full), kind (optional feature|bugfix|refactor|spike, default feature), priority (optional low|normal|high|critical, default normal), nativeFamily (optional implementation|analysis|qa; defaults to implementation; analysis requires the pinned analysis pack, QA unavailable pending contract review), userMessageSeq (seq of the user message that asked for this work; it must be a real user message in the transcript). Calling again for the same user message, even from a new Director session, returns the same runId and creates no second run. Returns {runId, correlationId, status: queued}." }
 ];
 
 /** Host-served planning guidance; needs no pane binding. Shared with the Coordinator implementation in the host. */
 export const DIRECTOR_HOST_TOOLS: readonly { name: string; description: string }[] = [
+  { name: "resume_run", description: "Resume an existing run after addressing its blocker. Arguments: runId, actionId (optional; uses the recorded action for implementation). For a started native analysis run, the host wakes its extension pump and reconciles existing delivery; no Developer DAG or retry-budget reset. An unstarted native intake needs start_extension." },
+  { name: "start_extension", description: "Start an admitted native analysis run using its exact runId, kind, intake object and packPin {id,version,digest}. Read inspect(runId) for the frozen family/pin and intake schema. Runtime owns dispatch and Web human approval; the Director supplies intake and never creates a Developer DAG for native work. QA native is unavailable pending its contract decision." },
   { name: "planning_reference", description: "Read canonical shipped examples and exact metadata/contract definitions before planning or propose_workflow. Arguments: section (specification | test_strategy | workflow | all), view (optional: full | compact | schema_only), includeRunners (optional boolean)." }
 ];
 
@@ -140,6 +144,7 @@ const StartWorkArgs = z.object({
   sddLevel: SddPolicyLevelSchema,
   kind: WebRequestKindSchema.default("feature"),
   priority: PrioritySchema.default("normal"),
+  nativeFamily: z.enum(["implementation", "analysis", "qa"]).optional(),
   userMessageSeq: z.number().int().positive()
 }).strict();
 
@@ -335,7 +340,8 @@ export class DirectorTools {
         acceptanceCriteria: args.acceptanceCriteria,
         sddLevel: args.sddLevel,
         priority: args.priority,
-        requestedAt: evidence.at
+        requestedAt: evidence.at,
+        ...(args.nativeFamily ? { nativeFamily: args.nativeFamily } : {})
       }));
       if (typeof result === "object" && result !== null && !Array.isArray(result) && typeof result.runId === "string" && typeof result.correlationId === "string") {
         await this.store.recordStartedWork(evidence.messageId, { runId: result.runId, correlationId: result.correlationId });

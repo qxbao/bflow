@@ -639,7 +639,7 @@ describe.todo("Roadmap suite", () => {
 
         const sourceDependencies = fileURLToPath(new URL("../../../../node_modules", import.meta.url));
         const stagedDependencies = join(root, "node_modules");
-        await copyIsolatedNodeDependencies(sourceDependencies, stagedDependencies);
+        await copyIsolatedNodeDependencies(sourceDependencies, stagedDependencies, ["vitest"]);
         const vitestCli = createRequire(import.meta.url).resolve("vitest/vitest.mjs");
         const stagedVitest = join(stagedDependencies, relative(sourceDependencies, vitestCli));
 

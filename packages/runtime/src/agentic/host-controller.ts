@@ -1,24 +1,26 @@
 import { connectArtifact } from "../interaction/artifacts.js";
+import { openSqliteRunStore } from "@bflow/persistence";
 import { WebIssuerCredentialSchema } from "@bflow/contracts/web-host";
-import { createExecutionResolutionReader } from "./execution-binding.js";
+import { createExecutionResolutionReader, readPrivateExecutionSources, readResolutionFile, type ExecutionResolutionReader } from "./execution-binding.js";
+import { buildExecutionPlan } from "../planning/index.js";
 import { OwnerKeySchema } from "../interaction/authority.js";
 import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema, type WorkflowTelemetryReport } from "../telemetry/report.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ExecutionResolutionSourcesSchema, type ExecutionResolutionSources, AgentRoleSchema, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, RunQuerySchema, SessionManifestSchema, WorkflowRunSnapshotSchema,
   type AgentRole, type CreateCheckpointCommand, type OperationOptions, type OperationResult, type RecoveryCheckpoint,
-  type RuntimeService, type SessionManifest
+  StoredRunSchema, type RuntimeService, type SessionManifest
 } from "@bflow/contracts";
 import { callHost } from "./host-protocol.js";
 import { DIRECTOR_LIMITS, type JsonValue } from "@bflow/contracts";
 import { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "../private-state.js";
-import { digest, record, syncFileHandle, textField } from "./journal.js";
+import { AgenticJournal, digest, record, syncFileHandle, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
 import { parseMutationChecks, type MutationCheck } from "./mutation-check.js";
 import { parseAppChecks, type AppCheckSuite } from "./app-check-config.js";
@@ -293,8 +295,48 @@ function failure<T>(error: unknown): OperationResult<T> {
 export async function ensureAgenticHost(options: AgenticHostOptions): Promise<AgenticHostController> {
   return ensureHost(options, false);
 }
-/** Recovery may connect to an already authenticated owner despite source drift; it never grants fresh execution. */
+
+/** A fresh owner resolution may repair an interrupted bootstrap, never an existing workflow binding. */
+async function refreshEmptyStartupSources(configuration: HostConfiguration, configPath: string,
+  sources: ExecutionResolutionSources, reader: ExecutionResolutionReader): Promise<void> {
+  const owner = record(JSON.parse((await readResolutionFile(join(configuration.directory, "owner.json"))).toString("utf8")));
+  if (!Number.isSafeInteger(owner.pid) || Number(owner.pid) < 1) throw new Error("Startup refresh requires a valid stopped host owner");
+  try { process.kill(Number(owner.pid), 0); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    const storage = resolve(configuration.directory, "../../agentic");
+    await new AgenticJournal(join(storage, "journal"), configuration.repositoryPath).exclusive(async state => {
+      if ([state.runs, state.outbound, state.inbox, state.pendingCore, state.pendingVerifications].some(items => items.length))
+        throw new Error("Startup source refresh is forbidden when workflow state exists");
+      // A missing journal is legitimate before intake only when the authoritative RunStore is also empty.
+      const database = join(storage, "runs.db");
+      try {
+        const info = await lstat(database);
+        if (!info.isFile() || info.isSymbolicLink() || await realpath(database) !== database)
+          throw new Error("Startup refresh requires a safe existing RunStore");
+        const opened = openSqliteRunStore({ filename: database });
+        if (!opened.ok) throw new Error("Startup refresh cannot verify the existing RunStore");
+        try {
+          const found = await opened.value.find(RunQuerySchema.parse({ limit: 1 }));
+          if (!found.ok) throw new Error("Startup refresh cannot verify the existing RunStore");
+          if (found.value.items.map(item => StoredRunSchema.parse(item)).length || found.value.nextCursor)
+            throw new Error("Startup source refresh is forbidden when workflow state exists");
+        } finally { opened.value.close(); }
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      const executionSourceDigests = await readPrivateExecutionSources(reader);
+      await reader();
+      await rewritePersistedPlatform(configPath, configuration.platform, { executionResolution: sources, executionSourceDigests });
+      const parent = await open(configuration.directory, "r");
+      try { await parent.sync(); } finally { await parent.close(); }
+    });
+    return;
+  }
+  throw new Error("Startup source refresh requires the recorded host owner to be stopped");
+}
+
 async function ensureHost(options: AgenticHostOptions, reopening: boolean): Promise<AgenticHostController> {
+  if (options.executionResolution !== undefined)
+    options = { ...options, executionResolution: ExecutionResolutionSourcesSchema.parse(options.executionResolution) };
   const repositoryPath = await realpath(options.repositoryPath);
   let startupReader = !reopening && options.executionResolution !== undefined ? await createExecutionResolutionReader(options.executionResolution) : undefined;
   if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
@@ -362,6 +404,11 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
   const platformChanged = digest(configuration.platform ?? null) !== digest(requestedPlatform ?? null);
   const policyChanged = options.policy !== undefined && digest(configuration.policy ?? null) !== digest(options.policy);
   const impactIndexChanged = options.impactIndex !== undefined && digest(configuration.impactIndex ?? null) !== digest(options.impactIndex);
+  // Live readiness observations are deliberately absent from the planner's authority fingerprint.
+  const resolutionAuthority = (sources: ExecutionResolutionSources | undefined) => sources === undefined ? null
+    : { ...sources, plan: buildExecutionPlan(sources.plan).fingerprint };
+  const resolutionChanged = options.executionResolution !== undefined &&
+    digest(resolutionAuthority(configuration.executionResolution)) !== digest(resolutionAuthority(options.executionResolution));
   const resolveDeadlineMs = (deadlineValue: OperationOptions["deadline"]): number => {
     if (deadlineValue === undefined) return Infinity;
     return Date.parse(deadlineValue);
@@ -377,13 +424,19 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
     if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
     alive = false;
   }
+  // Reopening may connect to a live owner without granting fresh execution. A replacement daemon still validates sources.
+  if (!alive && reopening && options.executionResolution !== undefined)
+    startupReader = await createExecutionResolutionReader(options.executionResolution);
+  const executionSourceDigests = await startupReader?.readPrivateSources?.();
+  await startupReader?.();
+  const sourceSnapshotChanged = resolutionChanged || startupReader !== undefined &&
+    digest(configuration.executionSourceDigests ?? null) !== digest(executionSourceDigests ?? null);
   if (alive && options.policy && !compatiblePersistedPolicy(configuration.policy, options.policy))
     throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
   if (alive && platformChanged) throw new Error("Persisted host platform differs; run bflow down before changing providers/roles");
+  if (alive && sourceSnapshotChanged) throw new Error("Persisted host execution sources differ; quiesce the existing host before re-resolution");
   if (alive && layoutChanged) throw new Error("Persisted host layout differs; run bflow down before changing the session layout");
   if (!alive) {
-    // A new daemon still requires fresh execution inputs, including recovery after owner loss.
-    if (reopening && options.executionResolution !== undefined) startupReader = await createExecutionResolutionReader(options.executionResolution);
     try {
       await lstat(configuration.socketPath);
       const owner = record(JSON.parse(await readFile(join(directory,"owner.json"),"utf8")));
@@ -396,6 +449,12 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
       try { await unlink(configuration.socketPath.replace(/\.sock$/, ".native.sock")); }
       catch (nativeError) { if ((nativeError as NodeJS.ErrnoException).code !== "ENOENT") throw nativeError; }
     } catch (statError) { if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError; }
+    if (sourceSnapshotChanged) {
+      if (reopening || !startupReader || !options.executionResolution)
+        throw new Error("Persisted recovery cannot refresh execution sources");
+      await refreshEmptyStartupSources(configuration, configPath, options.executionResolution, startupReader);
+      configuration = await readHostConfiguration(configPath);
+    }
     if (platformChanged || policyChanged || impactIndexChanged || layoutChanged) {
       await rewritePersistedPlatform(configPath, requestedPlatform, {
         ...(options.policy !== undefined ? { policy: options.policy } : {}),
@@ -404,28 +463,7 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
       });
       configuration = await readHostConfiguration(configPath);
     }
-    // Only an explicitly resolved startup may refresh the inactive host's source snapshot.
-    // Accepted run plans remain journal-pinned and still fail their own drift checks.
-    if (!reopening && startupReader && options.executionResolution !== undefined) {
-      const executionSourceDigests = await startupReader.readPrivateSources?.();
-      await startupReader();
-      const next = { ...configuration, executionResolution: options.executionResolution,
-        ...(executionSourceDigests ? { executionSourceDigests } : {}) };
-      const temporaryConfig = `${configPath}.${randomBytes(8).toString("hex")}.tmp`;
-      const file = await open(temporaryConfig, "wx", 0o600);
-      let closed = false;
-      try {
-        await file.writeFile(JSON.stringify(next));
-        await syncFileHandle(file);
-        await file.close();
-        closed = true;
-        await rename(temporaryConfig, configPath);
-      } finally {
-        if (!closed) await file.close();
-        await unlink(temporaryConfig).catch(error => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
-      }
-      configuration = await readHostConfiguration(configPath);
-    }
+
     const log = await open(join(directory, "host.log"), "a", 0o600);
     let exited: string | undefined;
     try {

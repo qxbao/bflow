@@ -758,6 +758,21 @@ describe("D5.4 assignment_context compact/active_only and surveyView modes", () 
     ]
   };
 
+  it.each([
+    { view: "compact" },
+    { view: "active_only" },
+    { view: "full", surveyView: "summary", includeReleased: false }
+  ])("keeps the active extension's exact intake schema and pack pin in actionable context: %j", query => {
+    const activeRunId = fullReply.assignments.find(out => out.status === "accepted")!.message.run_id;
+    const intake = { runId: activeRunId, kind: "analysis", packPin: { id: "analysis-pack", version: "1", digest: "a".repeat(64) },
+      intakeReference: { schemaVersion: 1, intake: { type: "object", properties: { sessionId: { type: "string" } } } },
+      instruction: "Start the pinned analysis workflow through Runtime" };
+    const result = compactAssignmentContext({ ...fullReply, extensionIntakes: [intake,
+      { ...intake, runId: "foreign-run", packPin: { ...intake.packPin, id: "foreign-pack" } }] }, query) as Record<string, any>;
+    expect(result.extensionIntakes).toEqual([intake]);
+    expect(result.assignments[0].message.run_id).toBe(activeRunId);
+  });
+
   it("validates assignment_context parameters while allowing and ignoring paths", () => {
     expect(AssignmentContextInputSchema.parse({ paths: ["/untrusted"] })).toEqual({ paths: ["/untrusted"] });
     expect(

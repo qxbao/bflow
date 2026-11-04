@@ -1053,8 +1053,13 @@ export function compactAssignmentContext(
         });
 
   const repositorySurvey = compactRepositorySurvey(fullReplyInput.repositorySurvey, surveyView);
+  const selectedRunIds = new Set(selectedRuns.map(run => run.runId));
+  const extensionIntakes = Array.isArray(fullReplyInput.extensionIntakes)
+    ? fullReplyInput.extensionIntakes.filter(intake => selectedRunIds.has(record(intake).runId))
+    : undefined;
 
   return json({
+    ...(extensionIntakes === undefined ? {} : { extensionIntakes }),
     ...(repositorySurvey === undefined ? {} : { repositorySurvey }),
     ...(fullReplyInput.resumeContext === undefined ? {} : { resumeContext: fullReplyInput.resumeContext }),
     policyEvidence: fullReplyInput.policyEvidence,

@@ -133,6 +133,7 @@ export class FakeAgentTransport implements AgentTransport {
     return {
       ok: true,
       value: {
+        schemaVersion: 1,
         status: "accepted",
         cancellationId: request.cancellationId,
         executionId: handle.executionId,
@@ -174,9 +175,9 @@ export class FakeAgentTransport implements AgentTransport {
     this.sentRequests = [];
     this.cancelledHandles = [];
     this.reconciledRequests = [];
-    this.customSendHandler = undefined;
-    this.customReconcileHandler = undefined;
-    this.customCancelHandler = undefined;
-    this.customWaitHandler = undefined;
+    delete this.customSendHandler;
+    delete this.customReconcileHandler;
+    delete this.customCancelHandler;
+    delete this.customWaitHandler;
   }
 }

@@ -6,6 +6,24 @@ import { copyIsolatedNodeDependencies } from "../helpers/isolated-node-dependenc
 import { validateDependencyTrees } from "../../src/agentic/behavioral-sandbox.js";
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
+it("stages only a selected pnpm tool and its transitive dependency containers while keeping workspace packages outside", async () => {
+ const root=await realpath(await mkdtemp(join(tmpdir(),"bflow-tool-closure-")));roots.push(root);
+ const source=join(root,"node_modules"),target=join(root,"staged/node_modules");
+ const tool=join(source,".pnpm/tool@1/node_modules/tool"),dep=join(source,".pnpm/dep@1/node_modules/dep"),unused=join(source,".pnpm/unused@1/node_modules/unused");
+ const external=join(root,"private-workspace");
+ for(const path of [tool,dep,unused,external])await mkdir(path,{recursive:true});
+ await writeFile(join(tool,"index.js"),"module.exports=require('dep')");await writeFile(join(dep,"index.js"),"module.exports=42");
+ await writeFile(join(unused,"large-unrelated-tool"),"not needed by the selected runner");await writeFile(join(external,"secret"),"private");
+ await symlink(".pnpm/tool@1/node_modules/tool",join(source,"tool"));
+ await symlink("../../dep@1/node_modules/dep",join(source,".pnpm/tool@1/node_modules/dep"));
+ await symlink(external,join(source,".pnpm/tool@1/node_modules/workspace"));
+ await copyIsolatedNodeDependencies(source,target,["tool"]);
+ expect(await readFile(join(target,"tool/index.js"),"utf8")).toBe("module.exports=require('dep')");
+ expect(await readFile(join(target,".pnpm/tool@1/node_modules/dep/index.js"),"utf8")).toBe("module.exports=42");
+ await expect(readFile(join(target,".pnpm/unused@1/node_modules/unused/large-unrelated-tool"))).rejects.toMatchObject({code:"ENOENT"});
+ await expect(readFile(join(target,".pnpm/tool@1/node_modules/workspace/secret"))).rejects.toMatchObject({code:"ENOENT"});
+ await expect(validateDependencyTrees([target])).resolves.toBeUndefined();
+});
 it("stages pnpm third-party links without importing workspace files and rebases absolute internal links", async () => {
  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-test-tool-deps-"))); roots.push(root);
  const source=join(root,"node_modules"),target=join(root,"staged/node_modules"),workspace=join(root,"packages/private");
@@ -22,7 +40,7 @@ it("can launch the staged installed Vitest tool without exposing workspace links
  const { execFile } = await import("node:child_process"), { promisify } = await import("node:util"), { fileURLToPath } = await import("node:url"), { relative } = await import("node:path"), { createRequire } = await import("node:module");
  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-installed-tool-deps-"))); roots.push(root);
  const source=await realpath(fileURLToPath(new URL("../../../../node_modules",import.meta.url))),target=join(root,"node_modules");
- await copyIsolatedNodeDependencies(source,target); await validateDependencyTrees([target]);
+ await copyIsolatedNodeDependencies(source,target,["vitest"]); await validateDependencyTrees([target]);
  const cli=join(target,relative(source,createRequire(import.meta.url).resolve("vitest/vitest.mjs")));
  const result=await promisify(execFile)(process.execPath,[cli,"--version"],{cwd:root,timeout:10000,env:{PATH:"/usr/bin:/bin"}});
  expect(result.stdout).toMatch(/^vitest\/2\./);

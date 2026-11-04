@@ -31,6 +31,15 @@ async function fixture(beforeEnsure?: () => void) {
 }
 // Agentic host startup uses Linux flock; one recovery case also inspects /proc.
 describe.skipIf(process.platform !== "linux")("default durable host lifecycle and role MCP", () => {
+  it("exposes extension planning only to Coordinator and native extension outputs only to eligible specialists", () => {
+    expect(availableTools("coordinator").map(tool => tool.name)).toContain("start_extension");
+    for (const role of ["specifier", "architect", "reviewer", "qa", "tester"] as const)
+      expect(availableTools(role).map(tool => tool.name)).toContain("submit_extension_output");
+    for (const role of ["conversation", "developer", "security"] as const) {
+      expect(availableTools(role).map(tool => tool.name)).not.toContain("start_extension");
+      expect(availableTools(role).map(tool => tool.name)).not.toContain("submit_extension_output");
+    }
+  });
   it("keeps uncertified Agy assignment admission unavailable to every role", () => {
     expect(availableTools("developer", "agy").some(tool => tool.name === "agy_admit_assignment")).toBe(false);
     expect(availableTools("coordinator", "agy").some(tool => tool.name === "agy_admit_assignment")).toBe(false);

@@ -1,7 +1,10 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AgentRequestSchema, ExecutionResolutionSourcesSchema } from "@bflow/contracts";
+import { canonicalPlanDigest } from "../../src/planning/index.js";
+import { parseAgenticJournalState } from "../../src/agentic/journal.js";
 import { ensureAgenticHost, openPersistedAgenticHost } from "../../dist/agentic/host-controller.js";
 import {
   effectiveFastPathMode,
@@ -21,6 +24,141 @@ const basePolicy: NonNullable<AgenticHostOptions["policy"]> = {
   verification: { maxIterations: 3, onExhausted: "require_human" },
   concurrency: { maxConcurrency: 2 }
 };
+
+describe.skipIf(process.platform !== "linux")("empty stopped host execution-source recovery", () => {
+  async function fixture(pinned = true) {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-source-recovery-")));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const binary = join(root, "herdr-fixture.mjs");
+    await writeFile(binary, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({running:false})+"\\n");\n', { mode: 0o700 });
+    const watched = join(root, "settings.json");
+    const sources = (model: string) => ExecutionResolutionSourcesSchema.parse({ schemaVersion: 3,
+      plan: { schemaVersion: 3, resolverVersion: "test", policyVersion: "test", repository: { revision: "baseline" }, mode: "intake" },
+      files: [{ component: "native-settings", path: watched, format: "json",
+        ...(pinned ? { expectedDigest: canonicalPlanDigest({ model }) } : {}) }] });
+    await writeFile(watched, JSON.stringify({ model: "before-trust" }));
+    const options = { repositoryPath: root, sessionId: "source-recovery", herdrBinary: binary };
+    const original = await ensureAgenticHost({ ...options, executionResolution: sources("before-trust") });
+    cleanup.push(() => original.shutdown().catch(() => undefined));
+    const configPath = join(root, ".bflow/state/host/source-recovery/host.json");
+    const before = await readHostConfiguration(configPath);
+    const owner = JSON.parse(await readFile(join(before.directory, "owner.json"), "utf8"));
+    const stop = async () => {
+      await original.shutdown();
+      await vi.waitFor(() => expect(() => process.kill(owner.pid, 0)).toThrow(), { timeout: 5000, interval: 20 });
+    };
+    return { root, watched, options, original, configPath, before, sources, stop };
+  }
+
+  it("refreshes a freshly resolved startup snapshot after trust changes without replacing host identity", async () => {
+    const { root, watched, options, configPath, before, sources, stop } = await fixture();
+    await stop();
+    await writeFile(watched, JSON.stringify({ model: "after-trust" }));
+    const fresh = sources("after-trust");
+    const recovered = await ensureAgenticHost({ ...options, executionResolution: fresh });
+    cleanup.push(() => recovered.shutdown().catch(() => undefined));
+    const after = await readHostConfiguration(configPath);
+    expect(after.executionResolution).toEqual(fresh);
+    expect(after.executionSourceDigests?.["native-settings"]).toBe(canonicalPlanDigest({ model: "after-trust" }));
+    expect({ token: after.token, socketPath: after.socketPath, directory: after.directory })
+      .toEqual({ token: before.token, socketPath: before.socketPath, directory: before.directory });
+  }, 30_000);
+
+  it.each(["inbox", "missing-owner", "live-owner-missing-socket"])(
+    "guards changed unpinned source contents against %s without rewriting authority", async scenario => {
+      const { root, watched, options, configPath, before, sources, stop } = await fixture(false);
+      await stop();
+      await writeFile(watched, JSON.stringify({ model: "after-trust" }));
+      if (scenario === "missing-owner") await rm(join(before.directory, "owner.json"));
+      if (scenario === "live-owner-missing-socket")
+        await writeFile(join(before.directory, "owner.json"), JSON.stringify({ pid: process.pid }));
+      if (scenario === "inbox") {
+        const directory = join(root, ".bflow/state/agentic/journal");
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        const state = { version: 1, repository: root, runs: [], outbound: [], pendingCore: [], pendingVerifications: [],
+          inbox: [{ status: "applied", message: { schema_version: 2, message_id: "prior-message", correlation_id: "prior-correlation",
+            run_id: "prior-run", sender: { role: "coordinator" }, recipient: { role: "conversation" },
+            type: "conversation.progress", payload: {}, artifact_references: [] } }] };
+        parseAgenticJournalState(state, root);
+        await writeFile(join(directory, "state.json"), JSON.stringify(state), { mode: 0o600 });
+      }
+      const bytes = await readFile(configPath);
+      await expect(ensureAgenticHost({ ...options, executionResolution: sources("after-trust") }).then(controller => {
+        cleanup.push(() => controller.shutdown().catch(() => undefined)); return controller;
+      })).rejects.toThrow();
+      expect(await readFile(configPath)).toEqual(bytes);
+    }, 30_000);
+
+  it.each([false, true])("ignores observation-only changes when reusing a host (stopped=%s)", async stopped => {
+    const { root, options, configPath, sources, stop } = await fixture();
+    if (stopped) {
+      await stop();
+      const directory = join(root, ".bflow/state/agentic/journal");
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      // Existing durable history must not make a health observation look like new execution authority.
+      const state = { version: 1, repository: root, runs: [], outbound: [], pendingCore: [], pendingVerifications: [],
+        inbox: [{ status: "applied", message: { schema_version: 2, message_id: "prior-message", correlation_id: "prior-correlation",
+          run_id: "prior-run", sender: { role: "coordinator" }, recipient: { role: "conversation" },
+          type: "conversation.progress", payload: {}, artifact_references: [] } }] };
+      parseAgenticJournalState(state, root);
+      await writeFile(join(directory, "state.json"), JSON.stringify(state), { mode: 0o600 });
+    }
+    const fresh = sources("before-trust");
+    fresh.plan.observations = [{ id: "gateway-health", status: "observed", checkedAt: new Date().toISOString(),
+      source: { kind: "runtime", locator: "machine.state/setup-gateway-ready.json" } }];
+    const before = await readFile(configPath);
+    const reused = await ensureAgenticHost({ ...options, executionResolution: fresh });
+    cleanup.push(() => reused.shutdown().catch(() => undefined));
+    expect(await readFile(configPath)).toEqual(before);
+  }, 30_000);
+
+  it.each(["live-host", "live-owner-missing-socket", "missing-owner", "malformed-owner", "malformed-journal",
+    "foreign-journal", "existing-run", "unknown-delivery", "inbox", "persisted-reopen", "stale-fresh-sources"])(
+    "refuses %s without changing durable authority or starting a replacement", async scenario => {
+      const { root, watched, options, configPath, before, sources, stop } = await fixture();
+      if (scenario !== "live-host") await stop();
+      await writeFile(watched, JSON.stringify({ model: "after-trust" }));
+      const ownerPath = join(before.directory, "owner.json");
+      if (scenario === "live-owner-missing-socket") await writeFile(ownerPath, JSON.stringify({ pid: process.pid }));
+      if (scenario === "missing-owner") await rm(ownerPath);
+      if (scenario === "malformed-owner") await writeFile(ownerPath, JSON.stringify({ pid: "invalid" }));
+      if (["malformed-journal", "foreign-journal", "existing-run", "unknown-delivery", "inbox"].includes(scenario)) {
+        const directory = join(root, ".bflow/state/agentic/journal");
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        const message = { schema_version: 2, message_id: "message-1", correlation_id: "correlation-1", run_id: "run-1",
+          sender: { role: "coordinator" }, recipient: { role: "developer" }, type: "task.status", payload: {}, artifact_references: [] };
+        const run = { runId: "run-1", status: "cancelled", coreCreated: false, cancelled: true, maxIterations: 3, tasks: [],
+          delegation: { schemaVersion: 2, delegationId: "delegation-1", messageId: "intake-1", correlationId: "correlation-1",
+            sessionId: options.sessionId, runId: "run-1", requestedBy: "conversation", targetRole: "coordinator", title: "Prior work",
+            objective: "Keep previous workflow binding", specificationId: "spec-1", sddLevel: "lightweight", inputArtifacts: [],
+            acceptanceCriteria: [{ id: "ac-1", description: "Preserve history", category: "functional", verificationMethod: "unit_test",
+              required: true, status: "pending", evidenceArtifactIds: [] }], priority: "normal",
+            requestedAt: new Date().toISOString(), idempotencyKey: "intake-1" } };
+        const state = { version: 1, repository: root, runs: scenario === "existing-run" ? [run] : [],
+          outbound: scenario === "unknown-delivery" ? [{ message, status: "unknown_delivery", selector: "developer",
+            taskId: "task-1", attemptId: "attempt-1", capabilities: [], request: AgentRequestSchema.parse({
+              requestId: "request-1", attemptId: "attempt-1", runId: "run-1", taskId: "task-1", role: "developer",
+              target: { transport: "herdr", agentId: "developer-1", paneId: "pane-1" }, instruction: "Preserve delivery",
+              inputs: [], attempt: 1, retry: { maxAttempts: 1, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false },
+              timeout: { executionTimeoutMs: 1000, onTimeout: "fail" },
+              idempotency: { key: "request-1", scope: "agent-request", fingerprint: "request-1" }, createdAt: new Date().toISOString()
+            }) }] : [],
+          inbox: scenario === "inbox" ? [{ message, status: "received" }] : [], pendingCore: [], pendingVerifications: [] };
+        // Ensure the nonempty cases really are valid workflow state, not merely malformed fixtures.
+        if (["existing-run", "unknown-delivery", "inbox"].includes(scenario)) parseAgenticJournalState(state, root);
+        await writeFile(join(directory, "state.json"), scenario === "malformed-journal" ? "{" :
+          JSON.stringify(scenario === "foreign-journal" ? { ...state, repository: "/foreign" } : state), { mode: 0o600 });
+      }
+      const bytes = await readFile(configPath);
+      const log = await readFile(join(before.directory, "host.log"));
+      const operation = scenario === "persisted-reopen" ? openPersistedAgenticHost(options) : ensureAgenticHost({ ...options,
+        executionResolution: sources(scenario === "stale-fresh-sources" ? "before-trust" : "after-trust") });
+      await expect(operation).rejects.toThrow();
+      expect(await readFile(configPath)).toEqual(bytes);
+      expect(await readFile(join(before.directory, "host.log"))).toEqual(log);
+      if (scenario !== "live-host") await expect(readFile(before.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+    }, 30_000);
+});
 
 describe("persisted host policy regressionScope recovery", () => {
   it("treats persisted host policy without regressionScope as mapped_only", () => {

@@ -20,6 +20,7 @@ import {
 import { pendingPrototypeApprovals } from "../agentic/prototype-review.js";
 import { redactString } from "../resilience/redaction.js";
 import { availableActions, terminal } from "./actions.js";
+import { projectExtensionRoutes } from "../agentic/extension-projection.js";
 export interface ReadSources {
   state: JournalState;
   sessionId: string;
@@ -107,7 +108,7 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
       r.status === "awaiting_approval" &&
       r.decision?.approvalId !== r.approval.approvalId
     )
-      decisions.push(projectDecision(s, r, r.approval, "approval"));
+      decisions.push(projectDecision(s, r, r.approval, r.approval.metadata?.kind === "user_decision" ? "user_decision" : "approval"));
     for (const d of Object.values(r.userDecisions ?? {}))
       if (d.status === "pending")
         decisions.push(projectDecision(s, r, d.request, "user_decision"));
@@ -343,6 +344,7 @@ export async function hostInteractionQuery(
   input: unknown,
   options: {
     ready: boolean;
+    onDiagnostic?: (code: string) => void;
     commandsSupported?: boolean;
     readCore?: (runId: string) => Promise<WorkflowRunSnapshot | undefined>;
     /** Terminal snapshot of one pane for the excerpt and transcript queries; without it those answer operation_not_allowed. */
@@ -413,7 +415,7 @@ export async function hostInteractionQuery(
   }
   const journalPath = join(root, "agentic/journal/state.json");
   const journal = await readSnapshot(journalPath, bytes => projectionSnapshots.parse(journalPath, configuration.repositoryPath, bytes), 64 * 1024 * 1024);
-  const state =
+  let state =
     journal === undefined
       ? {
           version: 1 as const,
@@ -425,6 +427,18 @@ export async function hostInteractionQuery(
           pendingVerifications: [],
         }
       : journal;
+  const packFamily = configuration.platform?.workflowPack?.defaults["workflow.id"];
+  const nativeRuns = state.runs.some(run => run.delegation.sessionId === sessionId &&
+    (["analysis", "qa"].includes(String(run.delegation.metadata?.nativeFamily)) ||
+      run.delegation.requestedBy === "conversation" && ["bflow.analysis-only", "bflow.qa-only"].includes(String(packFamily))));
+  if (nativeRuns) {
+    const extensionPath = join(root, "agentic/extensions", digest(configuration.sessionId), "routes/state.json");
+    const diagnostic = options.onDiagnostic ?? ((code: string) => console.warn(code));
+    try {
+      const extensionRoutes = await readSnapshot(extensionPath, bytes => projectionSnapshots.parse(extensionPath, configuration.repositoryPath, bytes), 64 * 1024 * 1024);
+      if (extensionRoutes) state = projectExtensionRoutes(state, extensionRoutes, sessionId, diagnostic);
+    } catch { diagnostic("extension_routes_unavailable"); }
+  }
   const core = new Map<string, WorkflowRunSnapshot>();
   // The workforce projection needs only the manifest and journal; skipping Core reads keeps its 1 s polling cheap.
   for (const r of query.kind === "workforce" || query.kind === "activity" || query.kind === "workforce_excerpts" || query.kind === "agent_transcript" ? [] : state.runs.filter(
