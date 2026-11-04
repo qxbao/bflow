@@ -105,6 +105,8 @@ export class OperationIndex {
     return next;
   }
   async unresolved(projectId:string):Promise<boolean>{for(const name of await this.state.names()) if(/^operation-[a-f0-9]{64}\.json$/.test(name)){
-    const value=this.parse(await this.state.read(name));if(value.index.projectId===projectId && !['applied','failed'].includes(value.operation.state))return true;
+    // D-CD-01: an uncertain director_launch holds no project-scoped resource; it stays as audit (replay is still
+    // reconciliation_required, never a relaunch) but does not block unregistering the project.
+    const value=this.parse(await this.state.read(name));if(value.index.projectId===projectId && value.index.operationKind!=='director_launch' && !['applied','failed'].includes(value.operation.state))return true;
   }return false;}
 }

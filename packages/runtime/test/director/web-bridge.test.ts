@@ -360,7 +360,8 @@ describe("Director Web bridge: issue commands", () => {
     const dismissed = f.endpoint.setIssueStatus(issueId, "dismissed");
     const [outcome] = await Promise.all([reconciled, dismissed]);
     expect((await f.endpoint.inspectIssue(issueId)).status).toBe("dismissed");
-    expect(outcome === undefined || !outcome.ok || outcome.value.kind !== "issue" || outcome.value.status !== "retrying").toBe(true);
+    // The concurrent dismiss wins: the retry outcome stays unproven (receipt reconciliation_required), never "retrying".
+    expect(outcome).toBeUndefined();
     expect(unparks(f)).toBe(0);
   });
 
@@ -385,6 +386,21 @@ describe("Director Web bridge: issue commands", () => {
     const [outcome] = await Promise.all([reconciled, recorded]);
     expect(outcome).toMatchObject({ ok: true, value: { kind: "issue", status: "retrying" } });
     expect(unparks(f)).toBe(0);
+  });
+
+  it("reconcile never unparks: a park read that becomes unobservable before the status write fails closed", async () => {
+    const f = await setup();
+    const issue = await f.endpoint.upsertIssue({ issueId, runId: "run-1", taskKey: "implement", kind: "other", summary: "Treo" });
+    f.runs[0]!.tasks[0] = { taskId: "implement", parkHistory: [{ episode: 1, source: "director" }] };
+    const command = WebCommandSchema.parse({ apiVersion: 1, commandId: randomUUID(), projectId: "project-1", kind: "issue_retry",
+      runId: "run-1", issueId, expectedUpdatedAt: issue.updatedAt });
+    const reconciled = f.bridge.reconcileIssueCommand(command);
+    // Lands in the issue serial between reconcile's observation and its status write: Runtime no longer reports the task.
+    const hidden = f.endpoint.observeIssues(async () => { f.runs[0]!.tasks = []; });
+    const [outcome] = await Promise.all([reconciled, hidden]);
+    expect(outcome).toBeUndefined();
+    expect(unparks(f)).toBe(0);
+    expect((await f.endpoint.inspectIssue(issueId)).status).toBe("open");
   });
 
   it("refuses an issue command whose run belongs to another host session before any receipt or effect", async () => {

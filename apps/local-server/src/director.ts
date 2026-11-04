@@ -110,10 +110,9 @@ export async function directorRoute(ctx: DirectorRouteContext): Promise<void> {
   }
   if (name === 'directorMessages' || name === 'directorIssues') {
     res.setTimeout(40000);
-    const { cursor } = WebHttpContracts.directorMessages.query.parse(ctx.query);
     const page = name === 'directorMessages'
-      ? value(TranscriptResult.parse(await observeWithinDeadline(() => port.messages(id, cursor, ctx.authentication), 35000)))
-      : value(IssuesResult.parse(await observeWithinDeadline(() => port.issues(id, cursor, ctx.authentication), 35000)));
+      ? value(TranscriptResult.parse(await observeWithinDeadline(() => port.messages(id, WebHttpContracts.directorMessages.query.parse(ctx.query).cursor, ctx.authentication), 35000)))
+      : value(IssuesResult.parse(await observeWithinDeadline(() => port.issues(id, WebHttpContracts.directorIssues.query.parse(ctx.query).cursor, ctx.authentication), 35000)));
     ctx.respond(page); return;
   }
   if (name === 'sendDirectorMessage') {

@@ -240,8 +240,9 @@ export class DirectorEndpoint {
     return issue;
   }
 
-  setIssueStatus(issueId: string, status: "retrying" | "resolved" | "dismissed", guard?: DirectorIssueGuard): Promise<ParkedIssue> {
-    return this.tools.setIssueStatus(issueId, status, guard);
+  setIssueStatus(issueId: string, status: "retrying" | "resolved" | "dismissed", guard?: DirectorIssueGuard,
+    options?: { recordOnly?: boolean }): Promise<ParkedIssue> {
+    return this.tools.setIssueStatus(issueId, status, guard, options);
   }
 
   /** Read-only validation of a status change (same serial step and park-episode rule as setIssueStatus). */

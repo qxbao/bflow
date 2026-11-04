@@ -311,7 +311,7 @@ export class DirectorWebBridge {
     });
     if (outcome.kind === "applied") return ok({ kind: "issue", issueId: outcome.issue.issueId, status: outcome.issue.status });
     if (outcome.kind === "unparked") {
-      // Runtime already reopened this episode; only the local status record is missing. setIssueStatus observes and does not unpark.
+      // Runtime already reopened this episode; only the local status record is missing. recordOnly: setIssueStatus never unparks.
       // The write runs in its own issue serial step, so it re-checks that the issue is still exactly what was observed (same run,
       // still open, same updatedAt); setIssueStatus itself re-checks the park episode. A concurrent dismiss or newer episode wins
       // and the outcome stays unknown (reconciliation_required): a dismissed issue is never resurrected.
@@ -323,7 +323,7 @@ export class DirectorWebBridge {
           if (current.status === "retrying") return;
           if (current.status !== "open" || current.updatedAt !== observed.updatedAt)
             throw new DirectorIssueRefusal("stale_version", "Issue changed while reconciling");
-        });
+        }, { recordOnly: true });
         return ok({ kind: "issue", issueId: issue.issueId, status: issue.status });
       } catch (error) {
         if (error instanceof DirectorIssueRefusal) return undefined;

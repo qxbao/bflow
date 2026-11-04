@@ -2,7 +2,7 @@ import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { z } from 'zod';
-import { IdentifierSchema, type OperationResult } from '@bflow/contracts';
+import { IdentifierSchema, SessionManifestSchema, type OperationResult } from '@bflow/contracts';
 import { WebChatMessageResultSchema, WebChatPageResultSchema, WebChatSendSchema, WebCommandSchema, WebNoticeDisplayedResultSchema,
   WebOperationResponseSchema, WebProjectSchema, WebProjectSessionResultSchema,
   type UserInteractionClient, type WebOperation, type WebProject } from '@bflow/contracts/web';
@@ -37,8 +37,23 @@ export interface DirectorWebDependencies {
   deps?: DirectorLaunchDeps;
   /** Presence from the running host; read failure must be `unknown`, a stopped host `host_stopped`. */
   readPresence?: (project: WebProject, hostSessionId: string) => Promise<DirectorLaunchPresence>;
+  /** Bound on the presence read (default 10 s); a late read counts as `unknown`, which requires replaceActive. */
+  presenceTimeoutMs?: number;
+  /** The host's activated Conversation session (manifest), undefined when unknown; checked against a Director view. */
+  conversationSessionId?: (project: WebProject, hostSessionId: string) => Promise<string | undefined>;
   /** Machine paths that must never reach the browser (BFLOW_HOME, provider homes). */
   sensitivePaths?: () => string[];
+}
+const PRESENCE_TIMEOUT_MS = 10000;
+/** Reads the activated manifest's Conversation session; any failure is "unknown" (undefined), never a mismatch. */
+async function manifestConversationSessionId(project: WebProject, hostSessionId: string): Promise<string | undefined> {
+  try {
+    const raw = await readFile(join(project.canonicalPath, '.bflow/state/panes', `${hostSessionId}.manifest.json`), 'utf8');
+    if (raw.length > 4 * 1024 * 1024) return undefined;
+    const manifest = SessionManifestSchema.parse(JSON.parse(raw));
+    if (manifest.sessionId !== hostSessionId || manifest.workspaceRoot !== project.canonicalPath) return undefined;
+    return manifest.conversationSessionId;
+  } catch { return undefined; }
 }
 const TOKEN_TEXT = /\b[A-Za-z0-9_-]{8,128}\.[A-Za-z0-9_-]{32,256}\b|\b(?:sk|ghp|gho|xox[abp]|AIza)[A-Za-z0-9_-]{16,}\b/g;
 /** Default machine paths kept out of Web responses: BFLOW_HOME and provider homes (never HOME itself, which may hold the repository). */
@@ -186,7 +201,15 @@ export function createWebInteractionServices(context: InteractionComposition, de
   const director:LocalWebDirectorServices={
     async readView(projectId,input){
       let scope;try{scope=await directorScope(projectId,input);}catch{return directorRefused('forbidden','Invalid Director scope.');}
-      try{return await (await directorService(scope.project,scope.hostSessionId,false)).readDirector(projectId);}catch{return directorUnavailable();}
+      try{
+        const view=await (await directorService(scope.project,scope.hostSessionId,false)).readDirector(projectId);
+        // Defence in depth: a view served by another host's Conversation session is never shown as this project's Director.
+        if(view.ok && view.value.sessionId!==undefined){
+          const expected=await (directorDeps.conversationSessionId??manifestConversationSessionId)(scope.project,scope.hostSessionId).catch(()=>undefined);
+          if(expected!==undefined && expected!==view.value.sessionId)return directorUnavailable('Director view không khớp phiên host hiện tại.');
+        }
+        return view;
+      }catch{return directorUnavailable();}
     },
     async issues(projectId,cursor,input){
       let scope;try{scope=await directorScope(projectId,input);}catch{return directorRefused('forbidden','Invalid Director scope.');}
@@ -226,7 +249,11 @@ export function createWebInteractionServices(context: InteractionComposition, de
         const scope=await directorScope(projectId,input);
         canonicalPath=await realpath(scope.project.canonicalPath);deps=await launchDeps();
         plan=await (directorDeps.build??buildDirectorLaunchPlan)({projectId,canonicalPath},request.provider,deps);
-        presence=await readPresence(scope.project,scope.hostSessionId).catch(():DirectorLaunchPresence=>'unknown');
+        // Bounded so a slow presence read cannot push the spawn past the operation deadline (into the "uncertain" window).
+        let timer:ReturnType<typeof setTimeout>|undefined;
+        presence=await Promise.race([readPresence(scope.project,scope.hostSessionId).catch(():DirectorLaunchPresence=>'unknown'),
+          new Promise<DirectorLaunchPresence>(resolve=>{timer=setTimeout(()=>resolve('unknown'),directorDeps.presenceTimeoutMs??PRESENCE_TIMEOUT_MS);})])
+          .finally(()=>{if(timer)clearTimeout(timer);});
       }catch(error){return refused(error instanceof DirectorLaunchError?error.code:'not_started');}
       try{
         const result=await (directorDeps.launch??launchDirectorPlan)(plan,{presence,replaceActive:request.replaceActive,deps});

@@ -265,3 +265,21 @@ it('a stale browser session cannot replay a launch: authorization runs again ins
   expect((await f.send(`${base}/launch`, 'POST', launchBody(), headers)).status).toBe(401);
   expect(port.launch).toHaveBeenCalledTimes(1);
 });
+
+it('an uncertain launch does not block unregister; after re-registering, its replay stays reconciliation_required and never spawns', async () => {
+  const port = director({ launch: async () => ({ ok: false, error: { code: 'unknown_delivery', retryable: false, manualInterventionRequired: true,
+    message: 'uncertain', details: { reason: 'launch_uncertain' } } }) });
+  const { headers, projectId, base } = await setup(port);
+  const body = launchBody();
+  expect((await f.send(`${base}/launch`, 'POST', body, headers)).json.state).toBe('reconciliation_required');
+  const removed = await f.send(`/api/v1/projects/${projectId}`, 'DELETE', { apiVersion: 1, confirmed: true }, headers);
+  expect(removed.status).toBe(204);
+  // The receipt is kept as audit: the same canonical path re-registers to the same project ID, and the replay only observes.
+  const again = await f.send('/api/v1/projects', 'POST', { apiVersion: 1, path: join(f.directory, 'repo') }, headers);
+  expect(again.json.projectId).toBe(projectId);
+  const replay = await f.send(`${base}/launch`, 'POST', body, headers);
+  expect(replay.status).toBe(202);
+  expect(replay.json).toMatchObject({ operationId: body.operationId, state: 'reconciliation_required' });
+  expect((await f.send(`/api/v1/projects/${projectId}/operations/${body.operationId}`, 'GET', undefined, headers)).json.state).toBe('reconciliation_required');
+  expect(port.launch).toHaveBeenCalledTimes(1);
+});

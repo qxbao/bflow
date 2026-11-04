@@ -200,3 +200,40 @@ it('workspace reconciliation never treats a director_launch as a session receipt
   expect(await services.reconcileSessionOperation(operation)).toMatchObject({ ok: true, value: { state: 'reconciliation_required', operationKind: 'director_launch' } });
   await expect(readdir(receiptDirectory)).rejects.toThrow();
 });
+
+it('bounds the presence read: a hung read counts as unknown (needs replaceActive) and never delays the spawn into the uncertain window', async () => {
+  const { root, project } = await repository();
+  const seen = { count: 0 };
+  const hung = () => new Promise<never>(() => {});
+  const services = createWebInteractionServices({ principalId: 'ledger', resolveProject: async () => project },
+    { sessionId: async () => 'host-1', director: { deps: launchDeps(root, seen), readPresence: hung, presenceTimeoutMs: 50 } });
+  const started = Date.now();
+  expect(await services.director.launch(project.projectId, { provider: 'claude', replaceActive: false }, browser()))
+    .toMatchObject({ ok: false, error: { code: 'validation', details: { reason: 'director_active' } } });
+  expect(Date.now() - started).toBeLessThan(5000);
+  expect(seen.count).toBe(0);
+  expect(await services.director.launch(project.projectId, { provider: 'claude', replaceActive: true }, browser()))
+    .toMatchObject({ ok: true, value: { mode: 'terminal_opened' } });
+  expect(seen.count).toBe(1);
+});
+
+it('refuses a Director view whose session differs from the host manifest Conversation session', async () => {
+  const { project } = await repository();
+  const view = (sessionId?: string) => ({ ok: true, value: { apiVersion: 1, projectId: project.projectId, layout: 'director', ...(sessionId ? { sessionId } : {}),
+    snapshot: { schemaVersion: 1, generatedAt: now(), director: { presence: 'absent' }, runs: [], pendingApprovals: 0, pendingQuestions: 0, issues: [] },
+    transcriptSeq: 0, cliCaptureMayBeIncomplete: false, observedAt: now() } });
+  let served = view('conv-foreign');
+  const openDirector = vi.fn(async () => ({ readDirector: async () => served }));
+  const services = createWebInteractionServices({ principalId: 'ledger', resolveProject: async () => project },
+    { openDirector: openDirector as never, sessionId: async () => 'host-1', director: { conversationSessionId: async () => 'conv-1' } });
+  expect(await services.director.readView(project.projectId, browser())).toMatchObject({ ok: false, error: { code: 'transport_unavailable' } });
+  served = view('conv-1');
+  expect(await services.director.readView(project.projectId, browser())).toMatchObject({ ok: true, value: { sessionId: 'conv-1' } });
+  // Either side absent (not started, or manifest unreadable): nothing to compare, the view is returned as read.
+  served = view();
+  expect(await services.director.readView(project.projectId, browser())).toMatchObject({ ok: true, value: { layout: 'director' } });
+  const unknown = createWebInteractionServices({ principalId: 'ledger', resolveProject: async () => project },
+    { openDirector: openDirector as never, sessionId: async () => 'host-1', director: { conversationSessionId: async () => undefined } });
+  served = view('conv-foreign');
+  expect(await unknown.director.readView(project.projectId, browser())).toMatchObject({ ok: true });
+});
