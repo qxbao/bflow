@@ -619,7 +619,7 @@ describe("workflow liveness recovery boundaries", () => {
     ready = true;
     expect(await g.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
     expect(await g.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
-    expect((await g.notices("workflow_blocked")).filter(out => /Automatic resume stopped/.test(String((out.message.payload as { headline?: string }).headline)))).toHaveLength(1);
+    expect((await g.notices("workflow_blocked")).filter(out => /Runtime đã dừng tự tiếp tục/.test(String((out.message.payload as { headline?: string }).headline)))).toHaveLength(1);
     expect((await g.inspect()).outbound.filter(out => (out.message.payload as { kind?: string }).kind === "resume_run")).toEqual([]);
   });
   it("records native delivery uncertainty without escalating and settles it on the late ACK or application", async () => {

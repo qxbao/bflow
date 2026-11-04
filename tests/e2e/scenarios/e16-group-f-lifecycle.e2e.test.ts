@@ -21,7 +21,10 @@ import {
 import {
   AgentResultSchema,
   CreateCheckpointCommandSchema,
+  PaneBindingSchema,
   RoleMessageSchema,
+  SessionManifestV2Schema,
+  SessionManifestV3Schema,
   VerificationResultSchema,
   WorkflowAggregateCheckpointStateSchema,
   type AgentExecutionHandle,
@@ -35,6 +38,8 @@ import {
   type RecoveryCheckpoint,
   type RoleMessage,
   type SessionManifest,
+  type SessionManifestV2,
+  type SessionManifestV3,
   type Specification,
   type WorkflowDefinition
 } from "@bflow/contracts";
@@ -99,6 +104,17 @@ interface WireSession {
   workspaces: WireWorkspace[];
   tabs: WireTab[];
   panes: WirePane[];
+  /** Foreground process started by `pane run` (the Director progress viewer), keyed by pane. */
+  viewers: Map<string, { pid: number; argv: string[] }>;
+}
+
+/** Splits the single-quoted command line the progress pane sends to `pane run` back into argv. */
+function unquoteShellCommand(line: string): string[] {
+  const argv: string[] = [];
+  const pattern = /'((?:[^']|'\\'')*)'/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(line)) !== null) argv.push(match[1]!.replace(/'\\''/g, "'"));
+  return argv;
 }
 
 class HerdrWireRunner implements EnvironmentProcessRunner {
@@ -109,7 +125,7 @@ class HerdrWireRunner implements EnvironmentProcessRunner {
   session(name: string): WireSession {
     let s = this.sessions.get(name);
     if (!s) {
-      s = { running: false, workspaces: [], tabs: [], panes: [] };
+      s = { running: false, workspaces: [], tabs: [], panes: [], viewers: new Map() };
       this.sessions.set(name, s);
     }
     return s;
@@ -179,7 +195,7 @@ class HerdrWireRunner implements EnvironmentProcessRunner {
       return { exitCode: 0, stdout: "{}", stderr: "", pid: process.pid };
     }
     if (domain === "session" && action === "stop" && target) {
-      Object.assign(this.session(target), { running: false, workspaces: [], tabs: [], panes: [] });
+      Object.assign(this.session(target), { running: false, workspaces: [], tabs: [], panes: [], viewers: new Map() });
       return success({ stopped: true });
     }
     if (domain === "session" && action === "attach") {
@@ -240,13 +256,31 @@ class HerdrWireRunner implements EnvironmentProcessRunner {
     }
     if (domain === "pane" && action === "close") {
       session.panes = session.panes.filter((pane) => pane.pane_id !== target);
+      if (target) session.viewers.delete(target);
       return wire("ok", {});
     }
     if (domain === "pane" && action === "get") {
       const pane = session.panes.find((p) => p.pane_id === target);
       return pane ? wire("pane_info", { pane }) : failure("Pane missing");
     }
+    if (domain === "pane" && action === "run" && target) {
+      // Herdr acknowledges `pane run` with empty output; the pane's foreground group becomes the launched command.
+      if (!session.panes.some((p) => p.pane_id === target)) return failure("Pane missing");
+      session.viewers.set(target, { pid: 5000 + ++this.next, argv: unquoteShellCommand(args[3] ?? "") });
+      return { exitCode: 0, stdout: "", stderr: "" };
+    }
     if (domain === "pane" && action === "process-info") {
+      const viewer = session.viewers.get(flag("--pane") ?? "");
+      if (viewer) {
+        return wire("pane_process_info", {
+          process_info: {
+            pane_id: flag("--pane"),
+            shell_pid: 1000,
+            foreground_process_group_id: viewer.pid,
+            foreground_processes: [{ pid: viewer.pid, argv: viewer.argv }]
+          }
+        });
+      }
       return wire("pane_process_info", {
         process_info: {
           pane_id: flag("--pane"),
@@ -598,7 +632,7 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
     }
   }, 30_000);
 
-  it.skipIf(process.platform !== "linux")("[HARNESS + REAL SQLITE / ARTIFACT STORE / GIT WORKTREES] executes full lifecycle: init -> up -> attach -> Conversation SDLC task -> down (guard + checkpoint) -> up & resume", async () => {
+  it.skipIf(process.platform !== "linux")("[HARNESS + REAL SQLITE / ARTIFACT STORE / GIT WORKTREES] executes full lifecycle: init -> up (Director v3 + progress) -> attach progress -> library Conversation SDLC task -> down (guard + checkpoint) -> up & resume", async () => {
     const repoDir = join(tmpRoot, "sdlc-repo");
     mkdirSync(repoDir, { recursive: true });
     git(repoDir, "init", "-b", "main");
@@ -621,7 +655,9 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
     expect(bflowGitignore).toContain("state/");
     expect(bflowGitignore).toContain("logs/");
 
-    git(repoDir, "add", ".bflow");
+    // `bflow init` adds .bflow/ to the repository's git exclude; committing the config is opt-in.
+    expect(git(repoDir, "check-ignore", ".bflow")).toContain(".bflow");
+    git(repoDir, "add", "-f", ".bflow");
     git(repoDir, "commit", "-m", "chore: initialize bflow config");
 
     const repository = await identifyRepository(repoDir);
@@ -733,15 +769,66 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
       }
     }));
 
-    let activeManifest!: SessionManifest;
+    // `bflow up` is pinned to the Director layout (manifest v3: specialist panes + non-LLM progress tab, no
+    // Conversation/Coordinator pane). The Conversation-driven SDLC below is retained v2 coverage composed explicitly
+    // from the library (AgenticWorkflowRuntime + createAgenticConversationHost over a legacy v2 pane catalog); it is
+    // never produced by, or fed back into, the CLI lifecycle. The CLI lifecycle and Runtime share only the host barrier
+    // (findRuns/quiesce/checkpoint/shutdown) and the durable RunStore/journal, as the real host does.
+    let directorManifest: SessionManifestV3 | undefined;
+    const activations: SessionManifestV3[] = [];
+    const legacyAt = new Date().toISOString();
+    const legacyBinding = (role: PaneBinding["role"], paneGroup: NonNullable<PaneBinding["paneGroup"]>): PaneBinding =>
+      PaneBindingSchema.parse({
+        schemaVersion: 2,
+        bindingId: `legacy-binding-${role}`,
+        sessionId: "legacy-library-session",
+        role,
+        paneGroup,
+        agentId: role,
+        workspaceId: "legacy-workspace",
+        tabId: `legacy-tab-${paneGroup}`,
+        paneId: `legacy-pane-${role}`,
+        provider: "claude",
+        agentKind: "claude",
+        cwd: repoDir,
+        isolationMode: "dedicated_pane",
+        readOnlyWorkspace: role !== "developer",
+        permanent: true,
+        session: { source: "herdr:claude", kind: "id", value: `native-legacy-${role}` },
+        transportState: "idle",
+        boundAt: legacyAt
+      });
+    const legacyManifest: SessionManifestV2 = SessionManifestV2Schema.parse({
+      schemaVersion: 2,
+      sessionId: "legacy-library-session",
+      projectName: "sdlc-repo",
+      workspaceRoot: repoDir,
+      herdrWorkspaceId: "legacy-workspace",
+      herdrTabId: "legacy-tab-conversation",
+      status: "up",
+      conversationSessionId: "legacy-conversation-session",
+      activeRunIds: [],
+      panes: [
+        legacyBinding("conversation", "conversation"),
+        legacyBinding("coordinator", "coordination"),
+        legacyBinding("specifier", "coordination"),
+        legacyBinding("architect", "coordination"),
+        legacyBinding("planner", "coordination"),
+        legacyBinding("reviewer", "verification"),
+        legacyBinding("qa", "verification")
+      ],
+      attachTarget: { role: "conversation", paneId: "legacy-pane-conversation" },
+      createdAt: legacyAt,
+      updatedAt: legacyAt
+    });
     const devBindings: PaneBinding[] = [];
 
     const panePolicy: PanePolicy = {
       async getManifest() {
-        return { ok: true, value: activeManifest };
+        return { ok: true, value: legacyManifest };
       },
       async getRoleBinding(selector) {
-        const all = [...(activeManifest?.panes ?? []), ...devBindings];
+        const all = [...legacyManifest.panes, ...devBindings];
         return {
           ok: true,
           value: all.find((p) => [p.role, p.bindingId, p.paneId, p.agentId].includes(selector)) ?? null
@@ -758,7 +845,7 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
       async allocateDeveloper(req) {
         const existing = devBindings.find((p) => p.agentId === req.agentName);
         if (existing) return { ok: true, value: existing };
-        const base = activeManifest.panes[0]!;
+        const base = legacyManifest.panes[0]!;
         const devPane: PaneBinding = {
           ...base,
           bindingId: `binding-${req.agentName}`,
@@ -878,13 +965,9 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
         )
       }),
       activate: async (manifest: SessionManifest) => {
-        activeManifest = {
-          ...manifest,
-          panes: manifest.panes.map((p) => ({
-            ...p,
-            session: p.session ?? { source: `herdr:${p.agentKind}`, kind: "id", value: `native-${p.role}` }
-          }))
-        };
+        // The CLI activates the Runtime host with exactly the Director manifest it published.
+        directorManifest = SessionManifestV3Schema.parse(manifest);
+        activations.push(directorManifest);
         return { ok: true as const, value: undefined };
       },
       runtime: {
@@ -922,36 +1005,68 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
       close: async () => {}
     };
 
+    const progressCommands: string[][] = [];
     const makeLifecycle = () =>
       new EnvironmentLifecycle(repoDir, {
         runner: wireRunner,
-        openIntegration: async (composition) =>
-          openPaneManagerEnvironment(
+        openIntegration: async (composition) => {
+          if (composition.progressCommand) progressCommands.push([...composition.progressCommand]);
+          return openPaneManagerEnvironment(
             composition,
             wireRunner,
             async () => host as never,
             async () => ["--trusted-role-launch"]
-          )
+          );
+        }
       });
+    const countCalls = (domain: string, action: string) => wireRunner.calls.filter((c) => c.args[0] === domain && c.args[1] === action).length;
 
-    // F2: bflow up + idempotent second up
-    const manifestUp1 = await makeLifecycle().up();
-    const agentStartsAfterUp1 = wireRunner.calls.filter((c) => c.args[0] === "agent" && c.args[1] === "start").length;
-    const manifestUp1Idempotent = await makeLifecycle().up();
-    const agentStartsAfterUp2 = wireRunner.calls.filter((c) => c.args[0] === "agent" && c.args[1] === "start").length;
+    // F2: bflow up (Director layout, manifest v3) + idempotent second up
+    const expectedRoles = envConfig.environment.roles
+      .filter((r) => !["developer", "sos", "conversation", "coordinator"].includes(r.role) && (r.required ?? true))
+      .map((r) => r.role)
+      .sort();
+    const up1 = await makeLifecycle().up();
+    const agentStartsAfterUp1 = countCalls("agent", "start");
+    const progressRunsAfterUp1 = countCalls("pane", "run");
+    const up1Again = await makeLifecycle().up();
+    expect(up1.schemaVersion).toBe(3);
+    if (up1.schemaVersion !== 3 || up1Again.schemaVersion !== 3) throw new Error("bflow up must publish a Director manifest v3");
+    const progressCommand = progressCommands[0]!;
+    expect(progressCommand.slice(-2)).toEqual(["progress", "--follow"]);
+    expect(up1.status).toBe("up");
+    expect(up1.panes.some((p) => p.role === "conversation" || p.role === "coordinator")).toBe(false);
+    expect(up1.panes.map((p) => p.role).sort()).toEqual(expectedRoles);
+    expect(up1.panes.every((p) => p.session !== undefined && p.transportState === "idle")).toBe(true);
+    expect(up1.progressPane).toMatchObject({ phase: "running", command: progressCommand });
+    expect(up1.attachTarget).toMatchObject({ role: "progress", tabId: up1.progressPane!.tabId, paneId: up1.progressPane!.paneId });
+    // The progress pane is a shell running `bflow progress --follow`, never an agent.
+    const progressRun = wireRunner.calls.find((c) => c.args[0] === "pane" && c.args[1] === "run")!;
+    expect(progressRun.args[2]).toBe(up1.progressPane!.paneId);
+    expect(unquoteShellCommand(progressRun.args[3]!)).toEqual(progressCommand);
+    expect(wireRunner.calls.filter((c) => c.args[0] === "agent" && c.args[1] === "start").map((c) => c.args[c.args.indexOf("--pane") + 1]))
+      .not.toContain(up1.progressPane!.paneId);
+    expect(agentStartsAfterUp1).toBe(expectedRoles.length);
+    expect(progressRunsAfterUp1).toBe(1);
+    // Idempotent: the second up reconciles the same panes; it starts no agent and never reruns the viewer.
+    expect(up1Again.status).toBe("up");
+    expect(up1Again.panes.map((p) => p.paneId).sort()).toEqual(up1.panes.map((p) => p.paneId).sort());
+    expect(up1Again.progressPane).toMatchObject({ paneId: up1.progressPane!.paneId, phase: "running" });
+    expect(countCalls("agent", "start")).toBe(agentStartsAfterUp1);
+    expect(countCalls("pane", "run")).toBe(progressRunsAfterUp1);
+    // The Runtime host was activated with exactly the published Director manifest.
+    expect(directorManifest).toMatchObject({ schemaVersion: 3, status: "up", progressPane: { paneId: up1.progressPane!.paneId, phase: "running" } });
+    expect(activations.length).toBeGreaterThan(0);
 
-    expect(manifestUp1.status).toBe("up");
-    expect(manifestUp1.panes).toHaveLength(7);
-    expect(new Set(manifestUp1.panes.map((p) => p.tabId)).size).toBe(3);
-    expect(manifestUp1Idempotent.status).toBe("up");
-    expect(agentStartsAfterUp1).toBe(7);
-    expect(agentStartsAfterUp2).toBe(7);
-
-    // F3: bflow attach
+    // F3: bflow attach focuses the progress tab (Director sessions have no Conversation pane) and opens the Herdr TUI
     const attachedManifest = await makeLifecycle().attach();
-    const lastFocusCall = [...wireRunner.calls].reverse().find((c) => c.args[0] === "agent" && c.args[1] === "focus");
-    expect(attachedManifest.attachTarget.role).toBe("conversation");
-    expect(lastFocusCall?.args[2]).toBe(attachedManifest.attachTarget.paneId);
+    expect(attachedManifest.schemaVersion).toBe(3);
+    expect(attachedManifest.attachTarget).toMatchObject({ role: "progress", paneId: up1.progressPane!.paneId });
+    const lastTabFocus = [...wireRunner.calls].reverse().find((c) => c.args[0] === "tab" && c.args[1] === "focus");
+    expect(lastTabFocus?.args[2]).toBe(up1.progressPane!.tabId);
+    const lastAttach = [...wireRunner.calls].reverse().find((c) => c.args[0] === "session" && c.args[1] === "attach");
+    expect(lastAttach?.args[2]).toBe(up1.sessionId);
+    expect(wireRunner.calls.some((c) => c.args[0] === "agent" && c.args[1] === "focus")).toBe(false);
 
     // F4: Conversation Agent Executing Full SDLC Task (run-sdlc-1)
     const nowIso = new Date().toISOString();
@@ -987,7 +1102,7 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
         schemaVersion: 2,
         specId,
         runId,
-        sessionId: activeManifest.conversationSessionId,
+        sessionId: legacyManifest.conversationSessionId,
         level: classification.level,
         complexity: classification.complexity,
         riskLevel: classification.riskLevel,
@@ -1069,10 +1184,10 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
       return { spec, wf };
     };
 
-    const convBinding = activeManifest.panes.find((p) => p.role === "conversation")!;
+    const convBinding = legacyManifest.panes.find((p) => p.role === "conversation")!;
     const chatHost = await createAgenticConversationHost({
       runtime,
-      manifest: activeManifest,
+      manifest: legacyManifest,
       contextDirectory: convContextDir,
       onHumanDecision: async (decision) => {
         recordedHumanApprovalIds.add(decision.approvalId);
@@ -1080,7 +1195,7 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
     });
 
     const userIntakeTurn = (await chatHost.handleUserTurn({
-      sessionId: activeManifest.conversationSessionId,
+      sessionId: legacyManifest.conversationSessionId,
       messageId: "turn-sdlc-intake-1",
       content: "Please implement the release checklist in guide.md with acceptance criteria: Guide documentation is updated.",
       provenance: {
@@ -1099,7 +1214,7 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
       delegationId: "delegation-sdlc-1",
       messageId: "msg-intake-1",
       correlationId: "corr-sdlc-1",
-      sessionId: activeManifest.conversationSessionId,
+      sessionId: legacyManifest.conversationSessionId,
       runId: "run-sdlc-1",
       requestedBy: "conversation",
       targetRole: "coordinator",
@@ -1286,7 +1401,7 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
       recipient: { role: "conversation" }
     });
     const userApproveTurn1 = (await chatHost.handleUserTurn({
-      sessionId: activeManifest.conversationSessionId,
+      sessionId: legacyManifest.conversationSessionId,
       messageId: "turn-sdlc-approve-1",
       content: "approve",
       provenance: {
@@ -1342,12 +1457,22 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
     ).length;
     expect(devDispatchesBeforeDown).toBe(1);
 
+    const quiesceBeforeGuard = hostQuiesceCount;
+    const closesBeforeGuard = countCalls("pane", "close");
     await expect(makeLifecycle().down(false)).rejects.toThrow(/Unsafe shutdown: 1 active runs/);
+    // The unconfirmed guard refuses before the barrier: nothing was quiesced, closed or stopped.
+    expect(hostQuiesceCount).toBe(quiesceBeforeGuard);
+    expect(countCalls("pane", "close")).toBe(closesBeforeGuard);
+    expect(countCalls("session", "stop")).toBe(0);
 
     const downConfirmedManifest = (await makeLifecycle().down(true)) as SessionManifest;
     expect(downConfirmedManifest.status).toBe("down");
-    expect(hostQuiesceCount).toBeGreaterThan(0);
+    expect(downConfirmedManifest.schemaVersion).toBe(3);
+    expect(hostQuiesceCount).toBeGreaterThan(quiesceBeforeGuard);
     expect(hostShutdownCount).toBeGreaterThan(0);
+    // Owned progress viewer is closed and the named Herdr session stopped after the quiesce/checkpoint barrier.
+    expect(wireRunner.calls.some((c) => c.args[0] === "pane" && c.args[1] === "close" && c.args[2] === up1.progressPane!.paneId)).toBe(true);
+    expect(countCalls("session", "stop")).toBeGreaterThan(0);
 
     await expect(makeLifecycle().attach()).rejects.toThrow(/No active repository session/);
 
@@ -1378,8 +1503,18 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
     engine = new DeterministicWorkflowEngine({ bindingReceiptKeys });
     await buildRuntime();
 
+    const agentStartsBeforeResume = countCalls("agent", "start");
+    const progressRunsBeforeResume = countCalls("pane", "run");
+    const activationsBeforeResume = activations.length;
     const manifestUpResume = await makeLifecycle().up();
     expect(manifestUpResume.status).toBe("up");
+    if (manifestUpResume.schemaVersion !== 3) throw new Error("resumed bflow up must publish a Director manifest v3");
+    expect(manifestUpResume.panes.map((p) => p.role).sort()).toEqual(expectedRoles);
+    expect(manifestUpResume.progressPane).toMatchObject({ phase: "running", command: progressCommand });
+    expect(countCalls("agent", "start")).toBe(agentStartsBeforeResume + expectedRoles.length);
+    expect(countCalls("pane", "run")).toBe(progressRunsBeforeResume + 1);
+    expect(activations.length).toBeGreaterThan(activationsBeforeResume);
+    expect(directorManifest?.progressPane?.paneId).toBe(manifestUpResume.progressPane!.paneId);
 
     await runtime.tick();
     const devDispatchesAfterResumeTick = transport.sentRequests.filter(
@@ -1399,10 +1534,10 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
     const approvalReqOut2 = (await inspectState()).outbound.find(
       (out) => (out.runId ?? out.message.run_id) === "run-resume-2" && out.message.type === "approval.request"
     )!;
-    const resumedConvBinding = activeManifest.panes.find((p) => p.role === "conversation")!;
+    const resumedConvBinding = legacyManifest.panes.find((p) => p.role === "conversation")!;
     const resumedChatHost = await createAgenticConversationHost({
       runtime,
-      manifest: activeManifest,
+      manifest: legacyManifest,
       contextDirectory: convContextDir,
       onHumanDecision: async (decision: ApprovalDecision) => {
         recordedHumanApprovalIds.add(decision.approvalId);
@@ -1414,7 +1549,7 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
       recipient: { role: "conversation" }
     });
     await resumedChatHost.handleUserTurn({
-      sessionId: activeManifest.conversationSessionId,
+      sessionId: legacyManifest.conversationSessionId,
       messageId: "turn-sdlc-approve-2",
       content: "approve",
       provenance: {

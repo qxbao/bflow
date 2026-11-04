@@ -20,19 +20,19 @@ let root:string;
 beforeEach(async()=>{root=await realpath(await mkdtemp('/tmp/preview-custom-'));execFileSync('git',['init','--quiet',root]);await initializeEnvironmentConfig({cwd:root});vi.stubEnv('BFLOW_HOME',join(root,'machine'));});
 afterEach(async()=>{vi.unstubAllEnvs();await rm(root,{recursive:true,force:true});});
 
-it('applies locked pack settings to the inherited Developer template after resolving Coordinator defaults',async()=>{
+it('applies locked pack settings to the inherited Developer template after resolving the first specialist defaults',async()=>{
  const repository=await identifyRepository(root);const config=await readEnvironmentConfig(repository);
  config.environment.roles=config.environment.roles.filter(role=>role.role!=='developer');
  const pack={schemaVersion:3 as const,id:'inherited-pack',version:'1',digest:'0'.repeat(64),
-  defaults:{'roles.coordinator.model':'coordinator-pack','roles.developer.model':'developer-pack'},lockedFields:['roles.coordinator.model','roles.developer.model']};
+  defaults:{'roles.planner.model':'planner-pack','roles.developer.model':'developer-pack'},lockedFields:['roles.planner.model','roles.developer.model']};
  pack.digest=workflowPackDigest(pack);await writeFile(join(root,'.bflow/pack.json'),JSON.stringify(pack));
  config.environment.workflowPack={path:'.bflow/pack.json',id:pack.id,version:pack.version,digest:pack.digest};
  const resolution=await resolvePlatformConfiguration({repository,config,env:process.env});
  expect(resolution.input.config.environment.roles.find(role=>role.role==='developer')).toMatchObject({role:'developer',model:'developer-pack',required:false});
- delete (pack.defaults as Record<string,string>)['roles.developer.model'];pack.lockedFields=['roles.coordinator.model'];pack.digest=workflowPackDigest(pack);
+ delete (pack.defaults as Record<string,string>)['roles.developer.model'];pack.lockedFields=['roles.planner.model'];pack.digest=workflowPackDigest(pack);
  await writeFile(join(root,'.bflow/pack.json'),JSON.stringify(pack));config.environment.workflowPack.digest=pack.digest;
  const inherited=await resolvePlatformConfiguration({repository,config,env:process.env});
- expect(inherited.input.config.environment.roles.find(role=>role.role==='developer')?.model).toBe('coordinator-pack');
+ expect(inherited.input.config.environment.roles.find(role=>role.role==='developer')?.model).toBe('planner-pack');
 });
 
 it('retains the tool policy transformation source when an explicit skill is omitted without its grant',async()=>{

@@ -1,4 +1,5 @@
-import { basename, resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, isAbsolute, resolve } from "node:path";
 import {
   EnvironmentDoctorReportSchema, PaneBindingSchema, SessionManifestSchema,
   type ContractError, type EnvironmentDoctorReport, type OperationOptions, type OperationResult,
@@ -16,7 +17,8 @@ import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProc
 import { openLifecycleHost, providerRoleArguments, type LifecycleHost, type LifecycleHostFactory } from "./agentic-host.js";
 import { RoleStartupChecks } from "./role-startup-checks.js";
 import { formatPlatformNotReady } from "./platform-options.js";
-import { isGovernanceRoleConfig } from "./environment-config.js";
+import { V2_SESSION_RUNNING_MESSAGE } from "./director-messages.js";
+import { isGovernanceRoleConfig, isLegacyDirectorRole } from "./environment-config.js";
 
 function failure<T>(message: string): OperationResult<T> {
   return { ok: false, error: { code: "validation", retryable: false, message } };
@@ -46,6 +48,19 @@ export type PaneSocketFactory = (input: EnvironmentCompositionInput, runner: Env
 export const defaultPaneSocket: PaneSocketFactory = (input, runner) =>
   createHerdrSocketPort({ runner: createNamedPaneRunner(input, runner), sessionId: input.repository.sessionName });
 
+/**
+ * Absolute argv of the Director progress viewer. The composition normally supplies it (resolved once with
+ * `resolveBflowCommand`); this synchronous fallback pins the running entrypoint the same way.
+ */
+function fallbackProgressCommand(): string[] {
+  const entry = process.argv[1];
+  if (!entry) throw new Error("Cannot determine the bflow entrypoint (process.argv[1] is empty).");
+  let real = resolve(entry);
+  try { real = realpathSync(real); } catch { /* keep the resolved path */ }
+  if (!isAbsolute(process.execPath) || !isAbsolute(real)) throw new Error("bflow command must resolve to absolute paths.");
+  return [process.execPath, real, "progress", "--follow"];
+}
+
 /** Adapt P13's topology API to the frozen lifecycle port; no topology implementation lives here. */
 export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
   private readonly store: SessionManifestStore;
@@ -54,7 +69,8 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
   constructor(private readonly input: EnvironmentCompositionInput, private readonly runner = environmentProcessRunner,
     roleArguments: Partial<Record<TopologyRole, readonly string[]>> = {}, roleLaunches: Partial<Record<TopologyRole, AgentLaunchProfile>> = {},
     socketFactory: PaneSocketFactory = defaultPaneSocket,
-    onPublished?: (manifest: SessionManifest, options?: OperationOptions) => void) {
+    onPublished?: (manifest: SessionManifest, options?: OperationOptions) => void,
+    progressCommand: readonly string[] | undefined = input.progressCommand) {
     const roles: PermanentTopologyRole[] = [];
     const roleConfigs: Partial<Record<TopologyRole, Partial<RoleAgentConfig>>> = {};
     for (const role of input.config.environment.roles) {
@@ -62,7 +78,7 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
       // Developer is a Runtime-launched task/worktree role. Its optional config entry
       // supplies a dynamic launch template and never creates a permanent P13 pane.
       // The sos role is spawned on demand by an exact BFLOWSOS chat turn, never at startup.
-      if (role.role === "developer" || role.role === "sos") continue;
+      if (role.role === "developer" || role.role === "sos" || isLegacyDirectorRole(role.role)) continue;
       if (topologyRole === null || topologyRole === "developer") {
         throw new Error(`Role '${role.role}' is not a permanent P13 role. Developers must be allocated by Runtime in task worktrees.`);
       }
@@ -95,7 +111,8 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
     };
     this.panes = new RolePaneManager({ config: {
       sessionId: input.repository.sessionName, workspaceRoot: input.repository.root, projectName: input.config.projectName,
-      permanentRoles: roles, roleConfigs, maxDeveloperCapacity: input.config.environment.concurrency.maxConcurrency
+      permanentRoles: roles, roleConfigs, maxDeveloperCapacity: input.config.environment.concurrency.maxConcurrency,
+      layout: "director", progressCommand: [...(progressCommand ?? fallbackProgressCommand())]
     }, runner: createNamedPaneRunner(input, runner), store: this.store, defaultTimeoutMs: input.config.environment.startupTimeoutMs,
       // Launch env (Gateway tokens) must be set when a pane is created: Herdr agent start never forwards invocation env.
       socket: socketFactory(input, runner) });
@@ -125,6 +142,8 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
     if (!this.matches(sessionId)) return failure("Cannot inspect another repository's session");
     const stored = await this.store.load(sessionId, options);
     if (!stored.ok || stored.value === null || stored.value.status === "down") return stored;
+    // A running v2 session stays readable (status, doctor, down); the Director layout never refreshes its health.
+    if (stored.value.schemaVersion === 2) return stored;
     // P12 calls this before server startup as well as for live status. Offline reads retain persisted facts.
     const probe = await this.runner.run({ executable: this.input.config.environment.herdrBinary, args: ["status", "server", "--json"],
       cwd: this.input.repository.root, env: namedSessionEnvironment(sessionId, this.input.env),
@@ -143,12 +162,22 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
   }
   async attach(sessionId: string, options?: OperationOptions): Promise<OperationResult<PaneBinding>> {
     if (!this.matches(sessionId)) return failure("Cannot focus another repository's session");
+    const stored = await this.store.load(sessionId, options);
+    if (stored.ok && stored.value?.schemaVersion === 3) return failure("Director session: use attachProgress");
+    if (stored.ok && stored.value?.schemaVersion === 2) return failure(V2_SESSION_RUNNING_MESSAGE);
     const result = await this.panes.focusConversationPane(options);
     if (!result.ok) return result;
     if (this.persistenceFailure) return { ok: false, error: this.persistenceFailure };
     const pane = PaneBindingSchema.parse(result.value);
     if (pane.role !== "conversation" || pane.sessionId !== sessionId) return failure("P13 returned a foreign Conversation pane");
     return { ok: true, value: pane };
+  }
+  async attachProgress(sessionId: string, options?: OperationOptions): Promise<OperationResult<{ tabId: string; paneId: string; terminalId?: string }>> {
+    if (!this.matches(sessionId)) return failure("Cannot focus another repository's session");
+    const result = await this.panes.focusProgressPane(options);
+    if (!result.ok) return result;
+    if (this.persistenceFailure) return { ok: false, error: this.persistenceFailure };
+    return result;
   }
   async down(sessionId: string, options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
     if (!this.matches(sessionId)) return failure("Cannot stop another repository's session");
@@ -165,8 +194,17 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
     else if (!current.value) checks.push({ checkId: "p13-manifest", name: "P13 manifest", status: "warn", message: "No topology manifest yet. Run bflow up." });
     else {
       const stopped = current.value.status === "down";
+      if (current.value.schemaVersion === 2 && !stopped)
+        checks.push({ checkId: "p13-v2-session", name: "Phiên v2", status: "warn", message: V2_SESSION_RUNNING_MESSAGE });
       if (stopped) checks.push({ checkId: "p13-stopped", name: "Session lifecycle", status: "passed",
         message: "Session is stopped; cancelled pane records describe completed shutdown, not current readiness." });
+      if (current.value.schemaVersion === 3 && !stopped) {
+        const progress = current.value.progressPane;
+        checks.push(progress?.phase === "running"
+          ? { checkId: "director-progress-pane", name: "Tab tiến trình Director", status: "passed", message: `Pane ${progress.paneId} đang chạy bflow progress --follow` }
+          : { checkId: "director-progress-pane", name: "Tab tiến trình Director", status: "warn",
+              message: `Tab tiến trình ${progress ? `ở trạng thái ${progress.phase}` : "chưa được tạo"}; chạy \`bflow up\` để mở lại. Phiên Director vẫn dùng được, chỉ không có màn hình tiến độ.` });
+      }
       for (const pane of current.value.panes) {
         if (stopped && pane.transportState === "cancelled") continue;
         checks.push({ checkId: `pane-${pane.bindingId}`.slice(0, 200), name: `${pane.role}: ${pane.paneId}`,
@@ -267,6 +305,7 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
       },
       getManifest: (sessionId, options) => manager.getManifest(sessionId, options),
       attach: (sessionId, options) => manager.attach(sessionId, options),
+      attachProgress: (sessionId, options) => manager.attachProgress(sessionId, options),
       down: (sessionId, options) => manager.down(sessionId, options),
       async doctorSession(options) {
         const report = await manager.doctorSession(options);

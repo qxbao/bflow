@@ -8,7 +8,7 @@ import {
 import { canonicalPlanDigest, resolveWorkflowPack, workflowPackDigest } from '@bflow/runtime';
 import type { EnvironmentCompositionInput } from './environment.js';
 import {
-    EnvironmentConfigEnvironmentSchema, isGovernanceRoleConfig,
+    EnvironmentConfigEnvironmentSchema, isGovernanceRoleConfig, isLegacyDirectorRole,
     type EnvironmentGovernanceRoleConfig, type EnvironmentProvider, type EnvironmentRoleConfig
 } from './environment-config.js';
 import { DEEPWIKI_SERVICE_ID, DEEPWIKI_TOOLS } from './deepwiki-constants.js';
@@ -29,15 +29,21 @@ export function modelSettings(role: EnvironmentRoleConfig): Pick<PlatformRoleOpt
     };
 }
 
+/** First configured specialist role (never developer/sos or a retired conversation/coordinator entry). */
+export function developerLaunchTemplate<T extends EnvironmentRoleConfig>(roles: readonly T[]): T | undefined {
+    return roles.find(role => role.role !== 'developer' && role.role !== 'sos' && !isLegacyDirectorRole(role.role));
+}
+
 /** Preserve governance roles while inheriting only the Developer launch template. */
 export function configuredPlatformRoles(input: EnvironmentCompositionInput): EnvironmentGovernanceRoleConfig[] {
     // The sos rescue role is launched by the host on demand and never joins platform readiness.
-    const roles = input.config.environment.roles.filter(isGovernanceRoleConfig);
-    const coordinator = roles.find(role => role.role === 'coordinator');
-    if (!coordinator) throw new Error('Configuration must include a coordinator role');
+    const roles = input.config.environment.roles.filter(isGovernanceRoleConfig).filter(role => !isLegacyDirectorRole(role.role));
+    // Director layout: there is no Coordinator; the Developer launch template comes from the first configured specialist role.
+    const template = developerLaunchTemplate(roles);
     if (!roles.some(role => role.role === 'developer')) {
-        const profile = selectedProfileName(coordinator, input.config.environment);
-        roles.push({ role: 'developer', cli: coordinator.cli, required: false, ...modelSettings(coordinator), ...(profile ? { 'profile-name': profile } : {}) });
+        if (!template) throw new Error('Configuration must include at least one specialist role');
+        const profile = selectedProfileName(template, input.config.environment);
+        roles.push({ role: 'developer', cli: template.cli, required: false, ...modelSettings(template), ...(profile ? { 'profile-name': profile } : {}) });
     }
     return roles;
 }

@@ -557,4 +557,25 @@ describe.skipIf(process.platform !== "linux")("GitIntegrationEngine using real i
       await expect(integration([{ taskKey: unrelated.task.key }], "integration-unrelated")).rejects.toThrow(/not yet in integration history/);
     });
   });
+  it("collects an unchanged candidate only with controller authority and preserves clean Git/artifact guards",async()=>{
+    await writeFile(join(repository,'src/shared.txt'),'existing implementation\n');await git(repository,'add','src/shared.txt');await git(repository,'commit','-m','Existing implementation');
+    const implemented=await git(repository,'rev-parse','HEAD');
+    const task=await engine.prepareTask(request('unchanged',{baseRevision:implemented}));
+    await expect(engine.collectTask(task.key)).rejects.toThrow(/no implementation commit/);
+    await expect(engine.collectTask(task.key,{authorizeUnchangedDispute:async()=>false})).rejects.toThrow(/no implementation commit/);
+    expect(()=>engine.collectTask(task.key,{authorizeUnchangedDispute:true} as never)).toThrow();
+    const snapshot=await engine.collectTask(task.key,{authorizeUnchangedDispute:async revision=>revision===implemented,comparisonBaseRevision:base});
+    expect(snapshot.headCommitHash).toBe(implemented);expect(snapshot.baseCommitHash).toBe(base);expect(snapshot.filesChanged).toHaveLength(1);expect(snapshot.metadata?.unchangedDisputeCandidate).toBe(true);
+    expect(snapshot.patchArtifact.sizeBytes).toBeGreaterThan(0);expect(snapshot.metadata?.repairCommits).toBe(0);
+    const reopened=await GitIntegrationEngine.open({repositoryPath:repository,artifactStore:store});
+    expect((await reopened.collectTask(task.key)).headCommitHash).toBe(implemented);
+    const statePath=join(repository,'.git','bflow-git','state.json');const original=await readFile(statePath);
+    const stale=JSON.parse(original.toString('utf8'));stale.tasks[task.key].changeSet.metadata.assignedBaseCommitHash='f'.repeat(40);
+    await writeFile(statePath,JSON.stringify(stale));
+    await expect(reopened.collectTask(task.key)).rejects.toThrow(/no implementation commit/);
+    await writeFile(statePath,original);
+    await writeFile(join(task.worktreePath,'src/shared.txt'),'uncommitted edit');
+    await expect(reopened.collectTask(task.key)).rejects.toThrow();
+  });
+
 });

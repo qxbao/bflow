@@ -9,8 +9,16 @@ import { loadHostExecutionResolution } from "./execution-preview.js";
 import { buildHostPlatformOptions, loadHostPlatformContext } from "./platform-options.js";
 import { readGatewayReadiness } from "./gateway-readiness.js";
 import { resolveApprovedGitNexusBinary } from "./gateway-repositories.js";
+import { resolveBflowCommand } from "./init-director.js";
 
 export type { HostPrepareResponse, HostRoleLaunch };
+
+/** A live host started with another layout/platform cannot be rewritten in place; the owner must stop it first. */
+export function translateHostLayoutError(error: unknown): unknown {
+  const message = error instanceof Error ? error.message : "";
+  if (!/Persisted host (layout|platform) differs/.test(message)) return error;
+  return new Error(`Host Bflow đang chạy với bố cục hoặc cấu hình cũ. Chạy \`bflow down\` rồi \`bflow up\` để chuyển sang phiên Director. (${message})`, { cause: error });
+}
 
 /** The persistent P19 host owns its scheduler, authenticated ingress and stores. */
 export interface LifecycleHost {
@@ -101,6 +109,10 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
     }
   };
 
+  /** The pane runs `bflow progress --follow` through the pinned absolute entrypoint, never a PATH lookup. */
+  const directorProgressCommand = async (composition: EnvironmentCompositionInput): Promise<string[]> =>
+    composition.progressCommand ? [...composition.progressCommand] : [...await resolveBflowCommand(), "progress", "--follow"];
+
   const openForStartup = (): Promise<LifecycleHost> => {
     return activeHost ??= (async () => {
       const runtime = await loadRuntime();
@@ -112,6 +124,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         warn: message => process.stderr.write(`Warning: ${message}\n`) });
       const executionResolution = await loadHostExecutionResolution(input, platform);
       await input.validateExecutionPlan?.(executionResolution.plan);
+      const progressCommand = await directorProgressCommand(input);
       const impactIndex = await resolveImpactIndex();
       return runtime.ensureAgenticHost({
         repositoryPath: input.repository.root,
@@ -123,19 +136,22 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         mutationChecks,
         appChecks,
         platform,
+        layout: "director",
+        progressCommand,
         executionResolution,
         ...(impactIndex ? { impactIndex } : {}),
         policy: {
           sdd: input.config.environment.sdd,
           tdd: input.config.environment.tdd,
           verification: input.config.environment.verification,
+          issueQueue: input.config.environment.issueQueue,
           fastPath: input.config.environment.fastPath,
           concurrency: input.config.environment.concurrency
         }
       });
     })().catch(error => {
       activeHost = undefined;
-      throw error;
+      throw translateHostLayoutError(error);
     });
   };
 
@@ -169,18 +185,21 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         behavioralCommands,
         mutationChecks,
         appChecks,
+        layout: "director",
+        progressCommand: await directorProgressCommand(input),
         executionResolution: await loadHostExecutionResolution(input),
         policy: {
           sdd: input.config.environment.sdd,
           tdd: input.config.environment.tdd,
           verification: input.config.environment.verification,
+          issueQueue: input.config.environment.issueQueue,
           fastPath: input.config.environment.fastPath,
           concurrency: input.config.environment.concurrency
         }
       });
     })().catch(error => {
       activeHost = undefined;
-      throw error;
+      throw translateHostLayoutError(error);
     });
     return activeHost;
   };

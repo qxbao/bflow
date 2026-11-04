@@ -22,7 +22,7 @@ import {
 } from "../src/index.js";
 
 const now = "2026-10-17T00:00:00.000Z";
-const roles = ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"] as const;
+const roles = ["planner", "architect", "specifier", "reviewer", "qa"] as const;
 // These lifecycle startup/shutdown scenarios acquire EnvironmentLifecycle's Linux flock guard.
 const linuxDescribe = describe.skipIf(process.platform !== "linux");
 
@@ -131,7 +131,7 @@ function createMockManager(
   let current: SessionManifest | null = null;
   const create = (overrides?: Partial<SessionManifest>) =>
     SessionManifestSchema.parse({
-      schemaVersion: 2,
+      schemaVersion: 3,
       sessionId: repository.sessionName,
       projectName: "test-repo",
       workspaceRoot: repository.root,
@@ -159,7 +159,7 @@ function createMockManager(
           agentId: `agent-${i}`,
           workspaceId: "w1",
           tabId: "w1:t1",
-          paneId: `w1:p${i}`,
+          paneId: `w1:p${i + 1}`,
           provider: "anthropic",
           agentKind: "claude",
           cwd: repository.root,
@@ -170,7 +170,8 @@ function createMockManager(
           metadata: meta
         };
       }),
-      attachTarget: { role: "conversation", paneId: "w1:p0" },
+      progressPane: { tabId: "w1:t0", paneId: "w1:p0", command: ["/usr/bin/node", "/x/bin.js", "progress", "--follow"], phase: "running", restarts: [] },
+      attachTarget: { role: "progress", tabId: "w1:t0", paneId: "w1:p0" },
       createdAt: now,
       updatedAt: now,
       ...overrides

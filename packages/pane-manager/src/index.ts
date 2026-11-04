@@ -9,3 +9,11 @@ export {
   NON_USER_FACING_AUTONOMOUS_POLICY,
   STRUCTURED_RESULT_REQUIRED_FIELDS
 } from "./role-prompts.js";
+export {
+  launchProgressPane,
+  ensureProgressPane,
+  progressRestartAllowed,
+  progressShellCommand,
+  PROGRESS_TAB_LABEL,
+  type ProgressPaneDeps
+} from "./progress-pane.js";

@@ -1,0 +1,248 @@
+{
+  "schemaVersion": 2,
+  "sessionId": "bf-fixture-session",
+  "projectName": "sample-project",
+  "workspaceRoot": "/workspace/sample-project",
+  "herdrWorkspaceId": "w1",
+  "herdrTabId": "w1:t1",
+  "status": "down",
+  "conversationSessionId": "conv-bf-fixture-session",
+  "activeRunIds": [],
+  "panes": [
+    {
+      "schemaVersion": 2,
+      "bindingId": "binding-chat-w1:p9",
+      "sessionId": "bf-fixture-session",
+      "role": "conversation",
+      "paneGroup": "conversation",
+      "agentId": "chat",
+      "workspaceId": "w1",
+      "tabId": "w1:t1",
+      "paneId": "w1:p9",
+      "terminalId": "term_fixture",
+      "session": {
+        "source": "herdr:claude",
+        "kind": "id",
+        "value": "00000000-0000-4000-8000-000000000000"
+      },
+      "provider": "claude",
+      "agentKind": "claude",
+      "cwd": "/workspace/sample-project",
+      "isolationMode": "dedicated_pane",
+      "readOnlyWorkspace": true,
+      "permanent": true,
+      "transportState": "cancelled",
+      "boundAt": "2026-10-29T16:13:28.237Z",
+      "lastHeartbeatAt": "2026-10-29T16:17:48.525Z",
+      "metadata": {
+        "topologyRole": "chat",
+        "launchId": "launch-claude-conversation-f92c2d856814",
+        "launchFingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+        "promptInitialized": true,
+        "promptSource": "/workspace/sample-project/.bflow/state/platform/bf-fixture-session/gen-18/roles/conversation/conversation.system-prompt.txt"
+      }
+    },
+    {
+      "schemaVersion": 2,
+      "bindingId": "binding-coordinator-w1:pA",
+      "sessionId": "bf-fixture-session",
+      "role": "coordinator",
+      "paneGroup": "coordination",
+      "agentId": "coordinator",
+      "workspaceId": "w1",
+      "tabId": "w1:t2",
+      "paneId": "w1:pA",
+      "terminalId": "term_fixture",
+      "session": {
+        "source": "herdr:claude",
+        "kind": "id",
+        "value": "00000000-0000-4000-8000-000000000000"
+      },
+      "provider": "claude",
+      "agentKind": "claude",
+      "cwd": "/workspace/sample-project",
+      "isolationMode": "dedicated_pane",
+      "readOnlyWorkspace": true,
+      "permanent": true,
+      "transportState": "cancelled",
+      "boundAt": "2026-10-29T16:13:28.338Z",
+      "lastHeartbeatAt": "2026-10-29T16:17:48.525Z",
+      "metadata": {
+        "topologyRole": "coordinator",
+        "launchId": "launch-claude-coordinator-e145eefd46e4",
+        "launchFingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+        "promptInitialized": true,
+        "promptSource": "/workspace/sample-project/.bflow/state/platform/bf-fixture-session/gen-18/roles/coordinator/coordinator.system-prompt.txt"
+      }
+    },
+    {
+      "schemaVersion": 2,
+      "bindingId": "binding-planner-w1:pB",
+      "sessionId": "bf-fixture-session",
+      "role": "planner",
+      "paneGroup": "coordination",
+      "agentId": "planner",
+      "workspaceId": "w1",
+      "tabId": "w1:t2",
+      "paneId": "w1:pB",
+      "terminalId": "term_fixture",
+      "session": {
+        "source": "herdr:claude",
+        "kind": "id",
+        "value": "00000000-0000-4000-8000-000000000000"
+      },
+      "provider": "claude",
+      "agentKind": "claude",
+      "cwd": "/workspace/sample-project",
+      "isolationMode": "dedicated_pane",
+      "readOnlyWorkspace": true,
+      "permanent": true,
+      "transportState": "cancelled",
+      "boundAt": "2026-10-29T16:13:28.024Z",
+      "lastHeartbeatAt": "2026-10-29T16:17:48.525Z",
+      "metadata": {
+        "topologyRole": "planner",
+        "launchId": "launch-claude-planner-e8619c054d55",
+        "launchFingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "schemaVersion": 2,
+      "bindingId": "binding-architect-w1:pC",
+      "sessionId": "bf-fixture-session",
+      "role": "architect",
+      "paneGroup": "coordination",
+      "agentId": "architect",
+      "workspaceId": "w1",
+      "tabId": "w1:t2",
+      "paneId": "w1:pC",
+      "terminalId": "term_fixture",
+      "session": {
+        "source": "herdr:claude",
+        "kind": "id",
+        "value": "00000000-0000-4000-8000-000000000000"
+      },
+      "provider": "claude",
+      "agentKind": "claude",
+      "cwd": "/workspace/sample-project",
+      "isolationMode": "dedicated_pane",
+      "readOnlyWorkspace": true,
+      "permanent": true,
+      "transportState": "cancelled",
+      "boundAt": "2026-10-29T16:13:28.132Z",
+      "lastHeartbeatAt": "2026-10-29T16:17:48.525Z",
+      "metadata": {
+        "topologyRole": "architect",
+        "launchId": "launch-claude-architect-e50c9d70391c",
+        "launchFingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+        "nativeSessionPending": false
+      }
+    },
+    {
+      "schemaVersion": 2,
+      "bindingId": "binding-analyst-w1:pD",
+      "sessionId": "bf-fixture-session",
+      "role": "specifier",
+      "paneGroup": "coordination",
+      "agentId": "analyst",
+      "workspaceId": "w1",
+      "tabId": "w1:t2",
+      "paneId": "w1:pD",
+      "terminalId": "term_fixture",
+      "session": {
+        "source": "herdr:claude",
+        "kind": "id",
+        "value": "00000000-0000-4000-8000-000000000000"
+      },
+      "provider": "claude",
+      "agentKind": "claude",
+      "cwd": "/workspace/sample-project",
+      "isolationMode": "dedicated_pane",
+      "readOnlyWorkspace": true,
+      "permanent": true,
+      "transportState": "cancelled",
+      "boundAt": "2026-10-29T16:13:32.764Z",
+      "lastHeartbeatAt": "2026-10-29T16:17:48.525Z",
+      "metadata": {
+        "topologyRole": "analyst",
+        "launchId": "launch-claude-specifier-302ebe240e72",
+        "launchFingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "schemaVersion": 2,
+      "bindingId": "binding-reviewer-w1:pE",
+      "sessionId": "bf-fixture-session",
+      "role": "reviewer",
+      "paneGroup": "verification",
+      "agentId": "reviewer",
+      "workspaceId": "w1",
+      "tabId": "w1:t3",
+      "paneId": "w1:pE",
+      "terminalId": "term_fixture",
+      "session": {
+        "source": "herdr:claude",
+        "kind": "id",
+        "value": "00000000-0000-4000-8000-000000000000"
+      },
+      "provider": "claude",
+      "agentKind": "claude",
+      "cwd": "/workspace/sample-project",
+      "isolationMode": "dedicated_pane",
+      "readOnlyWorkspace": true,
+      "permanent": true,
+      "transportState": "cancelled",
+      "boundAt": "2026-10-29T16:13:32.931Z",
+      "lastHeartbeatAt": "2026-10-29T16:17:48.525Z",
+      "metadata": {
+        "topologyRole": "reviewer",
+        "launchId": "launch-claude-reviewer-fbd3159e0ea9",
+        "launchFingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "schemaVersion": 2,
+      "bindingId": "binding-qa-verifier-w1:pF",
+      "sessionId": "bf-fixture-session",
+      "role": "qa",
+      "paneGroup": "verification",
+      "agentId": "qa-verifier",
+      "workspaceId": "w1",
+      "tabId": "w1:t3",
+      "paneId": "w1:pF",
+      "terminalId": "term_fixture",
+      "session": {
+        "source": "herdr:claude",
+        "kind": "id",
+        "value": "00000000-0000-4000-8000-000000000000"
+      },
+      "provider": "claude",
+      "agentKind": "claude",
+      "cwd": "/workspace/sample-project",
+      "isolationMode": "dedicated_pane",
+      "readOnlyWorkspace": true,
+      "permanent": true,
+      "transportState": "cancelled",
+      "boundAt": "2026-10-29T16:13:33.023Z",
+      "lastHeartbeatAt": "2026-10-29T16:17:48.525Z",
+      "metadata": {
+        "topologyRole": "qa-verifier",
+        "launchId": "launch-claude-qa-846178fc2623",
+        "launchFingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  ],
+  "attachTarget": {
+    "role": "conversation",
+    "paneId": "w1:p9",
+    "terminalId": "term_fixture"
+  },
+  "createdAt": "2026-10-19T16:50:02.033Z",
+  "updatedAt": "2026-10-29T16:17:48.525Z",
+  "metadata": {
+    "startupPending": false,
+    "panePresentationVersion": 1,
+    "repositoryId": "0000000000000000000000000000000000000000000000000000000000000000",
+    "sessionName": "bf-fixture-session"
+  }
+}

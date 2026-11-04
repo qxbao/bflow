@@ -18,6 +18,7 @@ import {
   StoredRunSchema, type RuntimeService, type SessionManifest
 } from "@bflow/contracts";
 import { callHost } from "./host-protocol.js";
+import { DIRECTOR_LIMITS, type JsonValue } from "@bflow/contracts";
 import { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { AgenticJournal, digest, record, syncFileHandle, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
@@ -43,11 +44,27 @@ export interface AgenticHostOptions {
   appChecks?: readonly AppCheckSuite[];
   /** P30 platform configuration; absent keeps the legacy Claude-native host behavior. */
   platform?: AgenticHostPlatformOptions;
+  /** Session layout (ADR 0009): `director` hosts no Conversation/Coordinator role and needs a v3 manifest. Absent means `legacy_v2`. */
+  layout?: "legacy_v2" | "director";
+  /** Director layout: argv of the non-LLM progress viewer pane (`bflow progress --follow`). */
+  progressCommand?: readonly string[];
   policy?: { sdd: { minimumLevel: "lightweight" | "full"; approvalRequired: boolean };
     tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human"; regressionScope?: RegressionScope; reviewTimeoutMs?: number };
+    issueQueue?: { autoPark: boolean; maxAutoResumesBeforePark: number };
     fastPath?: { mode: FastPathMode };
     concurrency: { maxConcurrency: number } };
   impactIndex?: { executable: string; home: string; storageLockPath: string };
+}
+
+/** Layout options are owner configuration: a malformed value or a platform that disagrees with the layout is refused. */
+export function assertHostLayoutOptions(value: { layout?: unknown; progressCommand?: unknown; platform?: unknown }): void {
+  if (value.layout !== undefined && value.layout !== "legacy_v2" && value.layout !== "director") throw new Error("Invalid host layout");
+  if (value.progressCommand !== undefined && (!Array.isArray(value.progressCommand) || value.progressCommand.length < 1 || value.progressCommand.length > 16 ||
+      value.progressCommand.some(item => typeof item !== "string" || item.length === 0 || item.length > 4096 || item.includes("\0"))))
+    throw new Error("Invalid host progress command");
+  const layout = value.layout ?? "legacy_v2";
+  const platform = value.platform as { layout?: unknown } | undefined;
+  if (platform !== undefined && (platform.layout ?? "legacy_v2") !== layout) throw new Error("Host platform layout does not match host layout");
 }
 
 export function effectiveRegressionScope(policy: AgenticHostOptions["policy"] | undefined, persisted: boolean): RegressionScope {
@@ -79,6 +96,7 @@ function compatiblePersistedPolicy(
       : requested.fastPath?.mode === "auto"
         ? { fastPath: { mode: "auto" } }
         : {}),
+    ...((persisted.issueQueue ?? requested.issueQueue) ? { issueQueue: persisted.issueQueue ?? requested.issueQueue! } : {}),
     concurrency: persisted.concurrency
   };
   return digest(normalizedPersisted) === digest(requested);
@@ -119,6 +137,7 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
   parseMutationChecks(value.mutationChecks, parseBehavioralCommands(value.behavioralCommands));
   parseAppChecks(value.appChecks);
   if (value.platform !== undefined) value.platform = AgenticHostPlatformOptionsSchema.parse(value.platform);
+  assertHostLayoutOptions(value);
   if (value.executionResolution !== undefined) value.executionResolution = ExecutionResolutionSourcesSchema.parse(value.executionResolution);
   if (value.executionSourceDigests !== undefined) {
     const sources = record(value.executionSourceDigests);
@@ -132,6 +151,12 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
         (verification.regressionScope !== undefined && !["affected", "full", "mapped_only"].includes(String(verification.regressionScope))) ||
         (verification.reviewTimeoutMs !== undefined && (!Number.isSafeInteger(verification.reviewTimeoutMs) || Number(verification.reviewTimeoutMs) < 60_000 || Number(verification.reviewTimeoutMs) > 3_600_000)) ||
         !Number.isInteger(concurrency.maxConcurrency) || Number(concurrency.maxConcurrency) < 1 || Number(concurrency.maxConcurrency) > 32) throw new Error("Invalid persisted host policy");
+    if (policy.issueQueue !== undefined) {
+      const queue = record(policy.issueQueue);
+      if (Object.keys(queue).some(key => !["autoPark", "maxAutoResumesBeforePark"].includes(key)) || typeof queue.autoPark !== "boolean" ||
+          !Number.isInteger(queue.maxAutoResumesBeforePark) || Number(queue.maxAutoResumesBeforePark) < 0 || Number(queue.maxAutoResumesBeforePark) > 3)
+        throw new Error("issueQueue.maxAutoResumesBeforePark phải trong khoảng 0–3");
+    }
     if (policy.fastPath !== undefined) {
       if (policy.fastPath === null || typeof policy.fastPath !== "object" || Array.isArray(policy.fastPath)) throw new Error("Invalid persisted host policy");
       const fastPath = policy.fastPath as Record<string, unknown>;
@@ -177,6 +202,8 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.appChecks !== undefined ? { appChecks: persisted.appChecks } : {}),
     ...(persisted.policy !== undefined ? { policy: persisted.policy } : {}),
     ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}),
+    ...(persisted.layout !== undefined ? { layout: persisted.layout } : {}),
+    ...(persisted.progressCommand !== undefined ? { progressCommand: persisted.progressCommand } : {}),
     ...(persisted.impactIndex !== undefined ? { impactIndex: persisted.impactIndex } : {}),
     ...(persisted.executionResolution !== undefined ? { executionResolution: persisted.executionResolution } : {}) }, true);
 }
@@ -191,6 +218,36 @@ export async function queryAgenticHostInteraction(options: { repositoryPath: str
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
     throw new Error("Foreign host configuration");
   return callHost(configuration.socketPath, configuration.token, method, input, 5000);
+}
+async function locateDirectorHost(options: { repositoryPath: string; sessionId: string }) {
+  const repositoryPath = await realpath(options.repositoryPath);
+  if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
+  const root = findPrivateRuntimeStateDirectory(repositoryPath);
+  if (!root) throw new Error("Host unavailable");
+  const directory = resolve(root, "host", options.sessionId);
+  const configuration = await readHostConfiguration(join(directory, "host.json")).catch(() => { throw new Error("Host unavailable"); });
+  if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
+    throw new Error("Foreign host configuration");
+  return configuration;
+}
+/** Owner-token Director methods on an already running host; never starts a host. */
+export async function callDirectorOwnerHost(options: { repositoryPath: string; sessionId: string },
+  method: "director_register" | "director_revoke" | "director_progress" | "director_hook_note" | "director_issues" | "director_issue" | "director_issue_status" | "director_mailbox",
+  input: unknown, timeoutMs = 10_000): Promise<unknown> {
+  const configuration = await locateDirectorHost(options);
+  return callHost(configuration.socketPath, configuration.token, method, input, timeoutMs);
+}
+/** D-DIR-02: owner-token `bflow approve <#n>` on an already running host; never starts a host. */
+export async function callHumanDecisionHost(options: { repositoryPath: string; sessionId: string }, input: unknown, timeoutMs = 30_000): Promise<unknown> {
+  const configuration = await locateDirectorHost(options);
+  return callHost(configuration.socketPath, configuration.token, "human_decision_cli", input, timeoutMs);
+}
+/** Director-token tool call; the long `director_wait` gets its maximum wait plus slack. */
+export async function callDirectorTool(options: { repositoryPath: string; sessionId: string }, token: string, name: string,
+  args: Record<string, JsonValue>): Promise<unknown> {
+  const configuration = await locateDirectorHost(options);
+  return callHost(configuration.socketPath, token, "director_call", { name, arguments: args },
+    name === "director_wait" ? DIRECTOR_LIMITS.waitMaxMs + 30_000 : 600_000);
 }
 /** Read a scoped artifact from an already existing host; never opens stores or starts a host locally. */
 export async function readHostInteractionArtifact(options: { repositoryPath: string; sessionId: string }, input: unknown) {
@@ -340,6 +397,9 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
     throw new Error("Persisted real-app checks differ from owner configuration; quiesce and reconcile before changing verification authority");
   // Platform, policy and impactIndex changes are only admissible while no host process owns the endpoint.
   const requestedPlatform = options.platform === undefined ? undefined : AgenticHostPlatformOptionsSchema.parse(options.platform);
+  assertHostLayoutOptions({ ...options, ...(requestedPlatform ? { platform: requestedPlatform } : {}) });
+  const layoutChanged = (configuration.layout ?? "legacy_v2") !== (options.layout ?? "legacy_v2") ||
+    digest(configuration.progressCommand ?? null) !== digest(options.progressCommand ?? null);
   const platformChanged = digest(configuration.platform ?? null) !== digest(requestedPlatform ?? null);
   const policyChanged = options.policy !== undefined && digest(configuration.policy ?? null) !== digest(options.policy);
   const impactIndexChanged = options.impactIndex !== undefined && digest(configuration.impactIndex ?? null) !== digest(options.impactIndex);
@@ -374,6 +434,7 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
     throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
   if (alive && platformChanged) throw new Error("Persisted host platform differs; run bflow down before changing providers/roles");
   if (alive && sourceSnapshotChanged) throw new Error("Persisted host execution sources differ; quiesce the existing host before re-resolution");
+  if (alive && layoutChanged) throw new Error("Persisted host layout differs; run bflow down before changing the session layout");
   if (!alive) {
     try {
       await lstat(configuration.socketPath);
@@ -393,10 +454,11 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
       await refreshEmptyStartupSources(configuration, configPath, options.executionResolution, startupReader);
       configuration = await readHostConfiguration(configPath);
     }
-    if (platformChanged || policyChanged || impactIndexChanged) {
+    if (platformChanged || policyChanged || impactIndexChanged || layoutChanged) {
       await rewritePersistedPlatform(configPath, requestedPlatform, {
         ...(options.policy !== undefined ? { policy: options.policy } : {}),
-        ...(options.impactIndex !== undefined ? { impactIndex: options.impactIndex } : {})
+        ...(options.impactIndex !== undefined ? { impactIndex: options.impactIndex } : {}),
+        ...(layoutChanged ? { layout: options.layout, progressCommand: options.progressCommand } : {})
       });
       configuration = await readHostConfiguration(configPath);
     }

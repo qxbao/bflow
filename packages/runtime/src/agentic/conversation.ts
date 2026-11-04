@@ -27,6 +27,24 @@ export interface AgenticConversationHost {
   flush(): Promise<unknown>;
   /** Registers Runtime-pending approvals Conversation missed; read-only toward Runtime, never decides anything. */
   reconcileApprovals(): Promise<unknown>;
+  /**
+   * Director-originated delegation. Builds the DelegationRequest with Conversation's own builder and hands it to the same
+   * durable bridge (Runtime admission included). Every id derives from `key`, so a replay is the identical message.
+   * Resolves with an OperationResult; an admission refusal is a validation error carrying Runtime's reason.
+   */
+  delegateDirectorWork(input: DirectorWorkDelegation): Promise<OperationResult<{ runId: string; correlationId: string }>>;
+  /**
+   * D-DIR-02: an owner-authenticated human decision (`bflow approve <#n>`). Same admission as a Web `answer_decision`:
+   * a closed (expired/superseded) or differently settled approval and a stale request are refused before `record` runs;
+   * `record` persists the trusted human receipt before the decision is queued. An identical retry queues nothing new.
+   */
+  receiveOwnerDecision(decision: unknown, record: (decision: import("@bflow/contracts").ApprovalDecision) => Promise<void>):
+    Promise<OperationResult<{ queued: boolean }>>;
+}
+export interface DirectorWorkDelegation {
+  key: string; title: string; objective: string; kind: "feature" | "bugfix" | "refactor" | "spike";
+  acceptanceCriteria: readonly { description: string; verificationMethod: string }[];
+  sddLevel: "lightweight" | "full"; priority: "low" | "normal" | "high" | "critical"; requestedAt: string;
 }
 export interface StructuredConversationCallbacks {
   authorize(command: WebCommand, principal: WebPrincipal): Promise<boolean>;
@@ -45,9 +63,20 @@ export async function createAgenticConversationHost(options: {
   noticeAliases?: () => Promise<{ approvalShortIds: Record<string, string>; runShortIds: Record<string, string> }>;
 }): Promise<AgenticConversationHost> {
   const manifest = SessionManifestSchema.parse(options.manifest);
+  // Director session (manifest v3): the human gateway runs in-process without any Conversation or Coordinator pane.
+  const director = manifest.schemaVersion === 3;
   const conversation = manifest.panes.find(pane => pane.role === "conversation");
   const coordinator = manifest.panes.find(pane => pane.role === "coordinator");
-  if (!conversation || !coordinator) throw new Error("Conversation and Coordinator panes are required");
+  if (!director && (!conversation || !coordinator)) throw new Error("Conversation and Coordinator panes are required");
+  /** Envelope endpoints built by this gateway; a Director session carries roles only, never agent or pane ids. */
+  const conversationEndpoint = director ? { role: "conversation" as const }
+    : { role: "conversation" as const, agent_id: conversation!.agentId, pane_id: conversation!.paneId };
+  const coordinatorEndpoint = director ? { role: "coordinator" as const }
+    : { role: "coordinator" as const, agent_id: coordinator!.agentId, pane_id: coordinator!.paneId };
+  // The exported ConversationSession contract requires a pane id. In a Director session these two values are the Director
+  // principal marker persisted in the session, not a pane or an agent: no pane exists and nothing may address it.
+  const DIRECTOR_PRINCIPAL_AGENT_ID = "director", DIRECTOR_PRINCIPAL_PANE_MARKER = "director:no-pane";
+  const DIRECTOR_WEB_REFUSAL = "Phiên Director: hãy gửi yêu cầu cho Director trong CLI (chạy /bflow-start).";
   // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
   const module: any = await import("@bflow/conversation");
   const runtime = options.runtime;
@@ -149,9 +178,7 @@ export async function createAgenticConversationHost(options: {
     const correlationId = textField(record(run.delegation).correlationId);
     return { ok: true, value: RoleMessageSchema.parse({ schema_version: 2, message_id: messageId,
       correlation_id: correlationId, run_id: decision.runId,
-      sender: { role: "conversation", agent_id: conversation!.agentId, pane_id: conversation!.paneId },
-      recipient: { role: "coordinator", agent_id: coordinator!.agentId, pane_id: coordinator!.paneId },
-      type: "approval.decision", payload: json(decision), artifact_references: decision.feedbackArtifacts,
+      sender: conversationEndpoint, recipient: coordinatorEndpoint, type: "approval.decision", payload: json(decision), artifact_references: decision.feedbackArtifacts,
       occurred_at: decision.decidedAt, idempotency_key: decision.idempotencyKey }) };
   };
   const enqueueDecision = async (input: unknown): Promise<OperationResult<void>> => {
@@ -167,8 +194,7 @@ export async function createAgenticConversationHost(options: {
       // Cancellation is an existing-run control; Runtime validates its exact target and session.
       if (request.metadata?.action !== "cancel") await options.extensions?.admit({ ...request, runId });
       return enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: request.messageId, correlation_id: request.correlationId,
-        run_id: runId, sender: { role: "conversation", agent_id: conversation!.agentId, pane_id: conversation!.paneId },
-        recipient: { role: "coordinator", agent_id: coordinator!.agentId, pane_id: coordinator!.paneId }, type: "delegation.request",
+        run_id: runId, sender: conversationEndpoint, recipient: coordinatorEndpoint, type: "delegation.request",
         payload: json({ ...request, runId }), artifact_references: request.inputArtifacts,
         occurred_at: request.requestedAt, idempotency_key: request.idempotencyKey }));
     }
@@ -192,13 +218,14 @@ export async function createAgenticConversationHost(options: {
     }
   }
   const bridge = new DurableBridge({ transport: runtime.ports.transport, sessionId: manifest.conversationSessionId,
-    conversationAgentId: conversation.agentId, conversationPaneId: conversation.paneId,
-    coordinatorTarget: { transport: "herdr", agentId: coordinator.agentId, paneId: coordinator.paneId,
-      workspaceId: coordinator.workspaceId, tabId: coordinator.tabId } });
+    // Director: principal marker only. Every envelope this bridge sends is overridden above, and its transport targets are never used.
+    conversationAgentId: conversation?.agentId ?? DIRECTOR_PRINCIPAL_AGENT_ID, conversationPaneId: conversation?.paneId ?? DIRECTOR_PRINCIPAL_PANE_MARKER,
+    coordinatorTarget: { transport: "herdr", agentId: coordinator?.agentId ?? DIRECTOR_PRINCIPAL_AGENT_ID, paneId: coordinator?.paneId ?? DIRECTOR_PRINCIPAL_PANE_MARKER,
+      workspaceId: coordinator?.workspaceId ?? manifest.herdrWorkspaceId, tabId: coordinator?.tabId ?? manifest.herdrTabId } });
   const contextStore = new module.FileConversationContextStore(options.contextDirectory);
   let structured: StructuredConversationCallbacks | undefined;
   const gateway = new module.ConversationGateway({ sessionId: manifest.conversationSessionId, herdrSessionId: manifest.sessionId,
-    conversationAgentId: conversation.agentId, paneId: conversation.paneId, bridge,
+    conversationAgentId: conversation?.agentId ?? DIRECTOR_PRINCIPAL_AGENT_ID, paneId: conversation?.paneId ?? DIRECTOR_PRINCIPAL_PANE_MARKER, bridge,
     contextStore, now: () => structured?.now() ?? new Date().toISOString(),
     authorizeStructuredInteraction: async (command: WebCommand, principal: WebPrincipal) => structured ? structured.authorize(command, principal) : false,
     onStructuredApproval: async (decision: unknown, command: WebCommand, principal: WebPrincipal) => {
@@ -215,18 +242,18 @@ export async function createAgenticConversationHost(options: {
     } });
   const initialized = await gateway.initializeOrRecoverSession();
   if (!initialized.ok) throw new Error(initialized.error.message);
-  for (const decision of options.recoveredHumanDecisions ?? []) {
-    const result = await enqueueDecision(decision);
-    if (!result.ok) throw new Error(result.error.message);
-    // A crash can happen after the trusted receipt/outbox write but before P14 saves its turn.
-    // Restore governance state without inventing a user message or resubmitting the decision.
+  /**
+   * Records a trusted human decision in the persisted Gateway context exactly like the Web path does after its admission:
+   * the approval leaves pending and the decision is kept. Never invents a user message; the caller refreshes the Gateway.
+   */
+  const settleContextDecision = async (decision: import("@bflow/contracts").ApprovalDecision): Promise<void> => {
     const loaded = await contextStore.load(manifest.conversationSessionId);
     if (!loaded.ok) throw new Error(loaded.error.message);
     if (!loaded.value) throw new Error("Conversation context disappeared during approval recovery");
     const snapshot = loaded.value, cached = snapshot.approvalDecisions[decision.approvalId];
     if (cached && digest(cached) !== digest(decision)) throw new Error("Cached decision conflicts with trusted human receipt");
     const pending = snapshot.pendingApprovals[decision.approvalId];
-    if (!pending) continue;
+    if (!pending) return;
     if (pending.runId !== decision.runId || pending.sessionId !== decision.sessionId || pending.revision !== decision.revision ||
         pending.generation !== decision.generation || digest(pending.target) !== digest(decision.target)) throw new Error("Cached approval request conflicts with trusted human receipt");
     const pendingApprovals = { ...snapshot.pendingApprovals }; delete pendingApprovals[decision.approvalId];
@@ -239,6 +266,13 @@ export async function createAgenticConversationHost(options: {
       session: { ...snapshot.session, activeApprovalIds,
         status: activeApprovalIds.length ? "awaiting_user_approval" : "reporting_progress" } }, decision.approvalId, new Date().toISOString()));
     if (!saved.ok) throw new Error(saved.error.message);
+  };
+  for (const decision of options.recoveredHumanDecisions ?? []) {
+    const result = await enqueueDecision(decision);
+    if (!result.ok) throw new Error(result.error.message);
+    // A crash can happen after the trusted receipt/outbox write but before P14 saves its turn.
+    // Restore governance state without inventing a user message or resubmitting the decision.
+    await settleContextDecision(decision);
   }
   if (options.recoveredHumanDecisions?.length) {
     const refreshed = await gateway.initializeOrRecoverSession();
@@ -353,6 +387,11 @@ export async function createAgenticConversationHost(options: {
     configureStructuredInteraction(callbacks) { structured = callbacks; },
     handleStructuredInteraction(command, principal) {
       return exclusive(async () => {
+        if (director) {
+          // Requests come from the Director's own CLI session, never from the Web form (R-B2-7). Refused before any bridge call.
+          const kind = (command as { kind?: unknown } | null)?.kind;
+          if (kind === "create_request" || kind === "revise_request" || kind === "answer_clarification") return validationError(DIRECTOR_WEB_REFUSAL);
+        }
         await reconcileApprovals();
         return gateway.handleStructuredInteraction(WebCommandSchema.parse(command), WebPrincipalSchema.parse(principal));
       });
@@ -360,6 +399,7 @@ export async function createAgenticConversationHost(options: {
     readStructuredInteraction: commandId => exclusive(async () => gateway.readStructuredInteraction(commandId)),
     reconcileApprovals: () => exclusive(reconcileApprovals),
     handleUserTurn(input) {
+      if (director) return Promise.reject(new Error("Director session has no Conversation pane"));
       return exclusive(async () => {
         await reconcileApprovals().catch(() => undefined);
         return withWarnings(await gateway.handleUserTurn(input));
@@ -472,7 +512,53 @@ export async function createAgenticConversationHost(options: {
       });
     },
     setBusy: busy => exclusive(() => gateway.setAgentBusyState(busy)),
-    flush: () => exclusive(() => gateway.flushPendingInboundQueue())
+    flush: () => exclusive(() => gateway.flushPendingInboundQueue()),
+    receiveOwnerDecision(input, recordReceipt) {
+      return exclusive(async () => {
+        const decision = ApprovalDecisionSchema.parse(input);
+        await reconcileApprovals().catch(() => undefined);
+        const context = gateway.getContextSnapshot();
+        const settled = context.approvalDecisions[decision.approvalId];
+        if (settled && digest(settled) !== digest(decision)) return conflictError("Approval is already settled by another decision");
+        const closed = context.closedApprovals?.[decision.approvalId];
+        if (closed) return conflictError(String(closed.reason));
+        const prepared = await prepareDecisionEnvelope(decision);
+        if (!prepared.ok) return prepared;
+        await recordReceipt(decision);
+        if (prepared.value) {
+          const sent = await enqueue(prepared.value);
+          if (!sent.ok) return sent;
+        }
+        // Reloading the Gateway from its store resets its in-memory busy/transport observation; restore it afterwards.
+        const before = gateway.getContextSnapshot();
+        await settleContextDecision(decision);
+        const refreshed = await gateway.initializeOrRecoverSession();
+        if (!refreshed.ok) return refreshed;
+        if (before.agentBusy) {
+          const restored = await gateway.setAgentBusyState(true, before.transportState);
+          if (!restored.ok) return restored;
+        }
+        return { ok: true, value: { queued: prepared.value !== undefined } };
+      });
+    },
+    delegateDirectorWork(input) {
+      if (director) return Promise.reject(new Error("Use admitDirectorWork in a Director session"));
+      return exclusive(async () => {
+        const hash = digest(input.key).replace(/[^A-Za-z0-9]/g, "").slice(0, 24);
+        const correlationId = `director-${hash}`, runId = `run-${correlationId}`;
+        const built = module.buildDelegationRequest({ sessionId: manifest.conversationSessionId, correlationId, runId,
+          messageId: `msg-director-${hash}`, previousDelegationId: `del-director-${hash}`, idempotencyKey: `idemp-director-${hash}`,
+          requestedAt: input.requestedAt, revision: 1,
+          draft: { title: input.title, objective: input.objective, kind: input.kind, sddLevel: input.sddLevel, priority: input.priority,
+            scopeDefined: true, isLargeTask: false, affectedPaths: [], acceptanceCriteriaDescriptions: [],
+            acceptanceCriteria: input.acceptanceCriteria, isRequirementChange: false } });
+        if (!built.ok) return built as OperationResult<never>;
+        const delegation = DelegationRequestSchema.parse({ ...built.value, metadata: { ...built.value.metadata, origin: "director" } });
+        const sent: OperationResult<void> = await bridge.handOffToCoordinator(delegation);
+        if (!sent.ok) return sent as OperationResult<never>;
+        return { ok: true, value: { runId, correlationId } };
+      });
+    }
   };
 }
 

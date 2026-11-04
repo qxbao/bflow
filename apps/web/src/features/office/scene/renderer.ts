@@ -34,11 +34,13 @@ export interface OfficeRenderer {
   destroy(): void;
 }
 
-/** Text the DOM draws over the canvas. `agent` is the name tag, `bubble` the message box over a working character, `sleep` the Zzz over a sleeping one; all anchored bottom-centre. */
+/** Text the DOM draws over the canvas. `agent` is the name tag, `bubble` the message box over a working character, `sleep` the rising z letters over a sleeping one's head; all anchored bottom-centre. */
 export interface ProjectedLabel { id: string; kind: 'agent' | 'bubble' | 'sleep'; text: string; x: number; y: number }
 
 const DRAG_THRESHOLD = 4;
 const BUBBLE_W = 224, BUBBLE_H = 72;
+/** World height the sleep z letters start from: just over a seated character's head (the name tag hangs at 2.15). */
+const SLEEP_Y = 1.3;
 const EXPOSURE_OPEN = 1, EXPOSURE_CLOSED = 0.6;
 const MOVING_MS = 1000 / 30;
 const IDLE_MS = 1000 / 8;
@@ -54,33 +56,53 @@ export async function createOfficeRenderer(host: HTMLElement, onSelect: (target:
   if (signal?.aborted) throw cancelled();
   const lease = await acquireModels({ character: assetUrl(OFFICE_ASSET_PATHS.character), furniture: assetUrl(OFFICE_ASSET_PATHS.furniture) }, signal);
   let gl: WebGLRenderer | undefined;
+  let built: ReturnType<typeof build> | undefined;
   try {
     if (signal?.aborted) throw cancelled();
     gl = new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     // Each stage below runs in its own task, so input is not starved while the scene comes up.
     await yieldToEventLoop();
     if (signal?.aborted) throw cancelled();
-    const built = build(gl, lease, host, onSelect, onContextLost);
-    try {
-      await yieldToEventLoop();
-      if (signal?.aborted) throw cancelled();
-      // Shaders compile off the main thread (KHR_parallel_shader_compile) before the first render.
-      await built.warm();
-      if (signal?.aborted) throw cancelled();
-    } catch (error) {
-      // destroy() owns the context and the lease from here on.
-      built.renderer.destroy();
-      throw error;
-    }
+    built = build(gl, lease, host, onSelect, onContextLost);
+    await yieldToEventLoop();
+    if (signal?.aborted) throw cancelled();
+    await warmBeforeUse(built.warm, gl.domElement, signal);
+    if (signal?.aborted) throw cancelled();
     return built.renderer;
   } catch (error) {
-    if (gl) { gl.dispose(); gl.forceContextLoss(); }
-    lease.release();
+    if (built) built.renderer.destroy();
+    else {
+      if (gl) { gl.dispose(); gl.forceContextLoss(); }
+      lease.release();
+    }
     throw error;
   }
 }
 
 const yieldToEventLoop = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
+
+/** A driver can stall shader compilation after context loss. Release ownership without waiting for it. */
+function warmBeforeUse(warm: () => Promise<void>, canvas: HTMLCanvasElement, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const finish = (error?: Error): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      canvas.removeEventListener('webglcontextlost', onLost);
+      if (error) reject(error); else resolve();
+    };
+    const onAbort = (): void => finish(new DOMException('office renderer creation cancelled', 'AbortError'));
+    const onLost = (): void => finish(new Error('office context lost during shader warm'));
+    const timer = setTimeout(() => finish(new Error('office shader warm timed out')), 15000);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    canvas.addEventListener('webglcontextlost', onLost, { once: true });
+    if (signal?.aborted) { onAbort(); return; }
+    // Handle late resolution/rejection too; neither can start a destroyed scene or become unhandled.
+    Promise.resolve().then(warm).then(() => finish(), error => finish(error instanceof Error ? error : new Error(String(error))));
+  });
+}
 
 function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelect: (target: OfficeTarget) => void, onContextLost?: () => void): { renderer: OfficeRenderer; warm(): Promise<void> } {
   const size = (): { w: number; h: number } => ({ w: Math.max(1, host.clientWidth), h: Math.max(1, host.clientHeight) });
@@ -154,6 +176,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const choreo = new Choreographer(!reduced());
   const characters = new Map<string, Character>();
   const marks = new Map<string, Group>();
+  let warmed = false;
   let paused = false, dirty = true, destroyed = false, closed = false, raf = 0, timer = 0, lastRender = 0, ready = false, lastModel: OfficeModel | undefined;
 
   const syncActors = (): void => {
@@ -230,7 +253,8 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       if (placer.tag(tagX, tagY, tag.text.length * 6.8 + 12, 18, far)) slot(n++, tag.id, 'agent', tag.text);
       const extra = poseLabel(a.pose);
       if (extra === 'bubble') { boxTag[boxCount] = tag; boxX[boxCount] = tagX; boxY[boxCount] = tagY - 22; boxText[boxCount] = excerpts.get(a.instanceId) ?? a.statusText; boxCount++; }
-      else if (extra === 'sleep') { pt.y = tagY - 22; slot(n++, tag.sleepId, 'sleep', 'Zzz'); }
+      // The z letters rise from just over the (slumped) head, below the name tag, so they read as belonging to the sleeper.
+      else if (extra === 'sleep' && project(view.point.x, SLEEP_Y, view.point.z, v.w, v.h)) slot(n++, tag.sleepId, 'sleep', 'Zzz');
     }
     // Message boxes go above their name tag; far out, one that would overlap any tag or an earlier box is hidden.
     for (let i = 0; i < boxCount; i++) {
@@ -251,7 +275,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const stopTimers = (): void => { if (raf) cancelAnimationFrame(raf); raf = 0; if (timer) clearTimeout(timer); timer = 0; };
   /** `fast` wants the next display frame; otherwise the idle interval is used. Nothing is scheduled when `fast` is undefined. */
   const schedule = (fast: boolean | undefined): void => {
-    if (fast === undefined || paused || destroyed) return;
+    if (fast === undefined || !warmed || !lastModel || paused || destroyed) return;
     if (fast) {
       if (timer) { clearTimeout(timer); timer = 0; }
       if (!raf) raf = requestAnimationFrame(frame);
@@ -400,7 +424,6 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
 
   applyQuality(quality);
   aim();
-  schedule(true);
 
   const renderer: OfficeRenderer = {
     apply(model, cues) {
@@ -476,7 +499,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       lease.release();
     },
   };
-  return { renderer, warm: async () => { await gl.compileAsync(scene, cam); } };
+  return { renderer, warm: async () => { await gl.compileAsync(scene, cam); warmed = true; } };
 }
 
 function rendererName(gl: WebGLRenderer): string | undefined {

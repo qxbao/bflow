@@ -26,12 +26,14 @@ export function createLabelLayer(parent: HTMLElement): { update(labels: Projecte
           const el = document.createElement('div');
           el.className = CLASSES[l.kind];
           el.dataset['kind'] = l.kind;
+          // Sleep is drawn as three small z letters that drift up and fade out, one after another; the label text is not shown.
+          if (l.kind === 'sleep') for (let i = 0; i < 3; i++) { const z = document.createElement('span'); z.textContent = 'z'; el.appendChild(z); }
           layer.appendChild(el);
           n = { el, x: Number.NaN, y: Number.NaN, seen: true };
           nodes.set(l.id, n);
         }
         n.seen = true;
-        if (n.el.textContent !== l.text) n.el.textContent = l.text;
+        if (l.kind !== 'sleep' && n.el.textContent !== l.text) n.el.textContent = l.text;
         // Unchanged positions write nothing.
         const x = Math.round(l.x), y = Math.round(l.y);
         if (x !== n.x || y !== n.y) {

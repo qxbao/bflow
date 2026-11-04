@@ -11,7 +11,7 @@ import { BOARD_X, DECOR, GRID_H, GRID_W, OBJECT_CELLS, PLANT_CELLS, ZONE_SIGNS, 
 export const BACKGROUND = '#dfe5e6';
 /** Light carpet with a distinct tint per room: warm oak, blue-grey, lavender, mint and sand; the lobby is neutral. */
 const FLOOR: Readonly<Record<string, string>> = {
-  lobby: '#d9d8d2', conversation: '#e0c9a6', coordination: '#c9d6df', taskboard: '#d2d3e6', developer: '#cbe0d2', verification: '#e6d6c2',
+  lobby: '#d9d8d2', conversation: '#d9bc92', coordination: '#c9d6df', taskboard: '#d2d3e6', developer: '#cbe0d2', verification: '#e6d6c2',
 };
 /** Sky fill of the full tier; the low tier (no spot pools, no shadows) lifts it a little. */
 export const HEMI_HIGH = 1.0, HEMI_LOW = 1.5;
@@ -59,7 +59,7 @@ export interface StageObject { id: OfficeObjectId; position: Vec2; size: { w: nu
 
 /** Interaction volumes (world units, before the object's own scale) used for picking. */
 export const OBJECT_SIZES: Readonly<Record<OfficeObjectId, { w: number; h: number; d: number }>> = {
-  counter: { w: 2.0, h: 1.3, d: 0.9 }, board: { w: 8.4, h: 3.4, d: 0.5 }, mailbox: { w: 0.7, h: 1.3, d: 0.6 }, cabinet: { w: 0.9, h: 1.5, d: 0.55 },
+  counter: { w: 2.3, h: 1.3, d: 1.0 }, board: { w: 8.4, h: 3.4, d: 0.5 }, mailbox: { w: 0.7, h: 1.3, d: 0.6 }, cabinet: { w: 0.9, h: 1.5, d: 0.55 },
   server: { w: 0.8, h: 1.75, d: 0.7 }, settings: { w: 1.1, h: 1.6, d: 0.4 }, door: { w: 1.1, h: 2.5, d: 0.3 },
 };
 
@@ -121,6 +121,8 @@ export class Stage {
   private readonly floor: Instances;
   private readonly trim: Instances;
   private readonly desks: Instances;
+  private readonly dualDesks: Instances;
+  private readonly pcDesks: Instances;
   private readonly chairs: Instances;
   private readonly glowTex = glowTexture();
   private readonly glowMats: MeshBasicMaterial[] = [];
@@ -150,7 +152,9 @@ export class Stage {
     this.floor = make('floor_tile', GRID_W * GRID_H, false, true);
     this.trim = make('trim_bar', 420, false, false);
     this.desks = make('desk', CAP);
-    this.chairs = make('chair', CAP + 1);
+    this.pcDesks = make('desk_pc', CAP);
+    this.dualDesks = make('desk_dual', CAP);
+    this.chairs = make('chair', CAP);
 
     // Walls: north (back), west and east. The south side stays open so the camera sees into the room.
     const wallOf = (name: string, list: Matrix4[]): void => { if (list.length) make(name, list.length).set(list); };
@@ -179,7 +183,7 @@ export class Stage {
       beam.frustumCulled = false; beam.renderOrder = 2;
       this.group.add(beam);
     };
-    for (const x of [3, 7, 11, 14, 17, 21, 25]) addSpot(x, 3.3, 0.16, 0);
+    for (const x of [3, 7, 11.5, 15.5, 21, 25]) addSpot(x, 3.3, 0.16, 0); // the Coordination pair sits over its two windows
     for (const z of [4, 10, 15]) { addSpot(0.16, 3.3, z, Math.PI / 2); addSpot(GRID_W - 0.16, 3.3, z, -Math.PI / 2); }
     wallOf('spot', spots);
 
@@ -194,14 +198,15 @@ export class Stage {
     const at = (id: OfficeObjectId): Vec2 => cellCentre(OBJECT_CELLS[id]);
     const flush = (depth: number): number => 0.07 + (depth * OBJECT_SCALE) / 2;
     place('counter', at('counter').x, at('counter').z, 0, 'counter', 1);
+    place('exec_chair', at('counter').x, at('counter').z, 0, undefined, 1);
     place('board', BOARD_X, 0.07, 0, 'board', 1);
     // The mailbox is small and stands against the west wall, facing into the room.
     place('mailbox', 0.07 + (OBJECT_SIZES.mailbox.d * MAILBOX_SCALE) / 2, at('mailbox').z, Math.PI / 2, 'mailbox', MAILBOX_SCALE);
-    place('cabinet', at('cabinet').x, flush(0.52), 0, 'cabinet');
+    place('cabinet', flush(0.52), at('cabinet').z, Math.PI / 2, 'cabinet');
     place('server', at('server').x, flush(0.7), 0, 'server');
     place('settings', at('settings').x, 8.85, 0, 'settings');
     place('door', 0.1, at('door').z, Math.PI / 2, 'door', 1);
-    place('table', BOARD_X + 0.5, 4.5, 0, undefined, 1);
+    place('table', BOARD_X, 4.5, 0, undefined, 1);
     for (const cell of PLANT_CELLS) { const p = cellCentre(cell); place('plant', p.x, p.z, (cell.gx * 7) % 6, undefined, 1); }
 
     // Partition walls (segments are scaled along their length where they meet a wall or another partition) and end posts at the free ends.
@@ -212,7 +217,7 @@ export class Stage {
     // Decor: one instanced set per model.
     const byNode = new Map<string, Matrix4[]>();
     for (const d of DECOR) { const p = decorPlacement(d); byNode.set(d.node, [...(byNode.get(d.node) ?? []), m4(p.x, p.y, p.z, p.ry)]); }
-    for (const [name, list] of byNode) make(name, list.length, name !== 'rug' && name !== 'pendant_lamp').set(list);
+    for (const [name, list] of byNode) make(name, list.length, !name.startsWith('rug') && name !== 'pendant_lamp').set(list);
 
     // Zone signs: the dark board scaled to size plus a text plane in front of it (canvas texture, no image file).
     make('sign_board', ZONE_SIGNS.length).set(ZONE_SIGNS.map(g => new Matrix4().compose(new Vector3(g.x, g.y, g.z), new Quaternion(), new Vector3(g.w, g.h, 1))));
@@ -255,7 +260,7 @@ export class Stage {
     for (const [zone, x, z, w, h] of [['conversation', 4.5, 4, 8, 7], ['coordination', 13.5, 4, 10, 7], ['verification', 23.5, 13, 10, 9]] as const) {
       this.pools.push({ zone, mesh: glow('#ff9d4d', 0.05, w, h, new Vector3(x, 0.02, z), true) });
     }
-    this.pools.push({ zone: 'developer', mesh: glow('#ff9d4d', 0.045, 18, 9, new Vector3(9, 0.02, 13), true) });
+    this.pools.push({ zone: 'developer', mesh: glow('#ff9d4d', 0.045, 18, 9, new Vector3(9.5, 0.02, 13), true) });
     this.deskGlowMat = new MeshBasicMaterial({ map: this.glowTex, color: '#6fb4e8', transparent: true, opacity: 0.1, blending: AdditiveBlending, depthWrite: false, fog: false });
     const dg = new InstancedMesh(this.glowGeo, this.deskGlowMat, CAP);
     dg.frustumCulled = false; dg.count = 0; dg.renderOrder = 1;
@@ -281,15 +286,15 @@ export class Stage {
       for (let y = y0; y < y1; y++) { bars.push(m4(x0, 0, y + 0.5, Math.PI / 2)); bars.push(m4(x1, 0, y + 0.5, Math.PI / 2)); }
     }
     this.trim.set(bars, bars.map(() => TRIM_TONE));
-    const desks: Matrix4[] = [], chairs: Matrix4[] = [], glows: Matrix4[] = [];
-    const conv = cellCentre(OBJECT_CELLS.counter);
-    chairs.push(m4(conv.x, 0, conv.z));
+    // The Conversation seat has its own executive chair (placed once in the constructor). Developers work at desktop PCs, QA / Reviewer at PCs
+    // with two monitors, everyone else at laptops.
+    const desks: Matrix4[] = [], pcDesks: Matrix4[] = [], dualDesks: Matrix4[] = [], chairs: Matrix4[] = [], glows: Matrix4[] = [];
     for (const cell of plan.desks) {
-      const p = cellCentre(cell);
-      desks.push(m4(p.x, 0, p.z)); chairs.push(m4(p.x, 0, p.z));
+      const p = cellCentre(cell), zone = zoneAt(cell);
+      (zone === 'developer' ? pcDesks : zone === 'verification' ? dualDesks : desks).push(m4(p.x, 0, p.z)); chairs.push(m4(p.x, 0, p.z));
       glows.push(new Matrix4().compose(new Vector3(p.x, 0.03, p.z + 0.1), new Quaternion().setFromEuler(new Euler(-Math.PI / 2, 0, 0)), new Vector3(1.9, 1.3, 1)));
     }
-    this.desks.set(desks); this.chairs.set(chairs);
+    this.desks.set(desks); this.pcDesks.set(pcDesks); this.dualDesks.set(dualDesks); this.chairs.set(chairs);
     this.deskGlow.count = Math.min(glows.length, this.deskGlow.instanceMatrix.count);
     glows.forEach((m, i) => { if (i < this.deskGlow.count) this.deskGlow.setMatrixAt(i, m); });
     this.deskGlow.instanceMatrix.needsUpdate = true;

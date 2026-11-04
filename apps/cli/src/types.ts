@@ -97,6 +97,10 @@ export interface InitCommandArgs extends GlobalCliFlags {
   readonly check?: boolean | undefined;
   readonly remove?: boolean | undefined;
   readonly noGitnexus?: boolean | undefined;
+  /** Skips writing the Director skill, MCP and hook files. */
+  readonly noDirector?: boolean | undefined;
+  /** Keeps the Director skill files committable: no managed git exclude block. */
+  readonly commitSkills?: boolean | undefined;
   /** Accepts the GitNexus license and repository index without prompting. */
   readonly yes?: boolean | undefined;
   /** Accepts the GitNexus license and repository index only; unlike yes, never implies force. */
@@ -237,6 +241,16 @@ export interface ApproveCommandArgs extends GlobalCliFlags {
   readonly revision?: number | undefined;
   readonly generation?: number | undefined;
   readonly idempotencyKey?: string | undefined;
+}
+
+/** D-DIR-02: `bflow approve <#n>` — a human decision on a Conversation card, sent to the running host with the owner token. */
+export interface ApproveCardCommandArgs extends GlobalCliFlags {
+  readonly command: "approve";
+  /** Normalised card alias, e.g. `#3`. */
+  readonly card: string;
+  readonly outcome: "approved" | "rejected" | "changes_requested" | "answer";
+  readonly reason?: string | undefined;
+  readonly choice?: number | undefined;
 }
 
 export interface ResumeCommandArgs extends GlobalCliFlags {
@@ -391,6 +405,7 @@ export type CoreParsedCliCommand =
   | RunCommandArgs
   | StatusCommandArgs
   | ApproveCommandArgs
+  | ApproveCardCommandArgs
   | ResumeCommandArgs
   | CancelCommandArgs
   | HelpCommandArgs
@@ -434,6 +449,13 @@ export interface InitCommandOutput {
   readonly healthy?: boolean | undefined;
   readonly configValid?: boolean | undefined;
   readonly gitnexus?: import("./gateway-repositories.js").RepositoryGitNexusReport | undefined;
+  /** Per-role provider/model written (applied) or kept by this init. */
+  readonly rolePresets?: import("./environment-config.js").RolePresetReport | undefined;
+  /** The `.bflow/` entry in `<git-common-dir>/info/exclude`. */
+  readonly gitExclude?: import("./git-exclude.js").GitExcludeReport | undefined;
+  readonly director?: import("./init-director.js").InitDirectorReport | undefined;
+  /** conversation/coordinator entries removed from the configuration by this `init --update` (Director replaces them). */
+  readonly removedRoles?: readonly string[] | undefined;
   readonly diagnostics?: readonly string[] | undefined;
 }
 
@@ -525,9 +547,14 @@ export interface CliContext {
   /** Test/embedded override for the bundled isolation engine location. */
   readonly isoEnginePath?: string | undefined;
   readonly runtime?: RuntimeService | ConcreteRuntimeService | undefined;
+  /** Test seam for `bflow approve <#n>`; defaults to the running host's owner endpoint. */
+  readonly approveCard?: import("./approve-card.js").ApproveCardDeps | undefined;
   readonly io?: CliIo | undefined;
   readonly clock?: (() => Date) | undefined;
   readonly confirmOverwrite?: ((configPath: string) => Promise<boolean> | boolean) | undefined;
+  /** Chooses the `bflow init` role/model preset CLI for a new configuration; undefined keeps the codex default. */
+  readonly selectInitProvider?: ((options: { readonly installed: readonly ("claude" | "codex" | "agy")[];
+    readonly suggested: "claude" | "codex" | "agy" }) => Promise<"claude" | "codex" | "agy" | undefined>) | undefined;
   readonly operationOptions?: OperationOptions | undefined;
   readonly highLevel?: HighLevelFacadeServices | undefined;
   /** Engine facades for high-level commands; defaults compose the reviewed packages. */
@@ -541,7 +568,7 @@ export interface CliContext {
 export interface CliExecutionResult {
   readonly exitCode: CliExitCode;
   readonly ok: boolean;
-  readonly command?: CliCommandName | "iso" | "web" | undefined;
+  readonly command?: CliCommandName | "iso" | "web" | "director" | "progress" | "queue" | undefined;
   readonly stdout: string;
   readonly stderr: string;
   readonly data?: CliCommandData | undefined;

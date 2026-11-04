@@ -210,7 +210,7 @@ async function fixture() {
   return f;
 }
 
-const exhaustedNotice = /Automatic resume stopped after 3 attempts/;
+const exhaustedNotice = /Runtime đã dừng tự tiếp tục sau 3 lần/;
 
 describe("A-Z acceptance: a delegation reaches delivery approval without a human resume", () => {
   it("recovers from one schema error, one no-next-action stop, one silent specialist and a security request, and reaches the final approval", async () => {

@@ -356,3 +356,17 @@ source drift, effective permissions, skills, lineage and independent verdicts.
 
 Evidence here is source implementation and fake-runner/package tests. It does not
 establish live Herdr/provider compatibility or full SDLC acceptance.
+
+## Layout Director và tab progress (B2a)
+
+Khi `layout` là `director`, `RolePaneManager` không tạo pane Conversation hay Coordinator. Thay vào đó:
+
+- Tạo tab `progress` từ root pane của workspace, đổi tên pane thành `progress` và chạy `progressCommand` (1 đến 16 đối số, mỗi đối số tối đa 4096 ký tự; CLI truyền `bflow progress --follow`). Thiếu `progressCommand` ở layout này là lỗi cấu hình.
+- Ghi `progressPane: { tabId, paneId, terminalId?, command, phase, restarts }` vào manifest v3. `attachTarget` trỏ tới tab `progress`.
+- `ensureProgressPane()` được gọi từ kiểm tra sức khoẻ topology và từ watchdog của host. Khi chưa chắc pane còn sống (`launch_intent`, `launch_unknown`), nó không chạy lại `pane run` mà kiểm `pane process-info` trước. Nếu tiến trình đã thoát và pane về shell, pane được chạy lại tối đa 5 lần trong 10 phút (`PROGRESS_RESTART_LIMIT`, `PROGRESS_RESTART_WINDOW_MS`); quá giới hạn thì `phase: "failed"` và manifest `degraded`, phiên không sập.
+- Pane tiến trình không có preflight provider, attestation hay MCP. Nó chỉ hiển thị tiến độ.
+- Khi phiên tắt, pane tiến trình được đóng sau cùng và chỉ khi quyền sở hữu của nó đã được chứng minh; pane lạ được giữ nguyên.
+
+Giới hạn: nếu một bản Herdr không có `pane process-info`, pane bị coi là chưa chắc và không được chạy lại; manifest chuyển `degraded` thay vì tự sửa.
+
+Bậc bằng chứng: nguồn và test package/fake runner. Không có bằng chứng live Herdr cho tab `progress`.

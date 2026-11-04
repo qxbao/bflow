@@ -1,5 +1,6 @@
 import {
   configuredPlatformRoles,
+  developerLaunchTemplate,
   modelSettings,
   resolvePlatformConfiguration,
   resolveRepositoryToolPolicy,
@@ -207,8 +208,7 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
   input = resolution.input;
   const environment = input.config.environment;
   const configured = new Map(environment.roles.map(role => [role.role, role] as const));
-  const coordinator = configured.get("coordinator");
-  if (!coordinator) throw new Error("Configuration must include a coordinator role");
+  const launchTemplate = developerLaunchTemplate(environment.roles);
 
   if ((environment.requiredTools?.length ?? 0) > 0)
     throw new Error(`Legacy environment.requiredTools has no role or operation allowlist; remove it and add explicit role requirements under environment.toolPolicy (legacy IDs: ${environment.requiredTools!.join(", ")}).`);
@@ -240,9 +240,10 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
   const locatorPath = join(deps.context.stateDirectory, GATEWAY_CONTROL_LOCATOR_FILE);
   const gatewayLocatorPath = (deps.fileExists ?? existsSync)(locatorPath) ? { gatewayLocatorPath: locatorPath } : {};
   const hasSelectedProfiles = environment.roles.filter(isGovernanceRoleConfig).some(role => selectedProfileName(role, environment) !== undefined) ||
-    (!configured.has("developer") && selectedProfileName(coordinator, environment) !== undefined);
+    (!configured.has("developer") && launchTemplate !== undefined && selectedProfileName(launchTemplate, environment) !== undefined);
   return AgenticHostPlatformOptionsSchema.parse({
     schemaVersion: 3,
+    layout: "director",
     ...(resolution.workflowPack ? { workflowPack: resolution.workflowPack } : {}),
     machineId: deps.context.machineId,
     repositoryId: input.repository.id,

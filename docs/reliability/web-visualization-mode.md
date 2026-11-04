@@ -1,6 +1,6 @@
-# Bflow Web Visualization Mode — xác nhận ngày 2026-11-02
+# Bflow Web Visualization Mode — cập nhật 2026-11-03
 
-Trạng thái: **chưa đủ điều kiện nghiệm thu/phát hành**. Không push, merge hay tạo PR. Báo cáo gồm source, test cục bộ, phép đo fixture GPU thật và các lần V9 live với hai Developer thật; phiên Golden đang được phục hồi sau fault, chưa có nghiệm thu SDLC đầu-cuối.
+Trạng thái: **chưa đủ điều kiện nghiệm thu/phát hành**. Đã merge vào main theo yêu cầu chủ dự án; merge `42b526eb` cũng được quan sát trên origin/main. Không tạo PR. Báo cáo gồm source, test cục bộ, phép đo fixture GPU thật và các lần V9 live với hai Developer thật; Golden đã nhận kết quả blocked có xác thực và dừng phiên bình thường; chưa có nghiệm thu SDLC đầu-cuối. Kết quả mới nhất và teardown ở cuối báo cáo.
 
 ## Phạm vi và revision
 
@@ -56,7 +56,7 @@ Không nới ngưỡng. `compileAsync` chưa giải quyết ngân sách load; `b
 
 ## Review và đợt sửa
 
-Hai review độc lập Sonnet (scoped V8 fixes, toàn nhánh) không tạo được verdict. Lần đầu dùng nhầm HOME của Codex; kiểm tra lại thấy Claude đã đăng nhập ở `/home/baodq/.claude`. Khi gọi đúng thư mục, Claude báo hết usage 5 giờ, reset lúc 19:00 Asia/Bangkok; chủ dự án đã xác nhận quota cạn. Không đổi sang model ngoài Sonnet/Haiku. Self-review có ghi rõ phạm vi, không thay thế review độc lập.
+Ở lần xác nhận `15cc644b`, hai review độc lập Sonnet (scoped V8 fixes, toàn nhánh) không tạo được verdict. Lần đầu dùng nhầm HOME của Codex; kiểm tra lại thấy Claude đã đăng nhập ở `/home/baodq/.claude`. Khi gọi đúng thư mục, Claude báo hết usage 5 giờ, reset lúc 19:00 Asia/Bangkok; chủ dự án đã xác nhận quota cạn. Không đổi sang model ngoài Sonnet/Haiku. Self-review có ghi rõ phạm vi, không thay thế review độc lập.
 
 - **F1 Important:** explicit agentId cũ không còn trong manifest bị fallback sang uniqueByRole. Hai test RED rồi GREEN (20/20 workforce), pin cả việc lẫn endpoint handoff. Sửa chỉ projection, không thay authority Runtime.
 - **F2 Important:** context-loss lúc factory pending vẫn nhận late renderer, làm giữ tài nguyên sau fallback. Test RED rồi GREEN (17/17 stage); kiểm abort, destroy đúng một lần và không apply.
@@ -64,7 +64,7 @@ Hai review độc lập Sonnet (scoped V8 fixes, toàn nhánh) không tạo đư
 - **Ảnh a11y tuyệt đối:** giữ nguyên, đã qua E2E mới; còn rủi ro máy chậm/settling, chưa có bằng chứng tái hiện flaky lần này.
 - **Minors:** triage đủ 12 dòng lịch sử trong `resume-deferred-triage.md`, phân biệt đã được xử lý/superseded với các mục còn để lại. F3 mới: Activity lấy 8 dòng cuối của trang newest-first; còn mismatch tên “gần đây”. Các thiếu sót coverage, duplicate Activity aria-label và canvas focus opener vẫn deferred.
 
-Re-review bản sửa: xem ledger; review độc lập vẫn mở đến khi có quota Sonnet/Haiku.
+Trạng thái review lịch sử tại `15cc644b` còn mở vì quota; kết quả Sonnet/Haiku bổ sung trên main và ruling cuối được ghi ở cuối báo cáo.
 
 ## V9 — phiên live Golden đang tiếp tục
 
@@ -149,3 +149,75 @@ Ruling mới: giữ ledger theo lệnh owner; timeout 240s là trần test tổn
 Chủ dự án yêu cầu tăng tốc, để fix phụ về sau, merge vào main và pull main mới nhất rồi xử lý conflict. Việc này thay thế lệnh dừng trước merge ban đầu. V9 vẫn chưa có verdict cuối cho double, workflow gate/integration và phê duyệt bàn giao; bản resume mới chưa được xác nhận bằng một lượt submit live sau sửa. Các giới hạn hiệu năng, full affected và review toàn nhánh ở trên không được đổi thành PASS. Giữ run/worktrees/ledger, không force-down và không tạo fixture mới. Host đã nạp build `7d0f38f5` và đã thử business resume trên 3D trong lúc tích hợp. Lệnh tới đúng holder nhưng preflight từ chối pinned skill approval/integrity sau host reload, trước khi reacquire lease; không tạo assignment_resume/fence mới và không sử dụng lease hết hạn. Source audit cho thấy readPinnedInstructions dựa vào các map Developer instruction/launch của từng host; việc phục hồi các pin này cần xác minh/sửa tiếp. Giữ guard và ghi blocker cho đợt sau theo ưu tiên merge của owner.
 
 Main integration: đã pull `origin/main` từ `247faf9c` lên `f39082f7`, gộp feature head `97357614`. Một conflict trong `execution-binding.ts` được giải bằng cách giữ normalizer Codex trust và constant/documentation repository snapshot mới từ main. Trên cây đã hợp nhất: deps/typecheck/build/diff-check PASS; Web **375/375**, Runtime selected **194/194** (7 files) PASS, gồm self-service upstream, execution snapshot/trust, recovery/notices, writer-stop và host review. Không chạy lại full affected, Playwright hoặc phép đo GPU trong đợt tích hợp này; các gate chưa đóng phía trên vẫn còn. Owner plan untracked được giữ nguyên từng byte. Worktree/ledger/live run giữ lại để xử lý sau; không push/PR.
+
+## Tiếp tục trực tiếp trên main
+
+Owner cho phép xử lý các bước nghiệm thu/fix còn lại trên main. Bản phục hồi pin sau reload chỉ khôi phục chỉ dẫn đã verify, không hồi sinh launch, token, Gateway hay role-profile grant. Điều kiện gồm namespace còn sống có HMAC witness, `execution.json` đúng handle/nativeDigest/worktree/session, launch intent đã retired, SessionStart record cùng native session, manifest generation gốc được `SkillManager.recover/verify` với approval hiện tại và pin hiện tại. Instruction được render lại từ bundle đã xác thực. Legacy startup record không có launchId nếu không có Gateway; namespace/execution là proof chính, không tự bổ sung lịch sử giả.
+
+Pin được đánh dấu `continuationOnly`; mỗi lần đọc kiểm lại namespace và approval; cache không phục vụ qua generation mới nếu chưa recover lại. Scope chưa supervised, profile/failover, unattended và Gateway bắt buộc vẫn fail-closed. Khi nhả allocation thì seal/stop namespace giữ lại. 96 test host/skills + 1 test namespace Linux thật PASS, typecheck/build PASS; Sonnet re-review PASS. Chẩn đoán chỉ đọc bằng build main trên đúng Golden xác minh manifest `a5c9f89e…` và execution đang giữ; chưa phải verdict nhiệm vụ mới.
+
+## Sửa host-result và đề xuất no-code có proof
+
+Lượt live d5d829f0 đã khôi phục đúng writer từ fence1 lên fence2, không đổi handle/assignment. Developer tiếp tục thật và gửi Core binding receipt, nhưng host tạo sai `blockage` (`rework_finding_blocked`, thiếu `since`) nên kết quả blocked bị Zod từ chối. Builder mới dùng `quality_gate` và thời điểm dossier, kiểm receipt/handle khớp; `workspace_status` được bổ sung receipt host đúng candidate thay vì chỉ feedback và TDD phase cũ.
+
+D-V9-04 cho phép nộp all-disputed proposal không đổi code chỉ với TDD đủ và stored **behavioral-gate** receipt đúng run/task/spec fingerprint/source/test identity. Xác thực stored receipt có port riêng, không giả native message. Recheck ở prepare, ingress, Git collect và verification; không có cờ JSON tự cấp. Git dùng diff thực so với baseline task ban đầu, metadata ghi assigned base và zero new repair commits; filesChanged/patch vẫn thật, nonempty. Verification vẫn kiểm receipt, attempt/changeSet mới, từng finding verdict, toàn bộ gate và maxIterations. Callback chỉ ở bộ nhớ, không lưu làm quyền trong artifact/job. Thiếu/sai proof giữ hành vi fail-closed.
+
+Local regression cuối: **131/131** (Git/Verification/Runtime host), guard/full-cycle cuối **2/2**, deps/typecheck/build/diff-check PASS. Full Runtime fixture đi từ proposal qua độc lập đóng finding, HEAD giữ nguyên. Các fixture lỗi bị integrity/observation validators từ chối đúng và đã sửa fixture, không giảm guard. Sonnet delta re-review cuối **PASS, không Important**. Live sau sửa còn chờ chạy lại; chưa tuyên bố V9 completed.
+
+
+## Kết quả tiếp tục trên main — 2026-11-03
+
+V9 Golden **chưa đạt**. Trên source `8f7f902f`, dùng lại đúng run/session/Developer, không tạo fixture mới: đường `request_user_decision` hiện có đã chuyển quyết định vận hành qua Conversation/3D tới Developer dưới writer lease còn hiệu lực. Không cần thêm API phục hồi hay ngoại lệ cho resume budget. Hai tin đầu chưa relay được (một trả lời trực tiếp, một nhầm thành workflow request và bị chặn đúng vì Core đang chạy); tin trao đổi trạng thái sau đó đến Coordinator hợp lệ.
+
+Thẻ vận hành được duyệt lúc `2026-11-02T18:54:20.531Z`. Developer đọc lại context; log tool thật lúc `18:54:47.811Z` hiển thị `noChangeDisputeProposalAllowed=true`, receipt đúng candidate và chỉ dẫn dùng `succeeded` để **đề xuất** disputed cho đánh giá độc lập. Model vẫn chọn nộp `blocked` với disposition `disputed`. Kết quả đã được xác thực và ghi vào Core lúc `18:55:03.821Z`; lỗi ZodError đã hết. Đây là giới hạn hành vi model trong mẫu này, không phải bằng chứng nhiệm vụ đạt gate. Không ghi đè kết quả bất biến, không reset attempt/rework/resume và không tự chuyển nó thành succeeded. Double chưa qua vòng độc lập cuối; triple đã qua; chưa tích hợp workflow hay duyệt bàn giao cuối.
+
+Checkpoint `n9-main-blocked-result` lưu kết quả, context tool thật, DOM, ảnh, workforce, manifest và telemetry cùng run; IDs workforce/manifest và mọi displayName trong DOM khớp. Đây là quan sát gần nhau, không phải snapshot nguyên tử. Cùng sáu mốc `n2`–`n7`, bằng chứng đối chiếu vượt yêu cầu năm mốc. Những khoảng trống capture cue đã nêu vẫn giữ nguyên; không tuyên bố mọi cue trong toàn thời gian dài của phiên đều được thu lại.
+
+Sau khi có kết quả tương quan, thao tác **Dừng phiên** bình thường qua 3D thành công, manifest `down`. Thu hồi hook trust bằng `revokeAllCodexHookTrust` ở store V9 cô lập: `policiesRemaining=0`; trạng thái kiểm hook sau thu hồi là `unsupported` do nguồn symlink chưa được tin cậy, không phải còn grant. Đã dừng riêng Web owner, Chrome và watcher của chiến dịch. Giữ nguyên run, fixture, worktree và ledger; không force-down, không sửa journal hay test frozen.
+
+Review độc lập Sonnet cho V8 và các đường projection/scene đã có verdict với phạm vi đọc ghi rõ. Một vòng sửa trên main xử lý warm treo (abort, context loss, timeout 15 giây và cleanup một chủ sở hữu), chặn frame trước warm và model đầu tiên, chỉ đặt `ready` sau render model. Quyết định ở cấp run chỉ tạo dáng hand-raised **inferred**, không khẳng định agent cụ thể đang chờ người dùng. Bốn regression lifecycle RED→GREEN; toàn Web **379/379** PASS, typecheck/build/deps/diff-check PASS. Sonnet re-review không có Critical/Important; các minor build-constructor exception/hidden timer được ghi để sau. Timeout warm là giới hạn fallback khởi tạo, không thay budget long task 50 ms. Đề xuất giảm sàn FPS xuống 29,5 bị từ chối; giữ nguyên 30.
+
+Bằng chứng chi tiết và review nằm trong ledger `.superpowers/sdd/2026-11-02-web-visualization-mode/`, đặc biệt `v9-golden-live/evidence/n9-main-blocked-result/`, `main-visualization-final-sonnet-review.md`, `main-renderer-sonnet-rereview.md` và `resume-deferred-triage.md`. Không xóa ledger trước khi chủ dự án đọc các ruling.
+
+E2E trên cây main sau sửa: **8/8** a11y/workflow và **11/11** CSP/recovery PASS, chạy nối tiếp. Haiku đã đọc bổ sung scene, HUD, hook, app, CSS, mirror và inspector; không có Critical/Important trong phạm vi công bố. Triage đầy đủ xem `main-final-review-ruling.md`; không áp các minor lịch sử đã superseded. Full affected cũ 126 lỗi vẫn chưa được đóng, nên không tuyên bố toàn monorepo xanh.
+
+## Đo hiệu năng trên main sau sửa vòng đời cảnh — 2026-11-03
+
+Chạy `apps/web/scripts/measure-office.mjs` trên cây main sau bản sửa warm/context-loss, giữ nguyên ngưỡng (log: `main-renderer-measurement.log` trong ledger). Phép đo **không đạt**:
+
+| Chỉ số | Kết quả | Ngưỡng | Verdict |
+| --- | --- | --- | --- |
+| Chunk đồ họa (gzip) | 171,3 KiB | 250 KiB | đạt |
+| Tổng asset | 0,657 MiB | 4 MiB | đạt |
+| FPS khi di chuyển (cả cửa sổ) | 3,27 | 30 | **vượt ngân sách** |
+| FPS burst khi di chuyển (chỉ tham khảo) | 26,93 (median gap 127,3 ms) | — | không phải verdict |
+| FPS idle | 1,5 | tối đa 8 (timer) | đạt |
+| Frame khi tab ẩn | 0 | 0 | đạt |
+| Long task lúc vào 3D | 82 ms (1 task) | 50 ms | **vượt ngân sách** |
+| Long task tổng | sau load 9; moving 2; idle 6 | — | **vượt ngân sách** |
+| Heap sau 20 lần bật/tắt | 8,0 → 9,0 MiB, `liveGlContexts` = 0 | ổn định | đạt |
+
+Không nới ngưỡng. Số FPS cả cửa sổ thấp hơn các lần đo trước (22,1 fps ở `15cc644b`); chưa xác định nguyên nhân (hồi quy hay tải máy), cần đo lại khi máy rảnh. Mục tiêu 30 fps và ngân sách long task vẫn **chưa đạt**; tính năng chưa đủ điều kiện nghiệm thu hiệu năng.
+
+## V9 chạy lại với Claude Haiku — 2026-11-03
+
+Phạm vi: **một provider** (Claude Code `2.1.317`, model `claude-haiku-5-5` cho cả bảy role thường trực và Developer; effort Coordinator `high`, Reviewer `medium`, còn lại `low`), Herdr `0.9.5`, `maxConcurrency=2`, source `b9f39695`. Môi trường cô lập `/tmp/bfo-v9-9r739p5a`, fixture `repo-haiku` (hai test chủ dự án `double.test.js`/`triple.test.js`). Chỉ dùng chế độ 3D để tạo việc, duyệt thiết kế, trả lời quyết định, hủy và duyệt bàn giao; không chạy Classic (chủ dự án đã bỏ phép so sánh).
+
+**Kết quả: run `run-web-a86eb1ca-0768-46ae-8fb6-ec7644fad673` `succeeded` / host `completed`, 2/2 task, hai Developer chạy song song trên hai worktree, Red/Green qua gate độc lập, workflow verification `passed`, bàn giao được duyệt qua 3D.** Patch chỉ thêm `double.js` và `triple.js`; không sửa test.
+
+Hai run đầu thất bại và được hủy qua UI, không dùng force:
+
+| Run | Nguyên nhân | Xử lý |
+| --- | --- | --- |
+| `run-web-c890e95f` | Fixture: `.bflow/` chưa bị ignore nên cây Git bẩn, Runtime chặn trước Developer. Thẻ quyết định bấm qua panel bị `unknown delivery`; trả lời qua chat sau đó gặp xung đột đối chiếu. | Hủy qua UI; owner commit `.gitignore` baseline (`9ffdf73`). |
+| `run-web-b6f9f22f` | Coordinator (Haiku) map tiêu chí ac-3/ac-4 vào cả hai file test nên Red bị từ chối; Runtime không nhận re-plan trên cùng run. Hai Developer đã chạy song song nhưng chưa triển khai. | Hủy qua UI; tạo lại với hai tiêu chí, mỗi tiêu chí map đúng một test. |
+
+Lỗi chủ động đã làm trên run thành công: tải lại trang giữa verification (giữ URL/3D/việc) và tắt/mở lại Local Server (pairing mới, UI phục hồi ở 3D, thẻ bàn giao vẫn còn). Chưa làm lại lần này: đóng pane Developer (đã có bằng chứng ở các run Luna), đối chiếu DOM với manifest/telemetry ở đủ năm mốc, và truy ngược từng cue ra `handoffId` — chỉ có snapshot workforce (có snapshot với hai Developer) và telemetry cuối (`succeeded`, cohort 2/0/0/0). Vì vậy V9 chỉ đạt ở mức: hai Developer song song, luồng 3D từ tạo việc tới duyệt bàn giao, hai lỗi chủ động; chưa tuyên bố đủ các mục §8.4.
+
+Ghi chú vận hành: HOME cô lập cần `~/.zshrc` rỗng (wizard zsh nuốt ký tự đầu lệnh `claude`) và đăng nhập Claude tối thiểu (credentials/tài khoản được copy tạm, đã xóa sau run). Phát hiện sản phẩm: sau lần bấm quyết định `user_decision` ở panel bị `unknown delivery`, Runtime từ chối trả lời tiếp cho cùng approval đến khi đối chiếu; chưa điều tra sâu.
+
+### Đo lại trên máy rảnh và phân tích — 2026-11-03
+
+Số 3,27 fps ở mục trên là do máy đang tải (V9 live chạy cùng lúc). Đo lại sau khi dừng phiên, cùng source `b9f39695`, Chrome có hardware GL: chunk 171,3 KiB và asset 0,657 MiB đạt; FPS idle 7,75 đạt; không có long task sau load/moving/idle và không có frame khi tab ẩn. **Vẫn vượt ngân sách:** FPS moving cả cửa sổ 22,17 (target 30) và long task vào 3D 103 ms (tối đa 50 ms). Burst moving 29,81 fps (89% khoảng cách frame), nên renderer đã gần trần 30 fps.
+
+Không nới ngưỡng và không thay đổi mã. Lý do: (1) trần 30 fps cộng với camera ease ngắn hơn chu kỳ 750 ms của phép đo (xen kẽ idle 8 fps) khiến trung bình cả cửa sổ không thể đạt 30 mà không đổi thiết kế phép đo hoặc thời lượng ease; (2) CPU profile lúc vào 3D cho thấy thời gian dồn vào link shader của driver (`getProgramInfoLog` ~40 ms, `(program)` ~86 ms), không phải code ứng dụng có thể cắt nhỏ gọn. Hai chỉ số này giữ nguyên trạng thái "chưa đạt".

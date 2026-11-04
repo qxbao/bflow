@@ -1,7 +1,7 @@
 // Pure seat assignment. No React, three.js, fetch or clock; the result is plain data and inputs are never mutated.
 import type { OfficeAgent, OfficeModel, OfficeRole, SeatMap } from './types';
 
-/** Developer pool: 20 seats, filled in order (the 3D Developer zone adds a row of five per fifth agent). */
+/** Developer pool: 20 seats, filled in order (the 3D Developer zone adds a row of six desks per sixth agent). */
 export const DEVELOPER_SEATS: readonly string[] = Array.from({ length: 20 }, (_, i) => `developer:${i + 1}`);
 
 /** Zone of each fixed (non-Developer) role, following the §5.1 rooms. */

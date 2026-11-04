@@ -599,6 +599,8 @@ export async function validateAndStoreReworkResolution(options: {
   submittedByAgentId: string;
   submittedAt: string;
   artifactStore: ArtifactStore;
+  /** Trusted controller callback, never an agent-supplied flag. It permits a proposal, not acceptance. */
+  authorizeVerifiedNoChangeDispute?: (revision: string) => Promise<boolean>;
 }): Promise<ReworkResolutionDossier> {
   const {
     reworkContext,
@@ -657,7 +659,8 @@ export async function validateAndStoreReworkResolution(options: {
   if (
     submissionStatus === "succeeded" &&
     !parsedInputs.some(item => item.disposition === "addressed") &&
-    worktreeState.headCommitHash.toLowerCase() === reworkContext.failedRevision.toLowerCase()
+    worktreeState.headCommitHash.toLowerCase() === reworkContext.failedRevision.toLowerCase() &&
+    !(parsedInputs.every(item => item.disposition === "disputed") && await options.authorizeVerifiedNoChangeDispute?.(worktreeState.headCommitHash) === true)
   ) {
     throw new Error(
       `Rework submission with status 'succeeded' has no new commit after failedRevision (${reworkContext.failedRevision}); commit a change (for example a reproduction or regression test) or submit pure no-commit disputes with status 'blocked' for escalation`
@@ -918,6 +921,8 @@ export async function verifyStoredReworkDossier(options: {
   forbiddenPaths?: readonly string[] | undefined;
   expectedStatus: "succeeded" | "blocked";
   artifactStore: ArtifactStore;
+  /** Trusted controller callback, never an agent-supplied flag. It permits a proposal, not acceptance. */
+  authorizeVerifiedNoChangeDispute?: (revision: string) => Promise<boolean>;
 }): Promise<ReworkResolutionDossier> {
   const { dossierInput, reworkContext, worktreePath, ownedPaths, forbiddenPaths = [], expectedStatus, artifactStore } = options;
   const dossier = ReworkResolutionDossierSchema.parse(dossierInput);
@@ -936,7 +941,8 @@ export async function verifyStoredReworkDossier(options: {
   if (worktreeState.dirty || dossier.submittedRevision.toLowerCase() !== worktreeState.headCommitHash.toLowerCase()) {
     throw new Error(`Rework resolution dossier submittedRevision (${dossier.submittedRevision}) does not match clean worktree HEAD (${worktreeState.headCommitHash})`);
   }
-  if (expectedStatus === "succeeded" && worktreeState.headCommitHash.toLowerCase() === reworkContext.failedRevision.toLowerCase()) {
+  if (expectedStatus === "succeeded" && worktreeState.headCommitHash.toLowerCase() === reworkContext.failedRevision.toLowerCase() &&
+      !(dossier.findingResolutions.every(item => item.disposition === "disputed") && await options.authorizeVerifiedNoChangeDispute?.(worktreeState.headCommitHash) === true)) {
     throw new Error(
       `Rework resolution dossier with submissionStatus 'succeeded' has no new commit after failedRevision (${reworkContext.failedRevision})`
     );

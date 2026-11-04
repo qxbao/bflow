@@ -22,7 +22,7 @@ it('initializes an unconfigured registered repository and never replays an opera
  await Promise.all(f.service.pending());
  expect(await f.service.readInitialization(f.p.projectId,request.operationId)).toMatchObject({ok:true,value:{state:'succeeded'}});
  expect(await f.service.initializeProject(f.p.projectId,request)).toMatchObject({ok:true,value:{state:'succeeded'}});
- expect(f.prepare).toHaveBeenCalledOnce();expect(await readFile(join(f.root,'.bflow/config.yml'),'utf8')).toContain('conversation');
+ expect(f.prepare).toHaveBeenCalledOnce();expect(await readFile(join(f.root,'.bflow/config.yml'),'utf8')).toContain('planner');
 });
 it('requires license approval and preserves the existing config on repair',async()=>{
  const f=await fixture(),path=join(f.root,'.bflow/config.yml'),before=await readFile(path,'utf8');
@@ -45,10 +45,10 @@ it('rejects symlinked configuration and foreign resolver identities',async()=>{
  const service=createWebProjectSettings({...f.options,resolveProject:async()=>({...f.p,projectId:'foreign'})});expect(await service.readConfiguration(f.p.projectId)).toMatchObject({ok:false});
 });
 it('retains untouched role comments while editing a model in the form',async()=>{
- const f=await fixture(),path=join(f.root,'.bflow/config.yml');let yaml=await readFile(path,'utf8');yaml=yaml.replace('role: coordinator','role: coordinator # owner coordinator comment');await writeFile(path,yaml);
+ const f=await fixture(),path=join(f.root,'.bflow/config.yml');let yaml=await readFile(path,'utf8');yaml=yaml.replace('role: planner','role: planner # owner planner comment');await writeFile(path,yaml);
  const snapshot=await f.service.readConfiguration(f.p.projectId);if(!snapshot.ok)throw Error();
  const values=structuredClone(snapshot.value.values),env=values.environment as any;env.roles[0].model='haiku';
- const saved=await f.service.saveConfiguration(f.p.projectId,{apiVersion:1,expectedRevision:snapshot.value.revision,values});expect(saved).toMatchObject({ok:true});expect(await readFile(path,'utf8')).toContain('# owner coordinator comment');
+ const saved=await f.service.saveConfiguration(f.p.projectId,{apiVersion:1,expectedRevision:snapshot.value.revision,values});expect(saved).toMatchObject({ok:true});expect(await readFile(path,'utf8')).toContain('# owner planner comment');
 });
 it('keeps large UTF-8 diagnostics readable and refuses changed input for an existing ID',async()=>{
  const f=await fixture();const s=createWebProjectSettings({...f.options,prepareGitNexus:async()=>({status:'blocked',diagnostics:['ắ'.repeat(16000)]})});
@@ -77,7 +77,7 @@ it('explicit update rebinds a cloned configuration while preserving role model c
  const request={apiVersion:1 as const,operationId:randomUUID(),acceptGitNexusLicense:true,update:true};
  await f.service.initializeProject(f.p.projectId,request);await Promise.all(f.service.pending());
  expect(await f.service.readInitialization(f.p.projectId,request.operationId)).toMatchObject({ok:true,value:{state:'succeeded'}});
- const result=await f.service.readConfiguration(f.p.projectId);expect(result).toMatchObject({ok:true,value:{values:{environment:{workspaceRoot:f.root,roles:expect.arrayContaining([expect.objectContaining({role:'conversation',model:'haiku'})])}}}});
+ const result=await f.service.readConfiguration(f.p.projectId);expect(result).toMatchObject({ok:true,value:{values:{environment:{workspaceRoot:f.root,roles:expect.arrayContaining([expect.objectContaining({role:'planner',model:'haiku'})])}}}});
 });
 it('commits only reviewed configuration, preserves other files and never runs repository hooks',async()=>{
  const f=await fixture();execFileSync('git',['-C',f.root,'config','user.name','Web settings test']);execFileSync('git',['-C',f.root,'config','user.email','web-settings@localhost']);

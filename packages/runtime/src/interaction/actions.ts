@@ -5,7 +5,7 @@ import {
 } from "@bflow/contracts";
 import {
   digest,
-  isConversationDelivery,
+  isInProcessDelivery,
   type JournalState,
   type RunRecord,
 } from "../agentic/journal.js";
@@ -89,7 +89,7 @@ export function availableActions(
   const unmeasuredResume = r.pendingAction?.kind === "coordinator_continuation" && r.status === "implementing" &&
     unmeasuredPolicyPhaseRequests(state, r).length > 0;
   const resumeUncertain = !!r.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === r.runId &&
-    ["sending", "unknown_delivery"].includes(out.status) && !isConversationDelivery(out));
+    ["sending", "unknown_delivery"].includes(out.status) && !isInProcessDelivery(out));
   if (r.pendingAction && (r.pendingAction.kind !== "coordinator_continuation" || unmeasuredResume)) {
     const a = r.pendingAction;
     const issued = new Set(
