@@ -228,7 +228,7 @@ export async function createDirectorSession(options: DirectorSessionOptions = {}
     // The host's own Director Coordinator port: it supplies the Director principal (R-B2-12) for every Director-token call.
     coordinator: directorCoordinatorPort({ invoke: (name, parameters, principal) => tools().invoke(name, parameters, principal),
       planningReference: async () => { throw new Error("planning_reference is not used by this scenario"); }, log: async () => undefined }) });
-  const receipts = new HostReceiptJournal(join(root, "host-receipts"), repository, "session-1");
+  const receipts = new HostReceiptJournal(join(root, "host-receipts"), repository, panes.manifest().sessionId);
   let chat: AgenticConversationHost | undefined;
   /** Mailbox port: the real endpoint; `absent` presence blocks automatic resume. */
   const director: DirectorRuntimePort & { deliveries: RoleMessage[] } = { deliveries: [],

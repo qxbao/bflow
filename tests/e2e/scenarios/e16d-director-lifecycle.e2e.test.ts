@@ -1,12 +1,14 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { EnvironmentLifecycle, openPaneManagerEnvironment, readEnvironmentConfig, identifyRepository, runCli } from "@bflow/cli";
-import { CreateCheckpointCommandSchema, SessionManifestV3Schema, type CreateCheckpointCommand, type RecoveryCheckpoint, type SessionManifest,
+import { AgentExecutionHandleSchema, CreateCheckpointCommandSchema, PaneBindingSchema, SessionManifestV3Schema, WebCommandSchema, type CreateCheckpointCommand, type RecoveryCheckpoint, type SessionManifest,
   type SessionManifestV3 } from "@bflow/contracts";
 import { DirectorPanes, createDirectorSession, documentationSpecification, git, singleTaskWorkflow, type DirectorSession } from "../helpers/director-session.js";
 import { HerdrWireRunner } from "../helpers/herdr-wire-runner.js";
+import { createWebDirectorSession, directorWebBridge, PROJECT_ID, projectionToken, webPrincipal } from "../helpers/director-web.js";
 
 /**
  * E16-D (Director C/D Task 9, closes the B2 N2 coupling gap at harness level): the CLI EnvironmentLifecycle `up`/`down` with the E16
@@ -25,6 +27,28 @@ function publishedPanes(manifest: SessionManifestV3): DirectorPanes {
   panes.bindings = [...manifest.panes];
   panes.manifest = () => manifest;
   return panes;
+}
+
+/** The CLI adds its completion report after activation and the final Herdr probe; all other manifest fields must match. */
+async function expectPublishedManifest(activation: SessionManifestV3 | undefined, published: SessionManifestV3, repository: string) {
+  expect(activation).toBeDefined();
+  if (!activation) throw new Error("bflow up must activate the Runtime host before publishing success");
+  expect(published).toEqual({ ...activation, metadata: { ...activation.metadata, stepsCompleted: [
+    "load_project_config",
+    "validate_required_providers",
+    "validate_binaries_and_auth",
+    "validate_permissions_and_trust",
+    "validate_required_mcp",
+    "validate_skills",
+    "verify_agent_readiness_preflight",
+    "reconcile_herdr_session_and_panes",
+    "start_required_agents",
+    "confirm_roles_ready",
+    "persist_environment_manifest",
+    "report_success"
+  ] } });
+  const persisted = SessionManifestV3Schema.parse(JSON.parse(await readFile(join(repository, ".bflow/state/session.json"), "utf8")));
+  expect(persisted).toEqual(published);
 }
 
 describe("E16-D — Director lifecycle coupling (bflow up/down with an active Director run)", () => {
@@ -83,7 +107,7 @@ describe("E16-D — Director lifecycle coupling (bflow up/down with an active Di
     const up1 = await lifecycle().up();
     if (up1.schemaVersion !== 3) throw new Error("bflow up must publish a Director manifest v3");
     expect(up1.panes.some(p => p.role === "conversation" || p.role === "coordinator")).toBe(false);
-    expect(activations.at(-1)).toEqual(up1);
+    await expectPublishedManifest(activations.at(-1), up1, repo);
     noLegacyAgents();
     session = await createDirectorSession({ root, panes: publishedPanes(up1), inspectRun: true });
 
@@ -118,6 +142,17 @@ describe("E16-D — Director lifecycle coupling (bflow up/down with an active Di
     expect(shutdowns).toBeGreaterThan(0);
     const stopIndex = wire.calls.findIndex(c => c.args[0] === "session" && c.args[1] === "stop");
     expect(stopIndex).toBeGreaterThan(-1);
+    // These allocations belong to the fake transport, outside the CLI Herdr wire lifecycle. Preserve its existing catalog
+    // across the fixture reopen; this does not assert that a real Developer process survives bflow down.
+    const retainedDevelopers = session.panes.bindings.filter(pane => pane.role === "developer").map(pane => PaneBindingSchema.parse(pane));
+    expect(retainedDevelopers).toHaveLength(1);
+    const priorAssignment = (await session.state()).outbound.find((out: any) => out.message.run_id === runId &&
+      out.message.type === "task.assignment" && out.status === "accepted");
+    if (!priorAssignment || typeof priorAssignment.selector !== "string") throw new Error("Expected the accepted Developer assignment before reopen");
+    const priorSelector = priorAssignment.selector;
+    const priorHandle = AgentExecutionHandleSchema.parse(priorAssignment.handle);
+    const priorBinding = (await session.panes.getRoleBinding(priorSelector)).value;
+    expect(priorBinding).toEqual(retainedDevelopers[0]);
     session.close();
     session = undefined;
 
@@ -126,20 +161,77 @@ describe("E16-D — Director lifecycle coupling (bflow up/down with an active Di
     if (up2.schemaVersion !== 3) throw new Error("resumed bflow up must publish a Director manifest v3");
     expect(up2).toMatchObject({ status: "up", sessionId: up1.sessionId, conversationSessionId: up1.conversationSessionId });
     expect(up2.panes.map(p => p.role).sort()).toEqual(up1.panes.map(p => p.role).sort());
-    expect(activations.at(-1)).toEqual(up2);
+    await expectPublishedManifest(activations.at(-1), up2, repo);
     noLegacyAgents();
-    const resumed = await createDirectorSession({ root, panes: publishedPanes(up2), inspectRun: true });
+    const resumedPanes = publishedPanes(up2);
+    resumedPanes.bindings.push(...retainedDevelopers);
+    expect(resumedPanes.bindings.filter(pane => pane.role === "developer")).toEqual(retainedDevelopers);
+    expect(resumedPanes.manifest()).toEqual(up2);
+    const restoredBinding = (await resumedPanes.getRoleBinding(priorSelector)).value;
+    expect(restoredBinding).toEqual(priorBinding);
+    if (!restoredBinding) throw new Error("The retained fake Developer allocation must resolve after reopen");
+    expect({ agentId: restoredBinding.agentId, paneId: restoredBinding.paneId, session: restoredBinding.session,
+      worktreePath: restoredBinding.worktreePath }).toEqual({ agentId: priorHandle.target.agentId, paneId: priorHandle.target.paneId,
+      session: priorHandle.target.session, worktreePath: priorHandle.target.worktreePath });
+    const { session: resumed, authorized } = await createWebDirectorSession({ root, panes: resumedPanes, inspectRun: true });
     session = resumed;
     cleanups.push(async () => resumed.close());
     resumed.trackRun(runId, started.correlationId);
     expect((await resumed.inspect(runId)).status).toBe("implementing");
-    await resumed.endpoint.register({ provider: "claude" });
+    const resumedDirector = await resumed.endpoint.register({ provider: "claude" });
     await resumed.runtime.tick();
     // The accepted assignment is reconciled, never resent after restart.
     expect(assignments(resumed)).toBe(0);
+    const resumedAssignment = (await resumed.state()).outbound.find((out: any) => out.message.message_id === priorAssignment.message.message_id);
+    expect(resumedAssignment?.status).toBe("accepted");
+    expect(resumedAssignment?.selector).toBe(priorSelector);
+    expect(AgentExecutionHandleSchema.parse(resumedAssignment?.handle)).toEqual(priorHandle);
     await resumed.evidence(runId); await resumed.submit(runId);
-    for (let pass = 0; pass < 6 && (await resumed.inspect(runId)).status !== "completed"; pass++) await resumed.tickWithReviewer();
-    expect((await resumed.inspect(runId)).status).toBe("completed");
+    for (let pass = 0; pass < 6 && (await resumed.inspect(runId)).status !== "awaiting_approval"; pass++) await resumed.tickWithReviewer();
+    const delivery = await resumed.inspect(runId);
+    expect(delivery).toMatchObject({ status: "awaiting_approval", approvalKind: "delivery", approval: { status: "pending" },
+      workflowCycle: { status: "passed" }, tasks: [{ cycle: { status: "passed" } }] });
+    // A chat message and the Director token cannot approve delivery. Only the fake human's structured Web decision below can.
+    const { bridge } = directorWebBridge(resumed);
+    expect((await bridge.send({ apiVersion: 1, messageId: randomUUID(), projectId: PROJECT_ID,
+      sessionId: up2.conversationSessionId, content: "duyệt", runId })).ok).toBe(true);
+    await expect(resumed.endpoint.call(resumedDirector.token, "approve", { runId })).rejects.toThrow("Unknown Director tool: approve");
+    await resumed.runtime.tick();
+    expect((await resumed.inspect(runId)).approval).toEqual(delivery.approval);
+    expect((await resumed.inspect(runId)).status).toBe("awaiting_approval");
+    expect(resumed.humanDecisions).toHaveLength(0);
+    expect(authorized).toHaveLength(0);
+    await resumed.chat.reconcileApprovals();
+    const pending = (await resumed.chat.getContext() as any).pendingApprovals[delivery.approval.approvalId];
+    expect(pending).toBeDefined();
+    const command = WebCommandSchema.parse({ apiVersion: 1, commandId: randomUUID(), projectId: PROJECT_ID,
+      kind: "answer_decision", runId, decisionId: pending.approvalId, outcome: "approved",
+      expectedVersion: { revisionToken: projectionToken(pending), approvalId: pending.approvalId, target: pending.target,
+        revision: pending.revision, generation: pending.generation, evidenceDigest: projectionToken(pending.evidence) } });
+    // Existing E17/E18 fake human authentication accepts only the exact decision recorded by the structured gateway.
+    // This fixture principal is not a live signed human receipt and grants no authority to a real run.
+    const principal = { ...webPrincipal(command), hostSessionId: up2.sessionId };
+    const answered = await resumed.chat.handleStructuredInteraction(command, principal as never);
+    expect(answered.ok, answered.ok ? undefined : JSON.stringify(answered.error).slice(0, 1000)).toBe(true);
+    expect(resumed.humanDecisions).toHaveLength(1);
+    const decision = resumed.humanDecisions[0]!;
+    expect(decision).toMatchObject({ approvalId: delivery.approval.approvalId, runId, decision: "approved", decidedBy: "human-1" });
+    await resumed.runtime.flushOutbound();
+    expect(authorized.length).toBeGreaterThan(0);
+    for (const accepted of authorized) expect(accepted).toEqual(decision);
+    await resumed.runtime.tick();
+    const finalRun = await resumed.inspect(runId);
+    const finalState = await resumed.state();
+    const completionDiagnostic = {
+      status: finalRun.status,
+      tasks: finalRun.tasks.map((task: any) => ({ taskId: task.taskId, resultStatus: task.result?.status,
+        writerReleased: task.writerReleased, verificationPending: task.verificationPending })),
+      assignments: finalState.outbound.filter((out: any) => out.message.run_id === runId && out.message.type === "task.assignment")
+        .map((out: any) => ({ status: out.status, selector: out.selector,
+          selectorPresent: resumed.panes.bindings.some(pane => [pane.role, pane.bindingId, pane.paneId, pane.agentId].includes(out.selector)) }))
+    };
+    // Bounded structural diagnostics only: no prompts, payloads, credentials, source text or native-session tokens.
+    expect(finalRun.status, JSON.stringify(completionDiagnostic).slice(0, 4000)).toBe("completed");
     expect(resumed.transport.sentRequests.some(r => ["coordinator", "conversation"].includes(r.role))).toBe(false);
 
     await lifecycle().down(true);
