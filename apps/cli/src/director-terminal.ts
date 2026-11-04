@@ -8,12 +8,13 @@ export const DIRECTOR_LAUNCH_PROVIDERS: readonly DirectorLaunchProvider[] = ["cl
 export const DIRECTOR_PROVIDER_HINT_ENV = "BFLOW_DIRECTOR_PROVIDER";
 
 /**
- * Fixed start prompt per provider CLI. Claude was measured live (S6); Codex `$bflow-start` and
- * Agy `-i` (`--prompt-interactive`) are static evidence only.
+ * Invocation-scoped Director permissions: it must be able to start and contact the local host.
+ * Keep Codex off the shared daemon so daemon updates cannot drain this Director's turns.
+ * These flags do not change specialist launch policy or Runtime human approval gates.
  */
 export const DIRECTOR_START_ARGS: Readonly<Record<DirectorLaunchProvider, readonly string[]>> = {
-  claude: ["/bflow-start"],
-  codex: ["$bflow-start"],
+  claude: ["--dangerously-skip-permissions", "/bflow-start"],
+  codex: ["--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"],
   agy: ["-i", "/bflow-start"]
 };
 

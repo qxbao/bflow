@@ -109,7 +109,9 @@ export function detectProvider(env: Readonly<Record<string, string | undefined>>
 function isRecord(v: unknown): v is Record<string, unknown> { return typeof v === "object" && v !== null && !Array.isArray(v); }
 function scrub(text: string): string { return text.replace(/[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{16,}/g, "[đã ẩn]"); }
 
-function startFix(message: string): string {
+function startFix(message: string, provider: DirectorProvider): string {
+  if (/Host Unix socket permission denied \(listen (?:EPERM|EACCES)\)/.test(message))
+    return `Phiên agent bị sandbox hoặc quyền hệ điều hành chặn Unix socket của Bflow. Mở terminal thường và chạy \`bflow open --provider ${provider}\` để mở lại Director; kiểm tra quyền thư mục socket nếu lỗi vẫn còn. Không cần chạy lại doctor cho lỗi quyền socket này.`;
   if (/Not a Git working repository/i.test(message)) return "Chạy lệnh trong một kho Git (hoặc `git init`), rồi thử lại.";
   if (/Host unavailable|Foreign host/i.test(message)) return "Chạy `bflow up` trong kho này để khởi động host, rồi thử lại.";
   if (/config|cấu hình|init/i.test(message)) return "Chạy `bflow init` trong kho này rồi thử lại.";
@@ -165,7 +167,7 @@ async function runStart(args: Extract<DirectorArgs, { sub: "start" }>, deps: Dir
     return 0;
   } catch (error) {
     const message = scrub(error instanceof Error ? error.message : String(error));
-    const fix = startFix(message);
+    const fix = startFix(message, provider);
     deps.stdout.write(args.json ? `${JSON.stringify({ ok: false, message, fix })}\n` : `${message}\n${fix}\n`);
     return CLI_EXIT_CODES.RUNTIME_ERROR;
   }

@@ -57,6 +57,17 @@ describe("director start", () => {
     expect(body.ok).toBe(false);
     expect(body.fix).toContain("bflow");
   });
+  it.each(["EPERM", "EACCES"])("gives a usable Director launch command for a denied Unix socket (%s)", async code => {
+    const { deps, out, ownerCall } = make({ env: { BFLOW_DIRECTOR_PROVIDER: "codex" }, ensureUp: async () => {
+      throw new Error(`Agentic host exited during startup (exit code 1): Host Unix socket permission denied (listen ${code}); see /repo/host.log`);
+    } });
+    expect(await runDirectorCommand(parse(["start", "--json"]), deps)).toBe(1);
+    const body = JSON.parse(out[0]!);
+    expect(body.message).toContain(`listen ${code}`);
+    expect(body.fix).toContain("bflow open --provider codex");
+    expect(body.fix).not.toContain("bflow doctor");
+    expect(ownerCall).not.toHaveBeenCalled();
+  });
 });
 
 describe("director call", () => {
