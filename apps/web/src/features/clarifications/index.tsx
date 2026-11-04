@@ -16,7 +16,7 @@ export function ClarificationForm({api,id,question,runId,intakeId,enabled,refres
       let expectedVersion=question.expectedVersion;
       if(runId){
         const run=await api.run(id,runId);
-        const live=run.currentRunId===runId && !['completed','failed','cancelled'].includes(run.sdlcStatus)?run.clarifications.find(q=>samePrompt(q,question)):undefined;
+        const live=run.currentRunId===runId && !['completed','completed_with_parked','failed','cancelled'].includes(run.sdlcStatus)?run.clarifications.find(q=>samePrompt(q,question)):undefined;
         if(!live){refresh?.();throw new Error('Câu hỏi đã thay đổi. Đọc lại công việc.');}
         expectedVersion=live.expectedVersion;
       }else{

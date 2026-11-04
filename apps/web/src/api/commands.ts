@@ -4,7 +4,7 @@ export type InteractionBody = WebCommand extends infer C ? C extends WebCommand 
 /** `director_launch` carries only the provider choice; the server derives argv/cwd/env. */
 export type DirectorLaunchBody = {kind:'director_launch';provider:WebDirectorLaunchRequest['provider'];replaceActive:boolean};
 export type CommandBody = InteractionBody | {kind:'session_start'|'session_stop';force?:boolean} | DirectorLaunchBody;
-const RECORD_KINDS:readonly string[]=['create_request','revise_request','answer_clarification','answer_decision','resume','cancel','session_start','session_stop','director_launch'];
+const RECORD_KINDS:readonly string[]=['create_request','revise_request','answer_clarification','answer_decision','resume','cancel','session_start','session_stop','director_launch','issue_retry','issue_dismiss'];
 export async function execute(api:ApiClient, command:WebCommand) {
   const parsed=WebCommandSchema.parse(command);
   const value=await api.request(`${projectPath(parsed.projectId)}/commands`,WebHttpContracts.command.response,'POST',parsed,40000);

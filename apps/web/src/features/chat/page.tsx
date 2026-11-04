@@ -15,7 +15,7 @@ import { DirectorChat } from '../director/chat';
 
 /** A draft handed over by the 3D chat bar. It only prefills the composer; nothing is sent from here. */
 function handedDraft(state:unknown):string{const draft=(state as {draft?:unknown}|null)?.draft;return typeof draft==='string'?draft.slice(0,4000):'';}
-const finished=(status:string)=>['completed','failed','cancelled'].includes(status);
+const finished=(status:string)=>['completed','completed_with_parked','failed','cancelled'].includes(status);
 /** One conversation per run: the list picks the run, the thread shows only that run. */
 export function ChatPage({api,id,revision,refresh}:{api:ApiClient;id:string;revision:number;refresh:()=>void}) {
   const {runId}=useParams(),location=useLocation(),base=`/projects/${encodeURIComponent(id)}/chat`,draft=handedDraft(location.state);
