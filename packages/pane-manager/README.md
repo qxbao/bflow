@@ -252,6 +252,15 @@ Một pane Developer đã release với `launchId` của launch khác được t
 do lần chạy này tạo cho một launch chỉ có thể được launch đó nhận; shell rỗng chưa gắn binding
 không bao giờ được role mang env nhận nuôi.
 
+Trước khi tạo workspace/tab/pane hoặc ghi launch intent mới, startup đối chiếu tên role với
+agent Herdr hiện có. Tên bị chiếm mà không có binding phù hợp (pane, provider, terminal và native
+session nếu đã ghi nhận) trả về `conflict` kèm đúng session/pane và hướng dẫn `bflow doctor`, giữ
+nguyên manifest. Nhãn workspace trùng tên project không chứng minh quyền đóng pane cũ. Khi đổi
+launch env, pane đã bị agent khác chiếm cũng được giữ nguyên; chủ phiên phải xử lý xung đột
+hoặc chọn tên role khác rồi thử lại. Legacy discovery không mang env vẫn chỉ nhận agent khỏe,
+đúng provider và tab của role. Bằng chứng: source và test fake runner trong
+`test/env-at-creation.test.ts`; chưa xác minh đường xung đột này với Herdr/provider thật.
+
 Việc tạo pane mang env yêu cầu `RolePaneManagerOptions.socket` (một `HerdrSocketPort`).
 Nếu không có, `initializeTopology`, `reconcileTopology`, `recoverAfterRestart` và
 `allocateDeveloper` trả về `validation` trước mọi side effect. `createHerdrSocketPort({ runner,

@@ -820,6 +820,62 @@ export class RolePaneManager {
       w.worktree?.checkoutPath === this.#config.workspaceRoot
     );
 
+    // Herdr names are session-wide, including agents restored from older snapshots. Resolve known
+    // collisions before creating a workspace, progress viewer, tab, pane, or replacement launch intent.
+    // A matching project label is discovery only; it is not authority to stop an old occupant.
+    const agentListOutcome = await this.#runHerdr(["agent", "list"], options);
+    if (agentListOutcome.exitCode !== 0 || agentListOutcome.failure) {
+      return toCommandError(agentListOutcome, "Failed to list agents");
+    }
+    let liveAgents: readonly HerdrAgentInfo[] = parseAgentListResult(agentListOutcome);
+    let preflightTabs: readonly HerdrTabInfo[] | undefined;
+    for (const role of configuredRoles) {
+      const spec = ROLE_TOPOLOGY_SPECS[role];
+      const roleConfig = this.#config.roleConfigs?.[role];
+      const agentName = roleConfig?.agentName ?? spec.defaultAgentName;
+      const agentKind = roleConfig?.agentKind ?? this.#config.defaultAgentKind ?? "codex";
+      const binding = savedManifest?.panes.find(pane => pane.permanent !== false && pane.role === spec.contractRole &&
+        (pane.metadata?.["topologyRole"] === role || pane.agentId === agentName));
+      const env = launchEnvOf(roleConfig?.launch);
+      const replacesRecordedLaunch = env !== undefined && binding?.metadata?.["launchId"] !== roleConfig?.launch?.launchId;
+      const occupants = liveAgents.filter(agent => agent.name === agentName ||
+        replacesRecordedLaunch && binding !== undefined && agent.paneId === binding.paneId);
+      for (const occupant of occupants) {
+        const sameNativeSession = !binding?.session || occupant.session !== undefined &&
+          binding.session.source === occupant.session.source && binding.session.kind === occupant.session.kind &&
+          binding.session.value === occupant.session.value;
+        const recordedOccupant = binding !== undefined && binding.agentId === agentName && occupant.name === binding.agentId &&
+          binding.paneId === occupant.paneId && binding.workspaceId === occupant.workspaceId &&
+          binding.agentKind === occupant.agent && (binding.terminalId === undefined || binding.terminalId === occupant.terminalId);
+        if (recordedOccupant && !sameNativeSession) {
+          return conflictError(`Native session changed for ${role} in pane '${occupant.paneId}'; refusing to adopt or close it as the old role execution. Preserve work and inspect bflow doctor before recovery.`);
+        }
+        if (recordedOccupant && sameNativeSession && (occupant.agent === agentKind || replacesRecordedLaunch)) continue;
+
+        // Preserve legacy no-env discovery only in the role's intended tab, with the intended provider.
+        // An env-bearing launch always needs the exact saved binding; a name and label cannot prove env.
+        if (!binding && env === undefined && occupant.agent === agentKind && matchedWorkspace?.workspaceId === occupant.workspaceId &&
+            ["idle", "done", "working"].includes(occupant.agentStatus) && occupant.interactiveReady !== false && occupant.launchPending !== true) {
+          if (preflightTabs === undefined) {
+            const tabs = await this.#runHerdr(["tab", "list", "--workspace", matchedWorkspace.workspaceId], options);
+            if (tabs.exitCode !== 0 || tabs.failure) return toCommandError(tabs, "Failed to list tabs for name preflight");
+            preflightTabs = parseTabListResult(tabs);
+          }
+          const coordination = this.#config.tabLabels?.coordination ?? "coordination";
+          const verification = this.#config.tabLabels?.verification ?? "verification";
+          const intendedTab = spec.tabKey === "conversation"
+            ? preflightTabs.find(tab => tab.label === (this.#config.tabLabels?.conversation ?? "conversation") || tab.tabId === savedManifest?.herdrTabId) ??
+              preflightTabs.find(tab => ![coordination, "coordination", verification, "verification"].includes(tab.label ?? ""))
+            : preflightTabs.find(tab => tab.label === (spec.tabKey === "coordination" ? coordination : verification) || tab.label === spec.tabKey);
+          if (intendedTab?.tabId === occupant.tabId) continue;
+        }
+        return conflictError(
+          `Permanent role '${role}' cannot use agent name '${agentName}': unowned or incompatible agent '${occupant.name ?? "unnamed"}' (${occupant.agent}) in pane '${occupant.paneId}' of Herdr session '${this.#config.sessionId}'. No topology changes were made. Inspect bflow doctor and this exact Herdr session; preserve its work, then stop or rename the conflicting agent explicitly, or configure a different role agentName before retrying bflow up.`,
+          { role, agentName, paneId: occupant.paneId, sessionId: this.#config.sessionId, reason: "unowned_agent_name_collision" }
+        );
+      }
+    }
+
     if (matchedWorkspace) {
       herdrWorkspaceId = matchedWorkspace.workspaceId;
     } else {
@@ -858,12 +914,6 @@ export class RolePaneManager {
       return toCommandError(paneListOutcome, `Failed to list panes for workspace '${herdrWorkspaceId}'`);
     }
     let livePanes: readonly HerdrPaneInfo[] = parsePaneListResult(paneListOutcome);
-
-    const agentListOutcome = await this.#runHerdr(["agent", "list"], options);
-    if (agentListOutcome.exitCode !== 0 || agentListOutcome.failure) {
-      return toCommandError(agentListOutcome, "Failed to list agents");
-    }
-    let liveAgents: readonly HerdrAgentInfo[] = parseAgentListResult(agentListOutcome);
 
     const convLabel = this.#config.tabLabels?.conversation ?? "conversation";
     const coordLabel = this.#config.tabLabels?.coordination ?? "coordination";
@@ -1044,7 +1094,7 @@ export class RolePaneManager {
           (a) =>
             a.name === agentName &&
             a.agent === agentKind &&
-            (a.paneId === savedBinding.paneId || a.tabId === targetTabId)
+            (a.paneId === savedBinding.paneId || env === undefined && a.tabId === targetTabId)
         );
         if (
           liveOccupant &&
@@ -1058,7 +1108,7 @@ export class RolePaneManager {
         }
       }
 
-      if (!healthyOccupant && reusable) {
+      if (!healthyOccupant && reusable && env === undefined) {
         const match = liveAgents.find(
           (a) =>
             a.name === agentName &&
