@@ -6,6 +6,8 @@ import type { WebAuthenticatedContext, WebOperationIndexRecord } from '@bflow/co
 import { IdentifierSchema, type OperationResult } from '@bflow/contracts';
 import { OperationIndex, type IndexedOperation } from './operation-index.js';
 import { HttpError, publicError, contractError, unwrap, observeWithinDeadline } from './errors.js';
+import { DirectorLaunchOutcomeResultSchema, directorLaunchFingerprint, launchRefusalMessage, LAUNCH_INTERRUPTED_MESSAGE, LAUNCH_UNCERTAIN_MESSAGE,
+  type DirectorLaunchOutcome } from './director.js';
 const now=()=>new Date().toISOString();
 const final=(op:WebOperation)=>op.state==='applied'||op.state==='failed';
 const lifecycleMessage=(text:string)=>text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g,'').trim().slice(0,4000)||'Thao tác chưa được hỗ trợ.';
@@ -23,6 +25,39 @@ export class Operations {
   }
   lifecycle(projectId:string,id:string,kind:'session_start'|'session_stop',body:unknown,authorize:()=>void):Promise<WebOperation>{return this.serial(projectId,id,()=>{authorize();return this.deliverLifecycle(projectId,id,kind,body,authorize);});}
   command(command:WebCommand,authorize:()=>void,context:WebAuthenticatedContext):Promise<WebOperation>{return this.serial(command.projectId,command.commandId,()=>{authorize();return this.deliverCommand(command,authorize,context);});}
+  /**
+   * D-CD-01 Director launch: a local_lifecycle operation whose intent (fingerprint only: provider, replaceActive and canonical
+   * project) is persisted before the launch effect. The launch plan (argv/env) never reaches this ledger. A replay with the same
+   * fingerprint only observes; a conflicting fingerprint is refused; an intent left in flight or uncertain is never relaunched.
+   */
+  directorLaunch(projectId:string,request:{operationId:string;provider:DirectorLaunchOutcome['provider'];replaceActive:boolean},canonicalPath:string,
+    authorize:()=>void,launch:()=>Promise<OperationResult<DirectorLaunchOutcome>>):Promise<WebOperation>{
+    return this.serial(projectId,request.operationId,async()=>{
+      authorize();
+      const id=request.operationId,fingerprint=directorLaunchFingerprint({projectId,provider:request.provider,replaceActive:request.replaceActive,canonicalPath});
+      const old=await this.index.read(projectId,id);
+      if(old){if(old.index.fingerprint!==fingerprint || old.index.operationKind!=='director_launch' || old.index.owner!=='local_lifecycle')throw new HttpError('operation_conflict');return this.observe(old);}
+      const record=await this.reserve(projectId,id,'director_launch',fingerprint,authorize);
+      let result:OperationResult<DirectorLaunchOutcome>;
+      try{result=DirectorLaunchOutcomeResultSchema.parse(await observeWithinDeadline(launch,30000));}
+      catch{return this.launchUncertain(record,LAUNCH_UNCERTAIN_MESSAGE);}
+      if(result.ok){
+        if(result.value.provider!==request.provider)return this.launchUncertain(record,LAUNCH_UNCERTAIN_MESSAGE);
+        return this.update(record,{...record.operation,state:'applied',result:result.value,updatedAt:now()});
+      }
+      const reason=(result.error.details as {reason?:unknown}|undefined)?.reason;
+      // Only a refusal proven to precede the effect is final; anything else stays uncertain and is never relaunched.
+      if(result.error.code==='validation')
+        return this.update(record,{...record.operation,state:'failed',error:publicError(new HttpError('operation_not_allowed',id,launchRefusalMessage(reason))),updatedAt:now()});
+      return this.launchUncertain(record,LAUNCH_UNCERTAIN_MESSAGE);
+    });
+  }
+  private async launchUncertain(record:IndexedOperation,message:string):Promise<WebOperation>{
+    if(record.operation.state==='reconciliation_required')return record.operation;
+    try{return await this.update(record,{...record.operation,state:'reconciliation_required',
+      error:publicError(new HttpError('reconciliation_required',record.index.commandId,message)),updatedAt:now()});}
+    catch{throw new HttpError('reconciliation_required',record.index.commandId);}
+  }
   private async reserve(projectId:string,id:string,kind:WebOperation['operationKind'],fingerprint:string,authorize:()=>void,hostSessionId?:string):Promise<IndexedOperation>{
     const index=WebOperationIndexRecordSchema.parse({schemaVersion:1,projectId,principalId:this.index.state.principalId,commandId:id,receiptId:id,
       owner:hostSessionId===undefined?'local_lifecycle':'host_interaction',operationKind:kind,fingerprint,...(hostSessionId===undefined?{}:{hostSessionId}),createdAt:now()});
@@ -70,6 +105,8 @@ export class Operations {
   }
   private async observe(record:IndexedOperation,context?:WebAuthenticatedContext):Promise<WebOperation>{
     if(final(record.operation))return record.operation;
+    // A Director launch has no observable receipt: an unsettled intent (restart, crash after spawn) is reconciliation_required.
+    if(record.index.operationKind==='director_launch')return this.launchUncertain(record,LAUNCH_INTERRUPTED_MESSAGE);
     try{
       let raw:unknown;
       if(record.index.owner==='local_lifecycle')raw=await observeWithinDeadline(()=>this.workspace.reconcileSessionOperation(record.operation));

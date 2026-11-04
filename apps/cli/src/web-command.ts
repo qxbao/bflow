@@ -204,7 +204,8 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
         return {workspace,
           interaction:options.interaction??signed.interaction,
           hostSessionId:signed.hostSessionId,
-          readHistoricalOperation:options.readHistoricalOperation??signed.readHistoricalOperation};
+          readHistoricalOperation:options.readHistoricalOperation??signed.readHistoricalOperation,
+          director:signed.director};
       }}); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') throw new Error(`Port ${args.port} đang bận (EADDRINUSE); dừng instance đúng chủ sở hữu hoặc chọn --port khác.`);

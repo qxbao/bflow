@@ -10,13 +10,13 @@ import type { LocalWorkspaceServices, UserInteractionClient } from '@bflow/contr
 export const unavailable = async () => ({ ok: false as const, error: { code: 'transport_unavailable' as const, retryable: true as const, message: 'private token /secret/socket' } });
 export const workspace: LocalWorkspaceServices = { inspectProject: unavailable, startSession: unavailable, stopSession: unavailable, reconcileSessionOperation: unavailable, preview: unavailable };
 export const client: UserInteractionClient = { readProjectSession: unavailable, listRuns: unavailable, readRun: unavailable, listDecisions: unavailable, execute: unavailable, readOperation: unavailable, async *events() { throw Error('unsupported'); }, acknowledgeNotice: unavailable, listMessages: unavailable, sendMessage: unavailable, readArtifact: unavailable };
-export async function fixture(overrides: Partial<LocalWorkspaceServices> = {}, interaction = async (_id: string) => client) {
+export async function fixture(overrides: Partial<LocalWorkspaceServices> = {}, interaction = async (_id: string) => client, extra: Partial<entry.LocalWebServerOptions> = {}) {
   expect(entry).toHaveProperty('createLocalWebServer');
   const directory = await mkdtemp(join(tmpdir(), 'w03-'));
   const assetsDirectory = join(directory, 'assets');
   await mkdir(assetsDirectory); await writeFile(join(assetsDirectory, 'index.html'), '<html>SPA</html>');
   const stateDirectory = join(directory, 'state');
-  const options = { host: '127.0.0.1' as const, port: 0, stateDirectory, assetsDirectory, workspace: { ...workspace, ...overrides }, interaction };
+  const options = { host: '127.0.0.1' as const, port: 0, stateDirectory, assetsDirectory, workspace: { ...workspace, ...overrides }, interaction, ...extra };
   let server = await entry.createLocalWebServer(options);
   const send = (path: string, method = 'GET', body?: unknown, headers: Record<string,string> = {}) => new Promise<{status:number; headers: import('node:http').IncomingHttpHeaders; body:string; json: any}>((resolve, reject) => {
     const target = new URL(server.origin);

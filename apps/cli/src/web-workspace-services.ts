@@ -217,6 +217,9 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
         if (operation.owner !== 'local_lifecycle') return error('validation', 'Operation không thuộc lifecycle.');
         if (operation.state === 'applied' || operation.state === 'failed')
           return WebOperationResponseSchema.parse({ ok: true, value: operation });
+        // D-CD-01: a Director launch has no session receipt to observe; an unsettled one stays uncertain and is never relaunched.
+        if (operation.operationKind === 'director_launch')
+          return WebOperationResponseSchema.parse({ ok: true, value: { ...operation, state: 'reconciliation_required' } });
         // Observation only, including missing config/host/stopped sessions. Never call up/down.
         const project=WebProjectSchema.parse(await options.resolveProject(operation.projectId));
         if(project.projectId!==operation.projectId)throw new Error('Foreign registered project');

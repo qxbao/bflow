@@ -11,11 +11,14 @@ import { BrowserSessions } from './session.js';
 import { route, json } from './routes.js';
 import { secureRequest, securityHeaders } from './security.js';
 import { publicError, WebApiErrorStatus } from './errors.js';
+import { DIRECTOR_PORT_METHODS, type LocalWebDirectorServices } from './director.js';
 export interface LocalWebServices {
   workspace: LocalWorkspaceServices;
   interaction: (projectId: string, context: WebAuthenticatedContext) => Promise<UserInteractionClient>;
   hostSessionId?: (projectId: string) => Promise<string>;
   readHistoricalOperation?: (record: WebOperationIndexRecord) => Promise<OperationResult<WebOperation>>;
+  /** D-CD-01 optional Director port; without it the Director routes answer operation_not_allowed. */
+  director?: LocalWebDirectorServices;
 }
 export interface LocalWebCompositionContext {
   readonly principalId: string;
@@ -27,14 +30,15 @@ export interface LocalWebServerOptions {
   interaction?: LocalWebServices['interaction'];
   readHistoricalOperation?: LocalWebServices['readHistoricalOperation'];
   hostSessionId?: LocalWebServices['hostSessionId'];
+  director?: LocalWebServices['director'];
   compose?: (context: LocalWebCompositionContext) => LocalWebServices | Promise<LocalWebServices>;
 }
 export interface LocalWebServer {readonly origin:string;issueBootstrap():Promise<string>;close():Promise<void>}
 /** Listener creation is explicit; importing the package has no side effects. No fallback backend. */
 export async function createLocalWebServer(options:LocalWebServerOptions):Promise<LocalWebServer>{
   const config = LocalWebServerConfigSchema.parse({host:options.host,port:options.port,stateDirectory:options.stateDirectory,assetsDirectory:options.assetsDirectory});
-  if (Object.keys(options).some(k=>!['host','port','stateDirectory','assetsDirectory','workspace','interaction','compose','readHistoricalOperation','hostSessionId'].includes(k)) ||
-      (options.compose && (options.workspace || options.interaction || options.readHistoricalOperation || options.hostSessionId)) ||
+  if (Object.keys(options).some(k=>!['host','port','stateDirectory','assetsDirectory','workspace','interaction','compose','readHistoricalOperation','hostSessionId','director'].includes(k)) ||
+      (options.compose && (options.workspace || options.interaction || options.readHistoricalOperation || options.hostSessionId || options.director)) ||
       (options.compose !== undefined && typeof options.compose !== 'function')) throw new Error('Invalid Local Server options');
   const assetsDirectory=await realpath(config.assetsDirectory),state=await PrivateState.open(config.stateDirectory);
   let queue:Promise<unknown>=Promise.resolve();
@@ -43,11 +47,13 @@ export async function createLocalWebServer(options:LocalWebServerOptions):Promis
   let services: LocalWebServices;
   try {
     services = options.compose ? await options.compose({principalId:state.principalId, resolveProject:id=>registry.require(id)}) :
-      {workspace:options.workspace!,interaction:options.interaction!,...(options.hostSessionId?{hostSessionId:options.hostSessionId}:{}),...(options.readHistoricalOperation?{readHistoricalOperation:options.readHistoricalOperation}:{})};
+      {workspace:options.workspace!,interaction:options.interaction!,...(options.hostSessionId?{hostSessionId:options.hostSessionId}:{}),...(options.readHistoricalOperation?{readHistoricalOperation:options.readHistoricalOperation}:{}),...(options.director?{director:options.director}:{})};
     if (!services || typeof services.interaction !== 'function' || !services.workspace ||
         ['inspectProject','startSession','stopSession','reconcileSessionOperation','preview'].some(k=>typeof Reflect.get(services.workspace,k)!=='function') ||
         (services.hostSessionId !== undefined && typeof services.hostSessionId !== 'function') ||
-        (services.readHistoricalOperation !== undefined && typeof services.readHistoricalOperation !== 'function')) throw new Error('Invalid Local Server services');
+        (services.readHistoricalOperation !== undefined && typeof services.readHistoricalOperation !== 'function') ||
+        (services.director !== undefined && (typeof services.director !== 'object' || services.director === null ||
+          DIRECTOR_PORT_METHODS.some(k=>typeof Reflect.get(services.director!,k)!=='function')))) throw new Error('Invalid Local Server services');
   } catch(error) { await state.close(); throw error; }
   const interaction:LocalWebServices['interaction']=(id,context)=>services.interaction(id,WebAuthenticatedContextSchema.parse(context));
   const operations=new Operations(index,services.workspace,interaction,serialize,id=>registry.require(id),services.readHistoricalOperation,services.hostSessionId);
@@ -56,7 +62,7 @@ export async function createLocalWebServer(options:LocalWebServerOptions):Promis
   let origin='';let closed=false;
   const server=createServer({requestTimeout:15000,headersTimeout:10000,maxHeaderSize:16384},(req,res)=>{
     securityHeaders(res);
-    const active=(async()=>{try{secureRequest(req,origin);await route(req,res,{eventEpoch,sessions,registry,operations,interaction,principalId:state.principalId,assetsDirectory,serialize});}
+    const active=(async()=>{try{secureRequest(req,origin);await route(req,res,{eventEpoch,sessions,registry,operations,interaction,principalId:state.principalId,assetsDirectory,serialize,...(services.director?{director:services.director}:{})});}
       catch(error){if(!res.headersSent){const safe=publicError(error);json(res,WebApiErrorStatus[safe.code],safe);}else res.destroy();}
     })();pending.add(active);void active.finally(()=>pending.delete(active));
   });
