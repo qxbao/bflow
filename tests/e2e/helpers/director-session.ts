@@ -163,13 +163,25 @@ export interface DirectorSessionOptions {
    * it creates the Core run (core-session.ts: initial stored run plus the engine's creation events), from the run's own persisted definition.
    */
   journal?: { runs?: { runId: string; coreCreated?: boolean; definition?: unknown; delegation: { requestedAt: string } }[] } & Record<string, unknown>;
+  /**
+   * E18 restart: reopen the durable state (repository, RunStore, artifacts, Registry, journal, Director store, host receipts) of an
+   * earlier session's `root` instead of creating a new one. The caller closes the earlier session first (`close()`, not `cleanup()`).
+   */
+  root?: string;
+  /** E18 restart: keep the same actual manifest/pane catalog across the reopen. */
+  panes?: DirectorPanes;
+  /** Host composition: give the endpoint the read-only Runtime run document so issue retries check the current park episode. */
+  inspectRun?: boolean;
 }
 
 export async function createDirectorSession(options: DirectorSessionOptions = {}) {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-e17-")));
-  const repository = join(root, "repo"); await mkdir(repository);
-  git(repository, "init", "-b", "main"); git(repository, "config", "user.name", "Test"); git(repository, "config", "user.email", "test@example.test");
-  await writeFile(join(repository, "guide.md"), "initial\n"); git(repository, "add", "."); git(repository, "commit", "-m", "baseline");
+  const root = options.root ?? await realpath(await mkdtemp(join(tmpdir(), "bflow-e17-")));
+  const repository = join(root, "repo");
+  if (options.root === undefined) {
+    await mkdir(repository);
+    git(repository, "init", "-b", "main"); git(repository, "config", "user.name", "Test"); git(repository, "config", "user.email", "test@example.test");
+    await writeFile(join(repository, "guide.md"), "initial\n"); git(repository, "add", "."); git(repository, "commit", "-m", "baseline");
+  }
   const store = unwrap(openSqliteRunStore({ filename: join(root, "runs.db") }));
   const artifacts = unwrap(await openFilesystemArtifactStore({ root: join(root, "artifacts"), storeId: "e17" }));
   for (const run of options.journal?.runs ?? []) {
@@ -183,7 +195,7 @@ export async function createDirectorSession(options: DirectorSessionOptions = {}
     unwrap(await store.appendEvents(AppendEventsRequestSchema.parse({ runId: run.runId, expectedVersion: 0, expectedLastSequence: 0,
       events: created.emittedEvents, idempotencyKey: `p19-events:${run.runId}:${created.emittedEvents[0]!.eventId}` })));
   }
-  const transport = new RecordingTransport(), panes = new DirectorPanes();
+  const transport = new RecordingTransport(), panes = options.panes ?? new DirectorPanes();
   const journalDirectory = join(root, "journal");
   if (options.journal) {
     await mkdir(journalDirectory, { recursive: true, mode: 0o700 });
@@ -211,7 +223,7 @@ export async function createDirectorSession(options: DirectorSessionOptions = {}
   const startWork: DirectorStartWorkDeps = { manifest: () => panes.manifest(), build: buildDelegationRequest as unknown as DirectorStartWorkDeps["build"],
     admitDirectorWork: request => runtime.admitDirectorWork(request), log: async () => undefined };
   const endpoint = new DirectorEndpoint({ directory: join(root, "director"), repositoryRoot: repository, feed: { read: () => ({ items: [] }) },
-    inspect: () => runtime.inspect(), pollMs: 20,
+    inspect: () => runtime.inspect(), pollMs: 20, ...(options.inspectRun ? { inspectRun: (runId: string) => runtime.inspect(runId) } : {}),
     work: { start: async input => startDirectorWork(startWork, input) },
     // The host's own Director Coordinator port: it supplies the Director principal (R-B2-12) for every Director-token call.
     coordinator: directorCoordinatorPort({ invoke: (name, parameters, principal) => tools().invoke(name, parameters, principal),
@@ -325,7 +337,9 @@ export async function createDirectorSession(options: DirectorSessionOptions = {}
     tools, inspect, state, submit, evidence, tickWithReviewer, reviewerReplies,
     trackRun(runId: string, correlationId: string) { correlations.set(runId, correlationId); },
     advanceClock(ms: number) { clockOffsetMs += ms; },
-    async cleanup() { store.close(); artifacts.close(); await rm(root, { recursive: true, force: true }); }
+    /** Closes the durable stores without deleting them (E18 restart); `cleanup()` closes and deletes. */
+    close() { store.close(); artifacts.close(); },
+    async cleanup() { store.close(); artifacts.close(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
   };
 }
 export type DirectorSession = Awaited<ReturnType<typeof createDirectorSession>>;
