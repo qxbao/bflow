@@ -23,7 +23,7 @@
 - Giữ token/style hiện có, focus/keyboard/aria labels, không color-only, không fake token streaming; update nền không CLS.
 - `./node_modules/.bin/tsc -b` trước subprocess tests, không pnpm exec tsc. Vitest `--minWorkers=1 --maxWorkers=3`; CLI theo đợt<=15 tệp. Build Web trước web-server-integration.
 - HOME/BFLOW_HOME/XDG/TMPDIR cô lập, ngắn dưới/tmp; lọc ambient AI_ISOLATOR/ORCA/provider-home hints trong tests. Không sửa provider-global config hay chạy setup/e11 HOME thật.
-- Không xóa compatibility v2 trước release chuyển tiếp và đủ evidence; không xóa enum conversation/coordinator. Chưa có quyền push/merge nhánh C/D.
+- Không xóa compatibility v2 trước release chuyển tiếp và đủ evidence; không xóa enum conversation/coordinator. Chủ dự án đã cho phép merge main và push remote tại mốc bàn giao do quota thấp (2026-11-04); không force-push.
 - Mức source/local/fake, OS/provider probe và full live SDLC phải báo riêng; thiếu auth/desktop/human gate là blocked/unverified, không giả pass.
 
 ## Review Focus
@@ -72,16 +72,18 @@
 
 ### Task 2: Runtime Director Web bridge, durable transcript và issue admission
 
-**Files:** modify `packages/runtime/src/director/{store,tools,endpoint,host-methods}.ts`, `packages/runtime/src/agentic/{host,host-controller,host-director-mode}.ts`; create `packages/runtime/src/director/web.ts`; tests `packages/runtime/test/director/{web-bridge,transcript-recovery}.test.ts`.
+**Files:** modify `packages/runtime/src/director/{store,tools,endpoint}.ts`, `packages/runtime/src/agentic/{host,host-controller}.ts`, private interaction command/query wiring; existing `host-methods.ts`/`host-director-mode.ts` reused when no logic change is needed; create `packages/runtime/src/director/web.ts`; tests `packages/runtime/test/director/{web-bridge,transcript-recovery}.test.ts`.
 **Interfaces:** consumes Task1; produces trusted host methods `interaction_director_send/history`, query director/issue views, issue command admission. Private LocalDirectorServices adapter dùng exported DTOs; không UserInteractionClient change.
-- [ ] Web credential chỉ send userWeb/history; Director token chỉ director_call; owner queries riêng. Chattext không gọi decision API.
-- [ ] Store append nhận optional caller messageId: cùngid+cùngpayload→same seq; khácpayload→conflict. Web sender bắt buộc authoruser/channelweb; say giữauthorDirector/channelcli.
-- [ ] Durable delivered/ack cursor: next wait input cursor xác nhận trang đã nhận; startCursor từ durable ack để Web messages lúc absent không bị latest-seq bỏ qua. Ack.json được bootstrap dưới serial trước tin Web đầu tiên/register từ last-Director-seq của transcript cũ; fallback này chỉ dùng một lần, không được trượt theo director_say sau khi đã có Web pending. Ack gồm messageSeq/mailboxSeq, đơn điệu và không vượt dữ liệu đã tồn tại. Web transcript GET không làm heartbeat/ack/consume. Keep startedWork idempotence khi replay.
-- [ ] Host là single writer; không LocalServer tự ghi DirectorStore offline (serial chỉ nội bộ). Hạ tầng stopped khácDirector absent: unavailable rõ; host còn sống/Director absent vẫn queue.
-- [ ] Redact Web text/issue fields/token-shape, UTF8 cap; không lộ rawsession/token/path metadata. `cliCaptureMayBeIncomplete` conservative khi hook binding mất/chưaverified.
-- [ ] Feed refresh không phụ thuộc browserpoll để director_wait có runtime events. Store change publishchat/invalidate; fingerprint không dùng timestamp heartbeat thayđổi liên tục; stale presence được read/poll với clock.
-- [ ] Issue retry/status idempotent; expectedUpdatedAt+run/issue/current parked episode được validate trước effect; duplicates không unpark lần2 hay resetopen; uncertain→observe/reconcile, không gửi lại effect. Giữ gate/action/error của task khác.
-- [ ] Tests real producer→Web send→wait→say→SSE/read, queued-before-register/restart, id collision, redaction, cross credentials, no approval fromchat, repeated/stale issue, host absent. Build/test mục tiêu.
+- [x] Web credential chỉ send userWeb/history; Director token chỉ director_call; owner queries riêng. Chattext không gọi decision API.
+- [x] Store append nhận optional caller messageId: cùngid+cùngpayload→same seq; khácpayload→conflict. Web sender bắt buộc authoruser/channelweb; say giữauthorDirector/channelcli.
+- [x] Durable delivered/ack cursor: next wait input cursor xác nhận trang đã nhận; startCursor từ durable ack để Web messages lúc absent không bị latest-seq bỏ qua. Ack.json được bootstrap dưới serial trước tin Web đầu tiên/register từ last-Director-seq của transcript cũ; fallback này chỉ dùng một lần, không được trượt theo director_say sau khi đã có Web pending. Ack gồm messageSeq/mailboxSeq, đơn điệu và không vượt dữ liệu đã tồn tại. Mailbox bootstrap bắt đầu từ0 khi chưa có proof delivery, để cả mailbox trước first register vẫn được giao; chấp nhận replay bounded cũ. Web transcript GET không làm heartbeat/ack/consume. Keep startedWork idempotence khi replay.
+- [x] Host là single writer; không LocalServer tự ghi DirectorStore offline (serial chỉ nội bộ). Hạ tầng stopped khácDirector absent: unavailable rõ; host còn sống/Director absent vẫn queue.
+- [x] Redact Web text/issue fields/token-shape, UTF8 cap; không lộ rawsession/token/path metadata. `cliCaptureMayBeIncomplete` conservative khi hook binding mất/chưaverified.
+- [x] Feed refresh không phụ thuộc browserpoll để director_wait có runtime events. Store change publishchat/invalidate; fingerprint không dùng timestamp heartbeat thayđổi liên tục; stale presence được read/poll với clock.
+- [x] Issue retry/status idempotent; expectedUpdatedAt+run/issue/current parked episode được validate trước effect; duplicates không unpark lần2 hay resetopen; uncertain→observe/reconcile, không gửi lại effect. Giữ gate/action/error của task khác.
+- [x] Tests real producer→Web send→wait→say→SSE/read, queued-before-register/restart, id collision, redaction, cross credentials, no approval fromchat, repeated/stale issue, host absent. Build/test mục tiêu.
+
+**Status:** complete source/local `ed63d99f`; independent Opus Spec/Quality approved (0 Critical/Important, 7 Minor retained). Activated-host and Local Server SSE remain Task9/4. Owner requested quota handoff after this task and allowed skipping remaining verification; see handoff.
 
 ### Task 3: Safe terminal launcher, provider options và bflow open
 
@@ -107,7 +109,7 @@
 ### Task 5: Classic Web — Director chat/presence và mở phiên
 
 **Files:** modify `apps/web/src/api/{client,commands,events}.ts`, `app.tsx`, chat/components/session/overview modules; create `apps/web/src/features/director/{status,launch}.tsx`; tests `apps/web/test/director-chat.test.tsx`, `director-launch.test.tsx`, operation-recovery cases.
-**Interfaces:** consumes1/4; produces shared Director read state/actioncontroller for Classic and3D; no AgentRole change.
+**Interfaces:** consumes1/4; produces shared Director read state/actioncontroller for Classic and3D; no AgentRole change. The legacy chat_adapter_unavailable blocker remains for the v2 chat endpoint; a confirmed Director layout selects Director chat and ignores that legacy-only blocker while honoring host readiness.
 - [ ] Common transcript projectscope, sequencecursor/dedup; no rootcontracts import. Unknown-delivery recovery uses originalid/observe; no blind resend. Keep text visible/label focus and background refresh stable.
 - [ ] Presenceactive/waiting/absent text; readfailure=unknown, không đổi thànhabsent. Queued message remains sendable khiDirector absent vàhostalive. No fake typing/streaming; simple message-levelupdates.
 - [ ] Startsession opensprovider picker ataction; remember UI preferenceonly. Separate diagnostic infrastructurestart label. Showmanualcommand/copy with confirmation; never equate terminal-opened withDirector-ready. Retrying launch never reruns unknown effect.
