@@ -269,3 +269,46 @@ Các ca không chạy trong focused rerun là do `-t` filter, không phải sử
 5. Review các sửa tiếp theo và cập nhật bảng validation/rulings; chỉ chốt Task 10 khi local residuals đã được xử lý/định đoạt minh bạch. Native provider/IDE/live workflow thiếu auth/desktop tiếp tục ghi blocked/unverified; không phải tự tạo human approval hay chứng nhận full acceptance.
 
 Không làm lại Task1–9, item1 re-review, hai browser fixes, E16-D fixture, E17/E18 regression hoặc B2 Task11/12 đã xong. Không push/merge ở đợt3; muốn tiếp tục ở máy khác phải mang theo hai commits source/test và commit handoff này qua kênh Git được chủ dự án cho phép. Raw ignored logs không được mặc định tồn tại ở máy khác.
+
+---
+
+## Đợt 4 (2026-11-04, Linux — xử lý residual Task 10)
+
+Nhánh `agent/director/slice-cd-cont2`, commit test-only `b0093b11` trên `7e6143ed`. Không push, không merge main. Không đổi production, contracts, root config, lockfile hay docs ngoài handoff này.
+
+### Nguyên nhân và sửa
+
+1. **`apps/cli/test/director-web-host.test.ts` (SSE reset sau host restart).** Đã tái hiện: khi khoảng host down trùm một chu kỳ poll `interaction_events` (1s), `events()` ném lỗi, Local Server đóng stream trước khi có `reset`. Test cũ khẳng định stream đang mở phải nhận `reset`, nên fail sau 15s. Khẳng định này mạnh hơn comment của chính test ("either ends"). Web client (`apps/web/src/api/events.ts`) tự tạo lại stream với cursor cuối; stream resume nhận `reset` từ `ProjectionFeed` của epoch mới. Sửa: assertion chấp nhận stream đã đóng hoặc frame đầu tiên sau restart là `reset`. Khẳng định `reset` trên stream resume và việc không splice epoch vẫn giữ nguyên. Không đổi production.
+   - Kiểm chứng: độ trễ 1.6s giữa shutdown và activate: bản cũ fail, bản mới pass. Độ trễ 0 và 2.5s: bản mới pass.
+
+2. **`packages/runtime/test/agentic/host-recovery.test.ts:430` (owner guard).** `shutdown()` (`host-controller.ts:511-520`) chỉ chờ socket bị gỡ, không chờ tiến trình daemon thoát. `refreshEmptyStartupSources` (`host-controller.ts:302-334`) từ chối khi owner PID còn sống. Test không có barrier, trong khi fixture `stop()` cùng file (dòng 46–49) có. Sửa: thêm barrier chờ owner PID chết, theo đúng fixture. Guard production không đổi.
+   - Tái hiện: dưới tải 2× số core, bản cũ fail 1/4 với đúng thông báo `Startup source refresh requires the recorded host owner to be stopped`. Bản mới pass 6/6 dưới cùng tải.
+
+Kiểm tra: `./node_modules/.bin/tsc -b` exit 0; `git diff --check` sạch; commit `b0093b11` (2 file test, +13/−4).
+
+### Rerun ca residual (theo file, workers=1, HOME/XDG/TMPDIR cô lập, BFLOW_HOME unset, env của driver)
+
+| File | Kết quả |
+| --- | --- |
+| runtime `agentic/runner-detection.test.ts` (cây đã commit sạch) | 13/13 PASS |
+| runtime `platform/flow04-platform-gateway-trust.test.ts` | 3/3 PASS. Không tái hiện `devNative.ok=false`; chưa có nguyên nhân gốc, không sửa |
+| runtime `agentic/round4-slice07-verification-git.test.ts` | 5/5 PASS |
+| runtime `agentic/host-recovery.test.ts` (toàn file) | 25/25 PASS |
+| CLI `director-web-host.test.ts` | 1/1 PASS |
+| runtime `agentic/lifecycle-fault-matrix-extended-interventions.test.ts` | 12/12 PASS (60.2s) |
+| E11 `tests/e2e/scenarios/e11-group-a-setup.e2e.test.ts` | Không rerun. Phân loại env-blocked (xem dưới) |
+
+Đây là rerun theo file. Không cộng các con số này thành full pass.
+
+### E11 — env-blocked, chưa xác minh đầy đủ
+
+- `systemctl --user` báo `Failed to connect to bus: No medium found`: env cô lập không có `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`. Nối vào user bus thật sẽ đăng ký unit vào trình quản lý systemd thật, vi phạm ràng buộc không chạy E11 trên môi trường thật.
+- Check `pnpm` của doctor kỳ vọng `passed`. Quan sát được: `pnpm --version` trong HOME cô lập tự tải Corepack (pnpm 12.5.1) vì không có cache. Chưa chạy doctor trực tiếp để xác nhận đây là nguyên nhân duy nhất.
+
+### Còn lại trước khi đóng Task 10
+
+1. Chưa có full validation tại HEAD `b0093b11`: full `pnpm test`, `pnpm test:e2e`, Web/Playwright 35 ca, E16/E16-D trên Linux. Đợt này chỉ rerun theo file.
+2. E11 cần môi trường có user bus và Corepack cache được cô lập đúng cách. Cần chủ dự án quyết định cách chạy.
+3. Quyết định production (chưa làm): `shutdown()` hiện resolve khi socket bị gỡ, không phải khi daemon thoát. `bflow down` rồi `bflow up` ngay sau đó, khi có đổi execution source, có thể gặp cùng guard trong vài ms. Lỗi rõ ràng và retry được. Nếu muốn `shutdown()` nghĩa là "đã dừng", cần thêm owner barrier vào `shutdown()`, nhưng khi daemon không thoát trong 10s thì `bflow down` sẽ fail.
+
+Trạng thái: Task 10 **vẫn in_progress**. Không tuyên bố full test pass hay live acceptance.
