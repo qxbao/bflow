@@ -5,12 +5,13 @@ import { MemoryRouter } from 'react-router';
 import { ApiClient } from '../src/api/client';
 import { DirectorProvider, useDirector } from '../src/features/director/status';
 import { DirectorChat } from '../src/features/director/chat';
+import { Operations } from '../src/features/operations';
 import { directorServer, locks, message, readySession, sessionRead, view, at } from './director-fixtures';
 
 beforeEach(()=>{localStorage.clear();vi.stubGlobal('crypto',webcrypto);Object.defineProperty(navigator,'locks',{configurable:true,value:locks});});
 afterEach(()=>{cleanup();vi.unstubAllGlobals();vi.useRealTimers();});
 function open({revision=0,resetEpoch=0,session=sessionRead(),api=new ApiClient()}:{revision?:number;resetEpoch?:number;session?:ReturnType<typeof sessionRead>|{key:string;loading:boolean;error?:unknown;data?:never};api?:ApiClient}={}){
-  return <MemoryRouter><DirectorProvider api={api} projectId="p" session={session} revision={revision} resetEpoch={resetEpoch}><DirectorChat/></DirectorProvider></MemoryRouter>;
+  return <MemoryRouter><Operations api={api} id="p" refresh={()=>{}} dock="external"><DirectorProvider api={api} projectId="p" session={session} revision={revision} resetEpoch={resetEpoch}><DirectorChat/></DirectorProvider></Operations></MemoryRouter>;
 }
 const input=()=>screen.getByLabelText<HTMLTextAreaElement>('Tin nhắn cho Director');
 const sendButton=()=>screen.getByRole<HTMLButtonElement>('button',{name:'Gửi tin nhắn'});
@@ -194,7 +195,9 @@ it('Enter sends, Shift+Enter and IME composition do not; the label keeps focus o
 it('host not ready or view not_started disables sending with a host message, not a Director-chat failure',async()=>{
   directorServer({view:()=>view({layout:'not_started',sessionId:undefined})});
   render(open({session:sessionRead({...readySession,state:'stopped',sessionId:undefined})}));
-  expect(await screen.findByText(/Host của phiên chưa sẵn sàng/)).toBeTruthy();expect(sendButton().disabled).toBe(true);
+  await waitFor(()=>expect(sendButton().disabled).toBe(true));
+  expect(screen.getByRole('button',{name:'Khởi động phiên'})).toBeTruthy();
+  expect(screen.queryByText(/Trò chuyện qua web chưa khả dụng/)).toBeNull();
 });
 it('background refresh keeps the transcript and the draft without a blocking skeleton',async()=>{
   directorServer({messages:[message(1)]});const rendered=render(open());
@@ -214,19 +217,19 @@ it('exposes a shared read controller for other surfaces',async()=>{
 });
 
 describe('Classic integration',()=>{
-  async function app(path:string,directorView:()=>unknown,session?:unknown){
+  async function app(path:string,directorView:()=>unknown,session?:unknown,extra?:(path:string,init:RequestInit)=>unknown){
     const {App}=await import('../src/app');const {projects,run,decision,preview}=await import('./fixtures');
     class Source{addEventListener(){}close(){}}vi.stubGlobal('EventSource',Source);
     const base:Record<string,unknown>={'/api/v1/session':{apiVersion:1,sessionId:'browser',expiresAt:new Date(Date.now()+3600000).toISOString(),csrfToken:'csrf'},
       '/api/v1/projects':{apiVersion:1,items:projects},'/api/v1/projects/p/preview':preview,'/api/v1/projects/p/runs?limit=25':{apiVersion:1,items:[run]},
       '/api/v1/projects/p/runs/run':run,'/api/v1/projects/p/decisions':{apiVersion:1,items:[decision]},...(session?{'/api/v1/projects/p/session':session}:{})};
-    const server=directorServer({view:directorView as never,messages:[message(2,{text:'Director trả lời'})],extra:path=>base[path]});
+    const server=directorServer({view:directorView as never,messages:[message(2,{text:'Director trả lời'})],extra:(path,init)=>extra?.(path,init)??base[path]});
     render(<MemoryRouter initialEntries={[path]}><App api={new ApiClient()}/></MemoryRouter>);
     return server;
   }
   it('Director layout hides the obsolete create_request form, the legacy chat blocker, and labels the infrastructure start separately',async()=>{
     await app('/projects/p',()=>view({presence:'absent'}));
-    expect(await screen.findByRole('button',{name:'Mở phiên Director'})).toBeTruthy();
+    expect(await screen.findByRole('button',{name:'Khởi động phiên'})).toBeTruthy();
     expect(screen.getByText(/giao việc bằng cách trò chuyện với Director/)).toBeTruthy();
     expect(screen.queryByRole('button',{name:'Tạo công việc'})).toBeNull();
     expect(screen.queryByText(/Trò chuyện qua web chưa khả dụng/)).toBeNull();
@@ -238,6 +241,37 @@ describe('Classic integration',()=>{
     expect(screen.getByLabelText('Tin nhắn cho Director')).toBeTruthy();
     expect(screen.getByRole('navigation',{name:/chỉ đọc/})).toBeTruthy();
     expect(screen.queryByLabelText('Tin nhắn cho Conversation')).toBeNull();
+    expect(screen.getByRole('button',{name:'Khởi động phiên'})).toBeTruthy();
+  });
+  it('a first visit to a stopped Director project can launch from Overview and Chat without starting infrastructure first',async()=>{
+    const notStarted=()=>view({layout:'not_started',sessionId:undefined});
+    const stopped={...readySession,state:'stopped',sessionId:undefined};
+    await app('/projects/p',notStarted,stopped);
+    expect(await screen.findByRole('button',{name:'Khởi động phiên'})).toBeTruthy();
+    expect(screen.queryByRole('button',{name:'Tạo công việc'})).toBeNull();
+    cleanup();await app('/projects/p/chat',notStarted,stopped);
+    expect(await screen.findByRole('button',{name:'Khởi động phiên'})).toBeTruthy();
+    expect(screen.getByRole<HTMLButtonElement>('button',{name:'Gửi tin nhắn'}).disabled).toBe(true);
+  });
+  it.each(['/projects/p','/projects/p/chat'])('cold startup at %s opens the provider picker and posts Director launch, never infrastructure start',async(path)=>{
+    const posts:{path:string;body:Record<string,unknown>}[]=[];
+    await app(path,()=>view({layout:'not_started',sessionId:undefined}),{...readySession,state:'stopped'},(url,init)=>{
+      if(url.endsWith('/director/launch-options'))return {apiVersion:1,projectId:'p',terminal:{available:true},providers:[
+        {provider:'claude',state:'available',manualCommand:"claude '/bflow-start'"}],observedAt:at};
+      if(init.method==='POST'){
+        const body=JSON.parse(String(init.body));posts.push({path:url,body});
+        return Response.json({apiVersion:1,operationId:body.operationId,projectId:'p',owner:'local_lifecycle',operationKind:'director_launch',state:'applied',
+          result:{kind:'director_launch',provider:'claude',mode:'terminal_opened',manualCommand:"claude '/bflow-start'",launchedAt:new Date().toISOString()},updatedAt:new Date().toISOString()},{status:202});
+      }
+      return undefined;
+    });
+    fireEvent.click(await screen.findByRole('button',{name:'Khởi động phiên'}));
+    await screen.findByRole('radiogroup',{name:'Nhà cung cấp cho Director'});
+    expect(screen.queryByLabelText(/Mở phiên thay thế/)).toBeNull();
+    fireEvent.click(screen.getByRole('button',{name:'Mở terminal Director'}));
+    await waitFor(()=>expect(posts).toHaveLength(1));
+    expect(posts[0]).toMatchObject({path:'/api/v1/projects/p/director/launch',body:{provider:'claude',replaceActive:false}});
+    expect(await screen.findByText(/Đã mở cửa sổ terminal/)).toBeTruthy();
   });
   it('a backend without the Director port keeps the legacy v2 UI unchanged',async()=>{
     await app('/projects/p',()=>Response.json({apiVersion:1,code:'operation_not_allowed',message:'no port',retryable:false,correlationId:'t'},{status:422}));
@@ -269,7 +303,7 @@ describe('Classic integration',()=>{
     expect(screen.queryByText(/Trò chuyện qua web chưa khả dụng/)).toBeNull();
     const panel=screen.getByRole('region',{name:'Director'});
     expect(within(panel).getByText('Chưa đọc được trạng thái Director')).toBeTruthy();
-    expect(within(panel).queryByRole('button',{name:'Mở phiên Director'})).toBeNull();
+    expect(within(panel).getByRole('button',{name:'Khởi động phiên'})).toBeTruthy();
     cleanup();await app('/projects/p/chat',down,stopped);
     expect(await screen.findByLabelText('Tin nhắn cho Director')).toBeTruthy();
     expect(screen.getAllByText('Chưa đọc được trạng thái Director').length).toBeGreaterThan(0);

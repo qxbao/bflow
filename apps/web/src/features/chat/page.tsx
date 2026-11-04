@@ -37,7 +37,7 @@ export function ChatPage({api,id,revision,refresh}:{api:ApiClient;id:string;revi
         </NavLink>)}
         {runs.data && <div className="px-3"><Pagination label="Phân trang danh sách trò chuyện" page={pagination.page} first={pagination.first} previous={pagination.previous} next={runs.data.nextCursor?()=>pagination.next(runs.data!.nextCursor!):undefined} busy={runs.loading || Boolean(runs.error)}/></div>}
       </nav>
-      <div className={`${runId?'block':'hidden lg:block'} min-w-0`}>
+      <div className={`${runId||director?'block':'hidden lg:block'} min-w-0`}>
         {runId?<><Link className="block border-b border-line px-4 py-2 font-data text-sm lg:hidden" to={{pathname:base,search:location.search}}>← Danh sách trò chuyện</Link><Thread key={runId} api={api} id={id} runId={runId} revision={revision} refresh={refresh} draft={draft} readOnly={director}/></>:director?<DirectorChat {...(draft?{initialDraft:draft}:{})}/>:<div className="p-6"><EmptyState title="Chọn một công việc"><p>Mỗi công việc có một cuộc trò chuyện riêng với Conversation.</p>{draft&&<p className="whitespace-pre-wrap border-l-3 border-line pl-3 text-sm">Bản nháp chưa gửi: {draft}</p>}</EmptyState></div>}
       </div>
     </div>

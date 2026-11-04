@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { z } from 'zod';
 import { IdentifierSchema, SessionManifestSchema, type OperationResult } from '@bflow/contracts';
 import { WebChatMessageResultSchema, WebChatPageResultSchema, WebChatSendSchema, WebCommandSchema, WebNoticeDisplayedResultSchema,
-  WebOperationResponseSchema, WebProjectSchema, WebProjectSessionResultSchema,
+  WebOperationResponseSchema, WebProjectSchema, WebProjectSessionResultSchema, WebDirectorViewSchema,
   type UserInteractionClient, type WebOperation, type WebProject } from '@bflow/contracts/web';
 import { canonicalWebJson, webCommandFingerprint, WebPrincipalSchema, WebAuthenticatedContextSchema,
   WebOperationIndexRecordSchema, WebIssuerRegistrationSchema, WebIssuerCredentialSchema,
@@ -13,6 +13,8 @@ import { findPrivateRuntimeStateDirectory, openLocalDirectorServices, openUserIn
   type LocalDirectorServices } from '@bflow/runtime';
 import type { LocalWebDirectorServices, DirectorLaunchOutcome } from '@bflow/local-server';
 import { identifyRepository } from './repository.js';
+import { readEnvironmentConfig } from './environment-config.js';
+import { readPreviewFile } from './preview-files.js';
 import { DirectorLaunchError, buildDirectorLaunchPlan, inspectDirectorLaunchOptions, launchDirectorPlan,
   type DirectorLaunchDeps, type DirectorLaunchPresence } from './director-open.js';
 
@@ -198,6 +200,23 @@ export function createWebInteractionServices(context: InteractionComposition, de
     }catch{return 'unknown';}
   });
   const launchDeps=async():Promise<DirectorLaunchDeps>=>directorDeps.deps??{pathEntries:(await import('./gateway-repositories.js')).resolveSetupPlatform().pathEntries};
+  // Startup cannot depend on the host it is meant to start. Only a positively stopped
+  // host permits this offline projection; an unresponsive live host remains unknown.
+  const stoppedDirectorView=async(project:WebProject,hostSessionId:string):ReturnType<LocalWebDirectorServices['readView']>=>{
+    if(await readPresence(project,hostSessionId)!=='host_stopped')return directorUnavailable();
+    const repository=await identifyRepository(project.canonicalPath);
+    await readEnvironmentConfig(repository);
+    let legacy=false;
+    try{
+      const manifest=SessionManifestSchema.parse(JSON.parse(await readPreviewFile(join(project.canonicalPath,'.bflow/state/session.json'),4*1024*1024)));
+      if(manifest.sessionId!==hostSessionId || manifest.workspaceRoot!==project.canonicalPath)return directorUnavailable();
+      legacy=manifest.schemaVersion===2 && manifest.status!=='down';
+    }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+    const at=new Date().toISOString();
+    return {ok:true as const,value:WebDirectorViewSchema.parse({apiVersion:1,projectId:project.projectId,
+      layout:legacy?'legacy_v2':'not_started',snapshot:{schemaVersion:1,generatedAt:at,director:{presence:'absent'},
+        runs:[],pendingApprovals:0,pendingQuestions:0,issues:[]},transcriptSeq:0,cliCaptureMayBeIncomplete:true,observedAt:at})};
+  };
   const director:LocalWebDirectorServices={
     async readView(projectId,input){
       let scope;try{scope=await directorScope(projectId,input);}catch{return directorRefused('forbidden','Invalid Director scope.');}
@@ -208,8 +227,11 @@ export function createWebInteractionServices(context: InteractionComposition, de
           const expected=await (directorDeps.conversationSessionId??manifestConversationSessionId)(scope.project,scope.hostSessionId).catch(()=>undefined);
           if(expected!==undefined && expected!==view.value.sessionId)return directorUnavailable('Director view không khớp phiên host hiện tại.');
         }
+        if(!view.ok && view.error.code==='transport_unavailable')return await stoppedDirectorView(scope.project,scope.hostSessionId);
         return view;
-      }catch{return directorUnavailable();}
+      }catch{
+        try{return await stoppedDirectorView(scope.project,scope.hostSessionId);}catch{return directorUnavailable();}
+      }
     },
     async issues(projectId,cursor,input){
       let scope;try{scope=await directorScope(projectId,input);}catch{return directorRefused('forbidden','Invalid Director scope.');}

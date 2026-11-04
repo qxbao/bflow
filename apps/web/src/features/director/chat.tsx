@@ -5,6 +5,7 @@ import { FieldLabel } from '../../components/FieldHelp';
 import { LoadingState } from '../../components/LoadingState';
 import { DirectorPresenceStatus, useDirector, type DirectorChatBlock, type DirectorPresenceState } from './status';
 import { useDirectorTranscript, type DirectorTranscript } from './transcript';
+import { DirectorLaunch } from './launch';
 
 /**
  * Refusals proven to precede any write on the FIRST attempt (the ID is then released). Same set as the legacy chat composer
@@ -16,7 +17,7 @@ const REPLY_WINDOW_MS=5*60*1000,REPLY_POLL_MS=5000,RECONCILE_PAGES=60;
 const blockText:Record<DirectorChatBlock,string>={
   unknown:'Chưa xác nhận được phiên Director nên chưa gửi được tin. Tải lại dữ liệu hoặc kiểm tra phiên dự án.',
   legacy:'Phiên này dùng bố cục cũ (v2); trò chuyện Director không dùng được.',
-  host_not_ready:'Host của phiên chưa sẵn sàng; tin chưa gửi được. Khởi động hạ tầng phiên ở trang Tổng quan rồi thử lại.',
+  host_not_ready:'Phiên chưa sẵn sàng; tin chưa gửi được. Bấm Khởi động phiên để mở Director.',
   session_mismatch:'Phiên host vừa thay đổi. Đang đọc lại trạng thái trước khi cho gửi tin.',
 };
 const ownNote:Record<DirectorPresenceState,string>={
@@ -46,6 +47,7 @@ export function DirectorChat({initialDraft=''}:{initialDraft?:string}){
       <span aria-hidden="true" className="flex size-10 shrink-0 items-center justify-center rounded-full bg-steel font-data font-semibold text-surface">D</span>
       <div className="min-w-0 grow basis-40"><h2 className="m-0 truncate text-base">Director</h2><DirectorPresenceStatus compact/></div>
       <button type="button" onClick={()=>{d.reload();void transcript.refresh();}}>Đọc lại hội thoại</button>
+      <DirectorLaunch label="Khởi động phiên"/>
     </header>
     <div ref={log} role="log" aria-label="Tin nhắn với Director" aria-busy={transcript.loading} tabIndex={0} onScroll={event=>{const e=event.currentTarget;pinned.current=e.scrollHeight-e.scrollTop-e.clientHeight<80;}} className="min-h-0 grow overflow-y-auto bg-canvas px-4 py-3">
       {!transcript.loaded&&<LoadingState loading={transcript.loading||!transcript.error} initial label="Đang đọc hội thoại Director…"/>}
