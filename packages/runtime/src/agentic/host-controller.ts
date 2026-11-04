@@ -31,6 +31,23 @@ import type { RegressionScope } from "./regression-changes.js";
 
 const HOST_STARTUP_TIMEOUT_MS = 120_000;
 
+/** Inspect only bounded bytes from this boot attempt; never echo arbitrary log text or credentials. */
+async function startupSocketPermissionFailure(path: string, offset: number): Promise<string | undefined> {
+  try {
+    const file = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.size <= offset) return undefined;
+      const start = Math.max(offset, stat.size - 4096);
+      const bytes = Buffer.alloc(stat.size - start);
+      const { bytesRead } = await file.read(bytes, 0, bytes.length, start);
+      const code = /\blisten (EPERM|EACCES):/.exec(bytes.subarray(0, bytesRead).toString("utf8"))?.[1];
+      if (code) return `Host Unix socket permission denied (listen ${code})`;
+    } finally { await file.close(); }
+  } catch { /* Preserve the original startup error when diagnostics are unavailable. */ }
+  return undefined;
+}
+
 export type { RegressionScope };
 export type FastPathMode = "auto" | "off";
 
@@ -466,7 +483,9 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
 
     const log = await open(join(directory, "host.log"), "a", 0o600);
     let exited: string | undefined;
+    let startupLogOffset = 0;
     try {
+      startupLogOffset = (await log.stat()).size;
       const child = spawn(process.execPath, [fileURLToPath(new URL("./host.js", import.meta.url)), "daemon", configPath],
         { detached: true, cwd: repositoryPath, stdio: ["ignore", log.fd, log.fd], env: { ...process.env } });
       child.once("exit", (code, signal) => { exited = signal ? `signal ${signal}` : `exit code ${code}`; });
@@ -479,7 +498,10 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
     while (true) {
       try { await request("ping"); break; }
       catch (startupError) {
-        if (exited !== undefined) throw new Error(`Agentic host exited during startup (${exited}): ${String(startupError)}; see ${join(directory, "host.log")}`);
+        if (exited !== undefined) {
+          const cause = await startupSocketPermissionFailure(join(directory, "host.log"), startupLogOffset) ?? String(startupError);
+          throw new Error(`Agentic host exited during startup (${exited}): ${cause}; see ${join(directory, "host.log")}`);
+        }
         if (Date.now() >= deadline) throw new Error(`Agentic host failed to start within ${HOST_STARTUP_TIMEOUT_MS / 1000}s: ${String(startupError)}; the daemon may still be starting, retry shortly or see ${join(directory, "host.log")}`);
       }
       await new Promise(accept => setTimeout(accept, 50));

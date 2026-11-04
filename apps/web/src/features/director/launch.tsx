@@ -37,7 +37,7 @@ function CopyCommand({command}:{command:string}){
  * by nature, so an unsettled or uncertain operation is only re-read by its original ID; a new window needs an explicit new intent.
  * A terminal window opening is not Director readiness: only the view's presence (active/waiting) is.
  */
-export function DirectorLaunch(){
+export function DirectorLaunch({label='Mở phiên Director'}:{label?:string}){
   const d=useDirector(),command=useCommands('director_launch'),uid=useId();
   const [open,setOpen]=useState(false),[options,setOptions]=useState<WebDirectorLaunchOptions>(),[loading,setLoading]=useState(false),[error,setError]=useState('');
   const [provider,setProvider]=useState<Provider>(),[replace,setReplace]=useState(false);
@@ -98,7 +98,7 @@ export function DirectorLaunch(){
     try{await command.startNew(tracked.record.commandId);}catch(e){setError(e instanceof Error?e.message:explain(e));}
   }
   return <div data-component="DirectorLaunch" className="min-w-0">
-    {!unsettled&&<button ref={toggle} type="button" aria-expanded={open} aria-controls={`${uid}-picker`} className="min-w-40 border-ink bg-brand font-semibold text-on-brand hover:bg-ink hover:text-surface" disabled={!command.online||command.busy} onClick={()=>void openPicker()}>Mở phiên Director</button>}
+    {!unsettled&&<button ref={toggle} type="button" aria-expanded={open} aria-controls={`${uid}-picker`} className="min-w-40 border-ink bg-brand font-semibold text-on-brand hover:bg-ink hover:text-surface" disabled={!command.online||command.busy} onClick={()=>void openPicker()}>{label}</button>}
     {open&&!unsettled&&<div id={`${uid}-picker`} onKeyDown={escape} className="mt-2.5 min-w-0 border border-line bg-canvas p-3">
       {loading&&<p role="status" className="my-1 text-sm text-muted">Đang kiểm tra cách mở Director trên máy này…</p>}
       {options&&<>
@@ -141,9 +141,9 @@ export function DirectorSessionPanel({chatPath}:{chatPath:string}){
     <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h2 className="m-0 text-base">Director</h2><Link className="font-data text-xs font-semibold" to={chatPath}>Trò chuyện với Director →</Link></div>
     <DirectorPresenceStatus/>
     <div className="mt-2.5">
-      {d.layout==='director'&&<DirectorLaunch/>}
-      {d.layout==='not_started'&&<p className="my-1 text-sm text-muted">Host của phiên chưa sẵn sàng. Khởi động hạ tầng phiên ở trên trước, rồi mở phiên Director.</p>}
-      {d.hinted&&<p className="my-1 text-sm text-muted">Chưa đọc được trạng thái Director (host có thể đang dừng). Khởi động hạ tầng phiên trước; việc đó chưa mở Director.</p>}
+      {(d.layout==='director'||d.layout==='not_started'||d.hinted)&&<DirectorLaunch label="Khởi động phiên"/>}
+      {d.layout==='not_started'&&<p className="my-1 text-sm text-muted">Chọn công cụ AI để mở terminal Director. Director sẽ tự khởi động hoặc nối lại hạ tầng phiên.</p>}
+      {d.hinted&&<p className="my-1 text-sm text-muted">Chưa đọc được trạng thái Director. Kiểm tra phiên hiện có trước khi xác nhận mở phiên thay thế.</p>}
     </div>
   </section>;
 }

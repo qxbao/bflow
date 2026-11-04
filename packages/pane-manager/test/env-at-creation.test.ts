@@ -376,6 +376,71 @@ describe("launch env is applied at pane creation through the Herdr socket", () =
     assertNoTokens(runner);
   });
 
+  it.each([
+    { withEnv: true, retainedManifest: false },
+    { withEnv: true, retainedManifest: true },
+    { withEnv: false, retainedManifest: false },
+    { withEnv: false, retainedManifest: true }
+  ])("rejects an unowned restored name before mutations (env=$withEnv, manifest=$retainedManifest)", async ({ withEnv, retainedManifest }) => {
+    const { runner, manager: oldManager } = setup({});
+    const initial = await oldManager.initializeTopology();
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const oldPlanner = initial.value.panes.find(pane => pane.role === "planner")!;
+    const store = new InMemorySessionManifestStore();
+    if (retainedManifest) {
+      expect((await store.save({ ...initial.value, status: "down",
+        panes: initial.value.panes.filter(pane => pane.role !== "planner") })).ok).toBe(true);
+    }
+    if (!retainedManifest) for (const name of [...runner.agents.keys()]) if (name !== "planner") runner.agents.delete(name);
+    const beforeManifest = await store.load("bflow-env-test");
+    const beforePanes = structuredClone([...runner.panes]);
+    const beforeCalls = runner.calls.length;
+    const beforeSocketCalls = runner.socketCalls.length;
+    const desired = config({}, withEnv ? { planner: plannerLaunch() } : {});
+    if (!withEnv) desired.roleConfigs!.planner = { agentKind: "codex" };
+    // Without a matching workspace even workspace.create must wait for the name preflight.
+    const fresh = createRolePaneManager({ config: { ...desired, ...(!retainedManifest ? { projectName: "fresh-project" } : {}) },
+      runner, store, socket: runner.socket, worktreeInspector: inspector });
+    const result = await fresh.reconcileTopology();
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("conflict");
+    expect([...runner.panes]).toEqual(beforePanes);
+    expect(await store.load("bflow-env-test")).toEqual(beforeManifest);
+    expect(result.error.message).toContain("planner");
+    expect(result.error.message).toContain(oldPlanner.paneId);
+    expect(result.error.message).toContain("bflow doctor");
+    expect(result.error.message).toContain("unowned");
+    expect(runner.calls.slice(beforeCalls).every(call => ["list", "get"].includes(call.args[1]!))).toBe(true);
+    expect(runner.socketCalls).toHaveLength(beforeSocketCalls);
+    assertNoTokens(runner);
+  });
+
+  it("preserves ownership evidence when a stale launch pane now belongs to another named agent", async () => {
+    const { runner, store, manager } = setup({ planner: plannerLaunch() });
+    const initial = await manager.initializeTopology();
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const planner = initial.value.panes.find(pane => pane.role === "planner")!;
+    runner.agents.delete("planner");
+    runner.agents.set("external-agent", { name: "external-agent", kind: "claude", paneId: planner.paneId });
+    const beforeManifest = await store.load("bflow-env-test");
+    const beforePanes = structuredClone([...runner.panes]);
+    const beforeCalls = runner.calls.length;
+    const beforeSocketCalls = runner.socketCalls.length;
+    const replacement = { ...plannerLaunch(), launchId: "launch-planner-2" };
+    const fresh = createRolePaneManager({ config: config({}, { planner: replacement }), runner, store,
+      socket: runner.socket, worktreeInspector: inspector });
+    const result = await fresh.reconcileTopology();
+    expect(result).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect([...runner.panes]).toEqual(beforePanes);
+    expect(await store.load("bflow-env-test")).toEqual(beforeManifest);
+    expect(runner.calls.slice(beforeCalls).every(call => ["list", "get"].includes(call.args[1]!))).toBe(true);
+    expect(runner.socketCalls).toHaveLength(beforeSocketCalls);
+    expect(runner.agents.get("external-agent")?.paneId).toBe(planner.paneId);
+  });
+
   it("keeps an env-bearing role's pane when its recorded launch is unchanged", async () => {
     const runner = new EnvHerdr();
     const store = new InMemorySessionManifestStore();

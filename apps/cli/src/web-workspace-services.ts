@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { randomUUID, createHash } from 'node:crypto';
-import { lstat, mkdir, open, rename, unlink, realpath } from 'node:fs/promises';
+import { lstat, mkdir, open, rename, unlink, realpath, opendir } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import {
   IdentifierSchema, ContractErrorSchema, EnvironmentDoctorReportSchema, ExecutionPlanSchema,
@@ -13,7 +13,7 @@ import {
   type LocalWorkspaceServices, type WebProject, type WebProjectSession, type WebOperation,
 } from '@bflow/contracts/web';
 import { openUserInteractionClient } from '@bflow/runtime';
-import { EnvironmentLifecycle, startupLeftSessionUnchanged, type EnvironmentDependencies } from './environment.js';
+import { EnvironmentLifecycle, lifecycleLeftSessionUnchanged, startupLeftSessionUnchanged, startupSessionWasCleanedUp, type EnvironmentDependencies } from './environment.js';
 import { identifyRepository } from './repository.js';
 import { readEnvironmentConfig } from './environment-config.js';
 import { readPreviewFile } from './preview-files.js';
@@ -49,6 +49,31 @@ async function readReceipt(directory:string,projectId:string,id:string):Promise<
   if(value.projectId!==projectId || value.operationId!==id || value.owner!=='local_lifecycle')throw new Error('Foreign lifecycle receipt');
   return value;
 }
+/** A later explicit, confirmed stop can retire uncertainty without inventing the earlier outcome.
+ * Old error strings, elapsed time and absent hosts are deliberately insufficient.
+ */
+async function subsequentStop(directory:string,operation:WebOperation,sessionId:string):Promise<WebOperation|undefined>{
+  if(!await receiptRoot(directory))return undefined;
+  const entries:string[]=[];
+  // Bound filesystem work. Keep uncertainty if the private receipt archive needs maintenance.
+  for await(const entry of await opendir(directory)){
+    if(entries.length===256)return undefined;
+    entries.push(entry.name);
+  }
+  for(const name of entries){
+    if(!/^[a-f0-9]{64}\.json$/.test(name))continue;
+    try{
+      const candidate=WebOperationSchema.parse(JSON.parse(await readPreviewFile(join(directory,name),16*1024)));
+      if(candidate.projectId!==operation.projectId || candidate.owner!=='local_lifecycle' ||
+        receiptPath(directory,candidate.projectId,candidate.operationId)!==join(directory,name))continue;
+      const validated=await readReceipt(directory,candidate.projectId,candidate.operationId);
+      if(validated?.operationKind==='session_stop' && validated.state==='applied' && validated.result?.kind==='lifecycle' &&
+        validated.result.session.state==='stopped' && validated.result.session.sessionId===sessionId &&
+        Date.parse(validated.updatedAt)>Date.parse(operation.updatedAt))return validated;
+    }catch{/* Malformed/unrelated receipts provide no evidence. */}
+  }
+  return undefined;
+}
 const IGNORED_FSYNC_CODES=['EINVAL','ENOTSUP','EOPNOTSUPP','ENOSYS','EPERM','EACCES','EBADF','EISDIR','EROFS'];
 async function syncHandleSafe(handle:{sync():Promise<void>}){
   try{await handle.sync();}
@@ -79,8 +104,12 @@ async function settleReceipt(directory:string,operation:WebOperation){
 function lifecycleFailureMessage(failure:unknown,kind:'session_start'|'session_stop'):string{
   const raw=failure instanceof Error?failure.message:String(failure);
   const text=raw.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g,'').trim().slice(0,3500);
-  const lead=startupLeftSessionUnchanged(failure)
+  const lead=startupSessionWasCleanedUp(failure)
+    ?'Khởi động thất bại; phiên đã được dừng an toàn và trạng thái khôi phục được giữ nguyên. Khắc phục rồi bắt đầu thao tác mới.'
+    :startupLeftSessionUnchanged(failure)
     ?'Khởi động bị chặn trước khi mở phiên; không có thay đổi cần đối chiếu. Khắc phục rồi bắt đầu thao tác mới.'
+    :lifecycleLeftSessionUnchanged(failure)
+    ?'Thao tác vòng đời bị chặn trước khi thay đổi phiên. Khắc phục rồi bắt đầu thao tác mới.'
     :kind==='session_start'?'Khởi động chưa được xác nhận. Giữ operation ID; kiểm tra bflow status và bflow doctor trước khi khôi phục.'
     :'Dừng phiên chưa được xác nhận. Giữ nguyên checkpoint và kiểm tra bflow doctor; không tự gửi lại stop.';
   return text?`${lead}\n${text}`:lead;
@@ -133,12 +162,10 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
       try{result=WebProjectSessionResultSchema.parse(await effect());}
       catch(failure){
         // Settle every outcome: an unsettled `running` receipt would never resolve for the browser.
-        // Only a startup that proved no session side effect is definitive; anything else stays uncertain.
-        const lockContention = String(failure).includes('Another bflow up/down/recover is still running');
-        const definitive = startupLeftSessionUnchanged(failure) || lockContention;
-        const message = lockContention
-          ? 'Thao tác vòng đời bị chặn vì có thao tác vòng đời khác đang chạy. Đợi thao tác hoàn tất rồi thử lại.'
-          : lifecycleFailureMessage(failure, kind);
+        // Only lifecycle-owned evidence can settle a failure. Provider error text is not proof.
+        const unchanged = lifecycleLeftSessionUnchanged(failure);
+        const definitive = unchanged || (kind === 'session_start' && startupSessionWasCleanedUp(failure));
+        const message = lifecycleFailureMessage(failure, kind);
         await settleReceipt(root,WebOperationSchema.parse({...initial,state:definitive?'failed':'reconciliation_required',
           error:{apiVersion:1,code:definitive?'operation_not_allowed':'reconciliation_required',message,retryable:false,operationId:id,correlationId:randomUUID()},
           updatedAt:new Date().toISOString()}));
@@ -221,12 +248,23 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
         if (operation.operationKind === 'director_launch')
           return WebOperationResponseSchema.parse({ ok: true, value: { ...operation, state: 'reconciliation_required' } });
         // Observation only, including missing config/host/stopped sessions. Never call up/down.
-        const project=WebProjectSchema.parse(await options.resolveProject(operation.projectId));
-        if(project.projectId!==operation.projectId)throw new Error('Foreign registered project');
+        const {project,repository}=await registered(operation.projectId);
         const root=directory(project),path=receiptPath(root,operation.projectId,operation.operationId);
         const saved=await readReceipt(root,operation.projectId,operation.operationId);
         if(saved && saved.operationKind!==operation.operationKind)throw new Error('Lifecycle receipt kind mismatch');
         const activeInProcess=saved?.state==='running' && inFlight.has(path);
+        if(saved && (saved.state==='reconciliation_required'||saved.state==='running') && !inFlight.has(path)){
+          const stopped=await subsequentStop(root,saved,repository.sessionName);
+          if(stopped){
+            const retired=WebOperationSchema.parse({...saved,state:'failed',
+              error:{apiVersion:1,code:'operation_not_allowed',retryable:false,operationId:saved.operationId,correlationId:randomUUID(),
+                message:[`Kết quả thao tác cũ chưa xác định. Phiên đã được dừng an toàn bằng thao tác ${stopped.operationId}; trạng thái khôi phục được giữ nguyên. Có thể bắt đầu thao tác mới.`,
+                  saved.error?.message.slice(0,3000)].filter(Boolean).join('\n')},
+              updatedAt:new Date().toISOString()});
+            await settleReceipt(root,retired);
+            return WebOperationResponseSchema.parse({ok:true,value:retired});
+          }
+        }
         if(saved?.state==='running' && !activeInProcess){
           const settledInterrupted=WebOperationSchema.parse({
             ...saved,

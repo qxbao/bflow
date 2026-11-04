@@ -2,7 +2,7 @@ import { AGY_LOGIN_REMEDIATION, probeAgyAccess } from "./agy-access.js";
 import type { WorkflowRunSnapshot } from "@bflow/contracts";
 import { unverifiedWriterBlocker, unverifiedWriters } from "./shutdown-safety.js";
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -15,7 +15,6 @@ import {
   type SessionLifecycleManager, type SessionManifest, type PaneBinding, type ExecutionPlanInput
 } from "@bflow/contracts";
 import { findExecutable } from "@bflow/machine-setup";
-import { resolvePrivateRuntimeStateDirectory } from "@bflow/runtime";
 import type { ExecutionExpectationGuard } from "./execution-expectation.js";
 import { readEnvironmentConfig, type EnvironmentConfig, type EnvironmentRoleConfig } from "./environment-config.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
@@ -135,8 +134,25 @@ export function markStartupUnchanged(error: unknown): unknown {
 export function startupLeftSessionUnchanged(error: unknown): boolean {
   return typeof error === "object" && error !== null && unchangedStartupFailures.has(error);
 }
+// Internal lifecycle evidence, never reconstructed from user/provider error messages.
+const unchangedLifecycleFailures = new WeakSet<object>();
+const cleanedStartupFailures = new WeakSet<object>();
+export function lifecycleLeftSessionUnchanged(error: unknown): boolean {
+  return startupLeftSessionUnchanged(error) ||
+    (typeof error === "object" && error !== null && unchangedLifecycleFailures.has(error));
+}
+/** The checkpointed stop and integration close both completed after this failed start. */
+export function startupSessionWasCleanedUp(error: unknown): boolean {
+  return typeof error === "object" && error !== null && cleanedStartupFailures.has(error);
+}
 function fail(message: string, details?: any): never {
   throw new EnvironmentError({ code: "validation", retryable: false, message, ...(details !== undefined ? { details } : {}) });
+}
+/** Used only at explicit refusal sites before the shutdown barrier or stop intent. */
+function refuseUnchangedStop(message: string): never {
+  const error = new EnvironmentError({ code: "validation", retryable: false, message });
+  unchangedLifecycleFailures.add(error);
+  throw error;
 }
 function unwrap<T>(result: OperationResult<T>): T {
   if (!result.ok) throw new EnvironmentError(ContractErrorSchema.parse(result.error));
@@ -236,7 +252,13 @@ export class EnvironmentLifecycle {
     try { await rename(temp, target); } finally { await rm(temp, { force: true }); }
   }
   private async locked<T>(repository: RepositoryIdentity, operation: () => Promise<T>) {
-    return withLifecycleLock(this.statePath(repository, "."), operation);
+    let entered = false;
+    try {
+      return await withLifecycleLock(this.statePath(repository, "."), () => { entered = true; return operation(); });
+    } catch (error) {
+      if (!entered && typeof error === "object" && error !== null) unchangedLifecycleFailures.add(error);
+      throw error;
+    }
   }
   async recover(confirmed = false): Promise<EnvironmentStatus> {
     this.progress("Đang kiểm tra trạng thái vòng đời và chuyển đổi khóa cũ...");
@@ -873,6 +895,7 @@ export class EnvironmentLifecycle {
         startupError = error;
       }
       let cleanupOutcome: string | undefined;
+      let cleanupCompleted = false;
       const startupDetails = startupError instanceof EnvironmentError ? startupError.contractError.details : undefined;
       // A provider dialog needs its exact live pane. Shutting it down makes the
       // advertised inspect/resolve/retry recovery impossible on every launch.
@@ -892,6 +915,7 @@ export class EnvironmentLifecycle {
           }
           await this.downLocked(repository, config, true, undefined, undefined, integration);
           cleanupOutcome = "completed successfully";
+          cleanupCompleted = true;
         } catch (cleanupError) {
           cleanupOutcome = `failed and preserved the operation receipt and recovery state (${String(cleanupError)})`;
         }
@@ -908,6 +932,7 @@ export class EnvironmentLifecycle {
         try {
           await this.downLocked(repository, config, true);
           cleanupOutcome = "completed after the startup integration failed to close";
+          cleanupCompleted = true;
         } catch (cleanupError) {
           cleanupOutcome = `failed after the startup integration failed to close (${String(cleanupError)})`;
         }
@@ -915,6 +940,7 @@ export class EnvironmentLifecycle {
       if (startupError !== undefined) {
         const failure = this.startupFailureWithCleanup(startupError,
           cleanupOutcome ?? (cleanupEligible ? "was not completed" : "was not attempted because startup had not changed the session"));
+        if (cleanupCompleted && closeError === undefined) cleanedStartupFailures.add(failure);
         throw !cleanupEligible && closeError === undefined ? markStartupUnchanged(failure) : failure;
       }
       if (!outcome) fail("Startup completed without a session manifest.");
@@ -970,11 +996,15 @@ export class EnvironmentLifecycle {
       const msg = error instanceof Error ? error.message : String(error);
       const unactivated = /requires activation\/(?:reconciliation|recovery) before safe shutdown/.test(msg);
       const unreachableOwner = /Host owner is still alive but unreachable/.test(msg);
+      // A persisted execution plan may prevent even reopening a dead host after a
+      // code/config change. Forced shutdown preserves its stores and uses only the
+      // recorded process/session ownership; it must not restart or rebind execution.
+      const staleExecution = typeof error === "object" && error !== null && "code" in error && error.code === "execution_plan_drift";
       if (!force && unactivated && error instanceof EnvironmentError) throw new EnvironmentError({ ...error.contractError,
         message: error.message + " Run bflow up to resume/reconcile the persisted workflows, or bflow down --force to stop now; durable state is preserved and the next bflow up reconciles it." });
       if (!force && unreachableOwner && error instanceof EnvironmentError) throw new EnvironmentError({ ...error.contractError,
         message: error.message + " Run bflow down --force to stop the unreachable host owner and session; durable state is preserved." });
-      if (!force || !(unactivated || unreachableOwner || /Unknown host operation/.test(msg))) throw error;
+      if (!force || !(unactivated || unreachableOwner || staleExecution || /Unknown host operation/.test(msg))) throw error;
     }
     this.progress("Tiến trình nền không thể chạy rào chắn dừng an toàn; đang buộc dừng. Trạng thái bền vững được giữ nguyên và sẽ được đối soát ở lần 'bflow up' tiếp theo.");
     return this.locked(repository, () => this.forceStopIncompatibleHost(repository, config, timeoutMs));
@@ -1033,29 +1063,28 @@ export class EnvironmentLifecycle {
         // A blocked first role may leave only P13's durable startup receipt, or a failed preflight may leave an offline host daemon.
         // Recover ownership from that validated receipt, never from session name alone.
         const prior = await this.intent(repository);
-        const hostConfigPath = resolve(resolvePrivateRuntimeStateDirectory(repository.root), "host", repository.sessionName, "host.json");
-        const hasHostReceipt = await lstat(hostConfigPath).then(stat => stat.isFile(), () => false);
-        if ((!prior || !["server_starting", "manager_pending", "down"].includes(prior.phase)) && !hasHostReceipt)
-          fail("No repository manifest. Run bflow status or bflow doctor; no session was stopped.");
         if (!await this.probe(repository, config, deadline)) {
           if (prior?.serverPid && this.processAlive(prior.serverPid)) fail(`Startup process ${prior.serverPid} is still alive. Wait before retrying down; state was preserved.`);
-          if (hasHostReceipt) {
-            const offline = await acquire();
-            if (offline?.shutdownHost) try {
-              if (!offline.runtime || !offline.quiesce) fail("Cannot drain the retained host safely; state was preserved.");
-              unwrap(await deadline.call(opts => offline.quiesce!(opts)));
-              const page = unwrap(await deadline.call(opts => offline.runtime!.findRuns({ status: ["queued", "running", "waiting", "blocked", "cancelling"], limit: 1 }, opts)));
-              if (page.items.length || page.nextCursor) fail("Active workflows require their recoverable manifest and checkpoints; no session was stopped.");
-              await deadline.call(() => offline.shutdownHost!());
-            } finally { if (offline !== suppliedIntegration) await deadline.call(() => offline.close?.() ?? Promise.resolve()); }
-          }
+          // Absence of a manifest does not establish absence of a host or unfinished runs.
+          // The existing-host composition queries persisted stores without preparing roles.
+          const offline = await acquire();
+          try {
+            if (!offline?.runtime || !offline.quiesce || !offline.shutdownHost)
+              fail("Cannot establish runtime shutdown safety; preserve state and inspect bflow doctor.");
+            unwrap(await deadline.call(opts => offline.quiesce!(opts)));
+            const page = unwrap(await deadline.call(opts => offline.runtime!.findRuns({ status: ["queued", "running", "waiting", "blocked", "cancelling"], limit: 1 }, opts)));
+            if (page.items.length || page.nextCursor) fail("Active workflows require their recoverable manifest and checkpoints; no session was stopped.");
+            await deadline.call(() => offline.shutdownHost!());
+          } finally { if (offline && offline !== suppliedIntegration) await deadline.call(() => offline.close?.() ?? Promise.resolve()); }
+          // Recheck after the Runtime barrier; never claim stopped from missing receipts alone.
+          if (await this.probe(repository, config, deadline)) fail("Repository session appeared during shutdown reconciliation; state was preserved.");
           await this.writeIntent(repository, "down");
           this.cleanupMcpSession(repository);
           return { workspaceRoot: repository.root, sessionName: repository.sessionName, server: "stopped" as const,
             configuration: "valid" as const, manifest: null, liveObservation: true, issues: [] };
         }
         if (!prior || !["server_starting", "manager_pending", "down"].includes(prior.phase))
-          fail("No repository manifest. Run bflow status or bflow doctor; no session was stopped.");
+          refuseUnchangedStop("No repository manifest. Run bflow status or bflow doctor; no session was stopped.");
         const recovery = await acquire();
         if (!recovery) fail("No role manager can reconcile the partial startup; no session was stopped.");
         try {
@@ -1203,17 +1232,17 @@ export class EnvironmentLifecycle {
         const busy = manifest.panes.some((p) => ["working", "starting", "accepted", "unknown", "disconnected", "blocked"].includes(p.transportState));
         // --yes confirms an orderly checkpointed stop; it cannot accept losing an unverified Developer attempt. Only --force can.
         const writerBlocker = force ? undefined : unverifiedWriterBlocker(unverifiedWriters(activeSnapshots));
-        if (writerBlocker) fail(writerBlocker);
+        if (writerBlocker) refuseUnchangedStop(writerBlocker);
         if ((hasUncommittedChanges || activeRuns.size || busy) && !confirmed) {
           const dirtySuffix = dirtyWorktrees.length > 0
             ? `, uncommitted changes in Developer worktree(s) (${dirtyWorktrees.join(", ")})`
             : changes.trim()
               ? ", uncommitted changes"
               : "";
-          fail(`Unsafe shutdown: ${activeRuns.size} active runs${dirtySuffix}${busy ? ", busy/unresolved agents" : ""}. Inspect state and rerun bflow down --yes to confirm. Nothing was stopped.`);
+          refuseUnchangedStop(`Unsafe shutdown: ${activeRuns.size} active runs${dirtySuffix}${busy ? ", busy/unresolved agents" : ""}. Inspect state and rerun bflow down --yes to confirm. Nothing was stopped.`);
         }
-        if (activeRuns.size && !integration.checkpoint) fail("Runtime checkpoint/quiesce API is unavailable. --yes cannot bypass recovery checkpoint requirements.");
-        if (!integration.quiesce) fail("Runtime shutdown barrier is unavailable; cannot stop intake/dispatch safely.");
+        if (activeRuns.size && !integration.checkpoint) refuseUnchangedStop("Runtime checkpoint/quiesce API is unavailable. --yes cannot bypass recovery checkpoint requirements.");
+        if (!integration.quiesce) refuseUnchangedStop("Runtime shutdown barrier is unavailable; cannot stop intake/dispatch safely.");
         await this.writeIntent(repository, "stopping");
         this.progress("Đang thiết lập rào chắn dừng Runtime an toàn...");
         unwrap(await deadline.call((opts) => integration.quiesce!(opts)));

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request } from 'node:http';
@@ -12,7 +12,7 @@ export const workspace: LocalWorkspaceServices = { inspectProject: unavailable, 
 export const client: UserInteractionClient = { readProjectSession: unavailable, listRuns: unavailable, readRun: unavailable, listDecisions: unavailable, execute: unavailable, readOperation: unavailable, async *events() { throw Error('unsupported'); }, acknowledgeNotice: unavailable, listMessages: unavailable, sendMessage: unavailable, readArtifact: unavailable };
 export async function fixture(overrides: Partial<LocalWorkspaceServices> = {}, interaction = async (_id: string) => client, extra: Partial<entry.LocalWebServerOptions> = {}) {
   expect(entry).toHaveProperty('createLocalWebServer');
-  const directory = await mkdtemp(join(tmpdir(), 'w03-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'w03-')));
   const assetsDirectory = join(directory, 'assets');
   await mkdir(assetsDirectory); await writeFile(join(assetsDirectory, 'index.html'), '<html>SPA</html>');
   const stateDirectory = join(directory, 'state');

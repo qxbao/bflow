@@ -87,6 +87,18 @@ it('requires an explicit replacement when Director may already be running',async
   fireEvent.click(screen.getByLabelText(/Mở phiên thay thế/));expect(submit.disabled).toBe(false);
   fireEvent.click(submit);await waitFor(()=>expect(calls.launches).toHaveLength(1));expect(calls.launches[0].replaceActive).toBe(true);
 });
+it('a stopped view followed by a failed refresh requires explicit replacement and lets the owner confirm it',async()=>{
+  let fail=false;
+  directorServer({view:()=>fail?Response.json({apiVersion:1,code:'unavailable',message:'probe failed',retryable:true,correlationId:'t'},{status:503}):view({layout:'not_started',sessionId:undefined}),extra:path=>path.endsWith('/launch-options')?options:undefined});
+  const rendered=render(open());
+  fireEvent.click(await startButton());await screen.findByRole('radiogroup');
+  expect(screen.queryByLabelText(/Mở phiên thay thế/)).toBeNull();
+  fail=true;rendered.rerender(open(1));
+  const confirm=await screen.findByLabelText(/Mở phiên thay thế/);
+  const submit=screen.getByRole<HTMLButtonElement>('button',{name:'Mở terminal Director'});
+  expect(submit.disabled).toBe(true);
+  fireEvent.click(confirm);expect(submit.disabled).toBe(false);
+});
 it('a launch refused before any effect shows the failure and allows a new attempt',async()=>{
   launchServer({launch:()=>({state:'failed',error:{apiVersion:1,code:'operation_not_allowed',message:'Kho mã chưa có skill /bflow-start.',retryable:false,correlationId:'c'}})});render(open());
   fireEvent.click(await startButton());await screen.findByRole('radiogroup');

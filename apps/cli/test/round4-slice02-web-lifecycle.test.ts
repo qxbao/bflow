@@ -6,9 +6,11 @@ import { execFileSync } from 'node:child_process';
 import { interactionProjectId } from '@bflow/runtime';
 import { createWebWorkspaceServices } from '../src/web-workspace-services.js';
 import { initializeEnvironmentConfig } from '../src/environment-config.js';
+import { EnvironmentLifecycle } from '../src/environment.js';
+import { withLifecycleLock } from '../src/lifecycle-lock.js';
 import { startWebCommand } from '../src/web-command.js';
 import { tmpdir } from 'node:os';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, realpath } from 'node:fs/promises';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -91,10 +93,8 @@ describe('Round 4 Slice 2 — CLI Web Lifecycle & Locator Hardening', () => {
     await mkdir(receiptDir, { recursive: true, mode: 0o700 });
 
     const opId = randomUUID();
-    // Lifecycle throws lock contention: Another bflow up/down/recover is still running
-    const down = vi.fn(async () => {
-      throw new Error('Another bflow up/down/recover is still running. Wait for it or interrupt that command; the lock releases when its process exits.');
-    });
+    // A real lifecycle refusal before entering the operation carries typed unchanged evidence.
+    const down = vi.fn((...args: Parameters<EnvironmentLifecycle['down']>) => new EnvironmentLifecycle(p.canonicalPath).down(...args));
 
     const services = createWebWorkspaceServices({
       resolveProject: async () => p,
@@ -102,31 +102,33 @@ describe('Round 4 Slice 2 — CLI Web Lifecycle & Locator Hardening', () => {
       createLifecycle: () => ({ up: vi.fn(), down, doctor: vi.fn() })
     });
 
-    const result = await services.stopSession(p.projectId, opId);
-    // Lock contention leaves session untouched, so it is a definitive refusal (failed, not uncertain reconciliation_required)
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe('validation');
-      expect(result.error.message).toMatch(/vòng đời khác đang chạy|Another bflow up\/down/);
-    }
+    await withLifecycleLock(join(p.canonicalPath, '.bflow/state'), async () => {
+      const result = await services.stopSession(p.projectId, opId);
+      // Lock contention leaves session untouched, so it is a definitive refusal (failed, not uncertain reconciliation_required)
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('validation');
+        expect(result.error.message).toMatch(/vòng đời khác đang chạy|Another bflow up\/down/);
+      }
 
-    const reconciled = await services.reconcileSessionOperation({
-      apiVersion: 1,
-      projectId: p.projectId,
-      operationId: opId,
-      owner: 'local_lifecycle',
-      operationKind: 'session_stop',
-      state: 'running',
-      updatedAt: new Date().toISOString()
+      const reconciled = await services.reconcileSessionOperation({
+        apiVersion: 1,
+        projectId: p.projectId,
+        operationId: opId,
+        owner: 'local_lifecycle',
+        operationKind: 'session_stop',
+        state: 'running',
+        updatedAt: new Date().toISOString()
+      });
+      expect(reconciled.ok).toBe(true);
+      if (reconciled.ok) {
+        expect(reconciled.value.state).toBe('failed');
+      }
     });
-    expect(reconciled.ok).toBe(true);
-    if (reconciled.ok) {
-      expect(reconciled.value.state).toBe('failed');
-    }
   });
 
   it('recovers cleanly from a corrupted/empty locator file when the server state lock is free', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'bf-web-locator-'));
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'bf-web-locator-')));
     roots.push(dir);
     const stateDir = join(dir, 'web-state');
     await mkdir(join(stateDir, 'owner'), { recursive: true, mode: 0o700 });

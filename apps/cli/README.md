@@ -15,6 +15,21 @@ remain prerequisites.
 
 # Vòng đời môi trường của Bflow CLI (P12)
 
+`bflow open --provider codex` và nút mở Director trên Web dùng cùng launcher.
+Director Codex chạy với `--no-daemon --dangerously-bypass-approvals-and-sandbox`;
+Director Claude chạy với `--dangerously-skip-permissions`. Các cờ chỉ áp dụng cho
+invocation Director, cho phép nó tạo/kết nối Unix socket của host. Codex chạy riêng
+để việc daemon chung tự cập nhật không làm lượt Director bị `serverShuttingDown`.
+Lệnh copy chạy tay dùng cùng cờ. Cấu hình provider toàn cục, quyền specialist và
+phê duyệt bắt buộc của Runtime giữ nguyên; Agy giữ cách khởi chạy hiện có.
+
+Nếu gọi `$bflow-start` trong một phiên agent đã bị sandbox, skill không thể tự
+đổi quyền của phiên đó. Khi host bị từ chối `listen EPERM`/`EACCES`, CLI báo đúng
+lỗi quyền socket từ lần boot hiện tại và hướng dẫn mở Director từ terminal thường,
+thay vì chỉ báo socket thiếu (`ENOENT`) và yêu cầu chạy `doctor`.
+`--no-daemon` áp dụng cho phiên mới; nó không giải phóng khóa ghi của cuộc chat cũ
+đang được một daemon/process khác giữ. Resume cùng cuộc chat cần chủ cũ nhả khóa.
+
 `bflow web [--port N] [--no-open]` là command riêng, mặc định phục vụ UI/API
 ở `127.0.0.1:4317`, dùng machine state theo `BFLOW_HOME`. Build từ root trước;
 thiếu assets thì lệnh báo cách build, không tự cài đặt/init/index/duyệt license.

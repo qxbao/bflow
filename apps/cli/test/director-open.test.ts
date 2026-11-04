@@ -62,8 +62,8 @@ afterAll(async () => { await rm(base, { recursive: true, force: true }); });
 
 describe("provider start arguments", () => {
   it("uses the exact fixed /bflow-start prompt per provider", () => {
-    expect(DIRECTOR_START_ARGS.claude).toEqual(["/bflow-start"]);
-    expect(DIRECTOR_START_ARGS.codex).toEqual(["$bflow-start"]);
+    expect(DIRECTOR_START_ARGS.claude).toEqual(["--dangerously-skip-permissions", "/bflow-start"]);
+    expect(DIRECTOR_START_ARGS.codex).toEqual(["--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"]);
     expect(DIRECTOR_START_ARGS.agy).toEqual(["-i", "/bflow-start"]);
   });
 });
@@ -132,21 +132,24 @@ describe("buildDirectorLaunchPlan", () => {
   it("builds shell-free argv with the canonical cwd and a correctly quoted manual command (spaces, $, quotes)", async () => {
     const plan = await buildDirectorLaunchPlan(project(), "codex", deps({ findTerminal: async () => ({ available: true, kind: "xterm", executable: "/usr/bin/xterm" }) }));
     expect(plan.cwd).toBe(repo);
-    expect(plan.argv).toEqual([join(bin, "codex"), "$bflow-start"]);
-    expect(plan.manualCommand).toBe(`cd '${repo.replace(/'/g, "'\\''")}' && BFLOW_DIRECTOR_PROVIDER=codex 'codex' '$bflow-start'`);
-    expect(plan.terminal).toEqual({ kind: "xterm", executable: "/usr/bin/xterm", args: ["-e", join(bin, "env"), "BFLOW_DIRECTOR_PROVIDER=codex", join(bin, "codex"), "$bflow-start"] });
+    expect(plan.argv).toEqual([join(bin, "codex"), "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"]);
+    expect(plan.manualCommand).toBe(`cd '${repo.replace(/'/g, "'\\''")}' && BFLOW_DIRECTOR_PROVIDER=codex 'codex' '--no-daemon' '--dangerously-bypass-approvals-and-sandbox' '$bflow-start'`);
+    expect(plan.terminal).toEqual({ kind: "xterm", executable: "/usr/bin/xterm", args: ["-e", join(bin, "env"), "BFLOW_DIRECTOR_PROVIDER=codex", join(bin, "codex"), "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"] });
     expect(plan.env.BFLOW_DIRECTOR_PROVIDER).toBe("codex");
     // The manual command round-trips through a POSIX shell to exactly the planned words.
     const { execFileSync } = await import("node:child_process");
     const echoed = execFileSync("/bin/sh", ["-c", plan.manualCommand.replace(/ && BFLOW_DIRECTOR_PROVIDER=codex 'codex'/, " && printf '%s\\n' \"$PWD\" ")], { env: { PATH: "/usr/bin:/bin" } }).toString();
-    expect(echoed).toBe(`${repo}\n$bflow-start\n`);
+    expect(echoed).toBe(`${repo}\n--no-daemon\n--dangerously-bypass-approvals-and-sandbox\n$bflow-start\n`);
   });
 
-  it("never contains permission bypass, login, install or trust flags and carries no token", async () => {
+  it("uses only the requested invocation flags without login, install, hook trust or credential changes", async () => {
     for (const provider of ["claude", "codex"] as const) {
       const plan = await buildDirectorLaunchPlan(project(), provider, deps({ env: { DISPLAY: ":0", BFLOW_DIRECTOR_TOKEN: "tid.secretsecretsecretsecret" } }));
       const words = [...plan.argv, ...(plan.terminal?.args ?? []), plan.manualCommand].join(" ");
-      expect(words).not.toMatch(/dangerously|bypass|--yolo|login|install|trust|full-auto|secretsecret/);
+      expect(words).not.toMatch(/--yolo|login|install|trust|full-auto|secretsecret/);
+      expect(plan.argv.slice(1)).toEqual(provider === "codex"
+        ? ["--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"]
+        : ["--dangerously-skip-permissions", "/bflow-start"]);
       expect(Object.keys(plan.env)).not.toContain("BFLOW_DIRECTOR_TOKEN");
     }
   });
@@ -155,7 +158,7 @@ describe("buildDirectorLaunchPlan", () => {
     const plan = await buildDirectorLaunchPlan(project(), "claude", deps({ platform: "darwin", findTerminal: async () => ({ available: true, kind: "macos_terminal", executable: "/usr/bin/osascript" }) }));
     const args = plan.terminal!.args;
     const line = args[args.length - 1]!;
-    expect(line).toBe(`cd '${repo.replace(/'/g, "'\\''")}' && BFLOW_DIRECTOR_PROVIDER=claude '${join(bin, "claude")}' '/bflow-start'`);
+    expect(line).toBe(`cd '${repo.replace(/'/g, "'\\''")}' && BFLOW_DIRECTOR_PROVIDER=claude '${join(bin, "claude")}' '--dangerously-skip-permissions' '/bflow-start'`);
     expect(args.slice(0, -1).join(" ")).not.toContain(repo);
   });
 
@@ -163,7 +166,7 @@ describe("buildDirectorLaunchPlan", () => {
     const wt = async () => ({ available: true as const, kind: "windows_terminal" as const, executable: "/mnt/c/wt.exe" });
     const plan = await buildDirectorLaunchPlan(project(), "claude", deps({ env: { WSL_DISTRO_NAME: "Ubuntu" }, findTerminal: wt }));
     if (repo.includes(";")) throw new Error("fixture");
-    expect(plan.terminal!.args).toEqual(["new-tab", "wsl.exe", "-d", "Ubuntu", "--cd", repo, "--exec", join(bin, "env"), "BFLOW_DIRECTOR_PROVIDER=claude", join(bin, "claude"), "/bflow-start"]);
+    expect(plan.terminal!.args).toEqual(["new-tab", "wsl.exe", "-d", "Ubuntu", "--cd", repo, "--exec", join(bin, "env"), "BFLOW_DIRECTOR_PROVIDER=claude", join(bin, "claude"), "--dangerously-skip-permissions", "/bflow-start"]);
     const semi = join(base, "a;b");
     await mkdir(semi, { recursive: true });
     const p2 = await buildDirectorLaunchPlan({ projectId: "p", canonicalPath: semi }, "claude", deps({ findTerminal: wt }));
@@ -175,6 +178,19 @@ describe("buildDirectorLaunchPlan", () => {
     const plan = await buildDirectorLaunchPlan(project(), "claude", deps({ env: {} }));
     expect(plan.terminal).toBeUndefined();
     expect(plan.terminalUnavailableReason).toBeTruthy();
+  });
+
+  it.each([
+    ["codex", ["--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"]],
+    ["claude", ["--dangerously-skip-permissions", "/bflow-start"]]
+  ] as const)("the %s manual command delivers the launch flags and literal prompt to the executable", async (provider, expected) => {
+    const captureBin = await mkdtemp(join(base, "capture-"));
+    const executable = join(captureBin, provider);
+    await writeFile(executable, '#!/bin/sh\nprintf \'%s\\n\' "$BFLOW_DIRECTOR_PROVIDER" "$@"\n', { mode: 0o755 });
+    const plan = await buildDirectorLaunchPlan(project(), provider, deps({ env: {}, pathEntries: [captureBin] }));
+    const { execFileSync } = await import("node:child_process");
+    const output = execFileSync("/bin/sh", ["-c", plan.manualCommand], { env: { PATH: captureBin } }).toString();
+    expect(output.trimEnd().split("\n")).toEqual([provider, ...expected]);
   });
 
   it("refuses a non-canonical repository path and a missing provider binary or skill", async () => {
@@ -274,7 +290,7 @@ describe("launchDirectorPlan", () => {
     const r = await launchDirectorPlan(p, { presence: "absent", deps: deps({ env: { DISPLAY: ":0", HERDR_PANE_ID: "pane" }, earlyExitWindowMs: 1500 }) });
     expect(r.mode).toBe("terminal_opened");
     await vi.waitFor(async () => expect((await readFile(marker, "utf8")).split("\n")).toEqual(
-      [repo, "-e", join(bin, "env"), "BFLOW_DIRECTOR_PROVIDER=claude", join(bin, "claude"), "/bflow-start", "", "claude", ""]));
+      [repo, "-e", join(bin, "env"), "BFLOW_DIRECTOR_PROVIDER=claude", join(bin, "claude"), "--dangerously-skip-permissions", "/bflow-start", "", "claude", ""]));
   });
 
   it("checks spawn options", async () => {
@@ -344,7 +360,7 @@ describe("bflow open", () => {
     expect(await runOpenCommand({ provider: undefined, replaceActive: false, json: true, help: false }, d)).toBe(0);
     const res = JSON.parse(out.join(""));
     expect(res).toMatchObject({ ok: true, mode: "manual_command", provider: "claude" });
-    expect(res.manualCommand).toContain("'claude' '/bflow-start'");
+    expect(res.manualCommand).toContain("'claude' '--dangerously-skip-permissions' '/bflow-start'");
     expect(JSON.stringify(res)).not.toMatch(/token/i);
   });
 
@@ -367,7 +383,7 @@ describe("bflow open", () => {
     expect(await runOpenCommand({ provider: undefined, replaceActive: false, json: false, help: false }, d)).toBe(0);
     expect(err.join("")).toContain("Chọn claude dù chưa xác minh được");
     expect(expected.reason).toBeTruthy(); expect(err.join("")).toContain(expected.reason!.replace(/\.$/, ""));
-    expect(out.join("")).toContain("'claude' '/bflow-start'");
+    expect(out.join("")).toContain("'claude' '--dangerously-skip-permissions' '/bflow-start'");
   });
 
   it("reports an unavailable provider with its reason", async () => {
