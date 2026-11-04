@@ -87,3 +87,28 @@ Không director AgentRole/config role/pane. Director không sửa code (prompt, 
 HOME/BFLOW_HOME/XDG/TMPDIR test phải cô lập; không setup/e11 HOME thật. Build direct `./node_modules/.bin/tsc -b`, không pnpm exec tsc. Vitest workers1..3, CLI batch<=15. Build Web trước server integration. Timeout load-heavy integration-p19/lifecycle-fault-matrix/round2/round4/flow08 chạy lại riêng trước kết luận fail. Xóa file rỗng3 trước commit. Không force-push/worktree remove --force; không đụng worktree/user plan khác. Main đang có user-untracked `docs/superpowers/plans/2026-11-02-web-visualization-mode.md`, phải giữ nguyên.
 
 Không dùng lại Orca Run/Task/Dispatch IDs của máy này trên máy khác. Hai terminal Task2 đã settled; release trả retained/user_takeover nên không force-close. Raw SDD logs/reports còn trên máy gốc, không có trong Git; các kết luận cần tiếp tục đã chép vào đây.
+
+## Prompt tiếp tục trên máy khác
+
+```text
+Tiếp tục Director slices C/D của repo bflow. Luôn trả lời tiếng Việt có dấu.
+
+Đọc trước:
+- docs/superpowers/plans/2026-11-04-director-slices-cd-handoff.md
+- docs/superpowers/plans/2026-11-04-director-slices-cd.md
+Sau đó đọc spec/rulings được hai file dẫn tới khi cần, không làm lại phần hoàn tất.
+
+Kiểm tra Git status/refs/worktrees/ancestry và patch equivalence, giữ nguyên thay đổi của người dùng. Pull main bằng fast-forward. Tạo worktree mới từ origin/main, ví dụ .worktrees/director-slice-cd-cont, nhánh agent/director/slice-cd-cont; không reset hoặc xóa worktree cũ bằng --force. Xác minh source checkpoint ed63d99f là ancestor của baseline.
+
+Dựng lại ledger .superpowers/sdd/2026-11-04-director-slices-cd/progress.md từ handoff; dòng đầu đúng:
+# SDD ledger — plan: docs/superpowers/plans/2026-11-04-director-slices-cd.md
+Task1, Task2, Task8 complete; không chạy lại implementation/review đã xong. Bắt đầu Task3, rồi Task4–7,9–10. D-CD-01 đã được chủ dự án duyệt; không hỏi duyệt lại phạm vi đó.
+
+pnpm install --frozen-lockfile, build ./node_modules/.bin/tsc -b. Dùng superpowers:subagent-driven-development: trích brief bằng task-brief, fresh implementer/task, independent Spec+Quality review qua review-package, tối đa5vòng, vòng1–3 cùng implementer. Subagent không chạy Git/không tự spawn; controller commit. Prompt dispatch ngắn, chỉ paths brief/interface/ruling/report.
+
+Director không sửa code, không tự approve/evidence, không AgentRole/config role/pane. Human approval chỉ Web hoặc người tự gõ bflow approve. Giữ v2 compatibility. Không sửa contracts ngoài D-CD-01/root config/lock/docs ngoài plan/handoff nếu chưa có quyết định phù hợp. HOME/BFLOW_HOME test cô lập, không setup/e11 HOME thật, không sửa provider-global settings.
+
+Đọc các Minor/ruling trong handoff trước khi nối UI; nhất là race reconcile/dismiss, session scope, paging, legacy chat blocker. Task9 cần activated-host ingress và Local Server SSE; Task10 còn whole-branch review/probe, chưa có live acceptance C/D.
+
+Đợt bàn giao trước đã dừng test theo câu “Test có thể bỏ qua” của chủ dự án; không nói full test pass. Khi chạy: workers1..3, CLI batch<=15, build Web trước server integration, rerun riêng các timeout đã biết. Không làm yếu test/config/Runtime gates để chạy xanh. Nếu quota nguy hiểm, chốt mốc an toàn, cập nhật handoff, merge/push theo ủy quyền và gửi lại prompt; không force-push.
+```
