@@ -34,7 +34,7 @@
 4. Retry issue stale/lặp không mở nhầm episode hay reset issue retrying→open; gate task khác giữ nguyên (Task2/4/6).
 5. Scene3D không API ghi, Director không giả pane/agent; unknown read khác confirmed absent; keyboard/reduced-motion parity (Task7).
 
-## D-CD-01 — Quyết định integration public contracts (CHỜ CHỦ DỰ ÁN DUYỆT)
+## D-CD-01 — Quyết định integration public contracts (ĐÃ DUYỆT)
 
 **Động cơ/evidence:** router Local Server chỉ dùng WebHttpContracts; Web chỉ import browser-safe subpath. Hiện không có route/operation Director. DirectorMessageSchema dùng Buffer.byteLength, đã tái hiện valid parse không Buffer ném ReferenceError. Không thể đóng giả sender conversation hay clone schema/cast trong Web.
 
@@ -55,7 +55,7 @@
 
 **Tương thích/migration:** existing shapes/versions và routes giữ nguyên; new parser đọc receipt cũ. Client cũ không bị đưa kind mới qua old snapshot/action lists. Older binaries không đọc được receipt có kind mới: downgrade sau khi dùng C yêu cầu operator xử lý/backup owned operation state, tuyệt đối không bỏ receipt uncertain để thử lại effect. Không claim downgrade transparent; không silent cast/upcast proof. Fixtures cũ phải round-trip.
 
-**Phạm vi protected file:** director.ts, web.ts, web-host.ts và tests contracts/browser import. Không root configuration/package exports/lockfile/README/AGENTS/ADR edits; quyết định lưu chính plan này và handoff. **Approving owner:** pending explicit response của chủ dự án cho D-CD-01. Trước đó không sửa contracts hoặc code phụ thuộc contract mới.
+**Phạm vi protected file:** director.ts, web.ts, web-host.ts và tests contracts/browser import. Không root configuration/package exports/lockfile/README/AGENTS/ADR edits; quyết định lưu chính plan này và handoff. **Approving owner:** chủ dự án đã trả lời “Duyệt” trong phiên làm việc ngày 2026-11-04, ngay sau yêu cầu duyệt D-CD-01. Phê duyệt áp dụng đúng phạm vi public contracts và tương thích ở trên; không bao gồm root config/lockfile hay push/merge C/D.
 
 ---
 
