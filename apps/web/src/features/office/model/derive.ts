@@ -1,10 +1,12 @@
-import type { WebAgentView, WebAgentWork } from '@bflow/contracts/web';
-import { roleLabel } from './labels';
-import type { Certainty, OfficeAgent, OfficeHandoff, OfficeInput, OfficeModel, OfficePose, OfficeRole } from './types';
+import { DIRECTOR_LIMITS, type WebAgentView, type WebAgentWork } from '@bflow/contracts/web';
+import { DIRECTOR_STATUS, roleLabel } from './labels';
+import type { Certainty, OfficeAgent, OfficeDirector, OfficeDirectorInput, OfficeHandoff, OfficeInput, OfficeModel, OfficePose, OfficeQueue, OfficeRole } from './types';
 
 export const STALE_MS = 30_000;
 /** Fixed placeholders for the degraded tier: the permanent roles of the topology. */
 export const PLACEHOLDER_ROLES: readonly OfficeRole[] = ['conversation', 'coordinator', 'planner', 'architect', 'specifier', 'reviewer', 'qa'];
+/** Director layout (V3): Conversation and Coordinator have no pane; the Director desk stands in their place. */
+export const DIRECTOR_PLACEHOLDER_ROLES: readonly OfficeRole[] = PLACEHOLDER_ROLES.filter(role => role !== 'conversation' && role !== 'coordinator');
 const BUSY_CONVERSATION = new Set(['delegated_to_coordinator', 'reporting_progress']);
 const UNKNOWN = 'Chưa xác định';
 
@@ -53,19 +55,36 @@ function derivePose(a: WebAgentView, input: OfficeInput, observed: number, pendi
   return { verdict: v('ghost', 'unknown', UNKNOWN), via: unresolved };
 }
 
+/**
+ * The Director desk, from the shared Director projection only (host heartbeat presence, never a Herdr transport state). Undefined outside a Director
+ * layout, so legacy v2 projects keep their office. `unknown` keeps its own certainty and text: a failed read is not a confirmed absence.
+ */
+export function deriveDirector(d: OfficeDirectorInput | undefined): { director: OfficeDirector; queue: OfficeQueue } | undefined {
+  if (!d?.directorLayout) return undefined;
+  const known = d.presence !== 'unknown';
+  const director: OfficeDirector = { label: 'Director', presence: d.presence, certainty: known ? 'confirmed' : 'unknown', statusText: DIRECTOR_STATUS[d.presence] ?? UNKNOWN,
+    ...(known && d.provider ? { provider: d.provider } : {}), ...(known && d.heartbeatAt ? { heartbeatAt: d.heartbeatAt } : {}), ...(d.presence === 'waiting' && d.waitingSince ? { waitingSince: d.waitingSince } : {}) };
+  const issues = known && (d.layout === 'director' || d.layout === 'not_started') ? d.issues : undefined;
+  const queue: OfficeQueue = issues
+    ? { availability: 'ready', open: issues.filter(i => i.status === 'open').length, retrying: issues.filter(i => i.status === 'retrying').length, truncated: issues.length >= DIRECTOR_LIMITS.issuesMax }
+    : { availability: 'unknown', open: 0, retrying: 0, truncated: false };
+  return { director, queue };
+}
+
 const DIRECTION_ORDER = { outbound: 0, inbound: 1 } as const;
 
 export function deriveOffice(input: OfficeInput): OfficeModel {
   const { session, runs, decisions, workforce, connection } = input;
   const tasks = runs.flatMap(r => r.tasks.map(t => ({ ...t, runId: r.runId })));
   const pending = decisions.filter(d => d.status === 'pending');
-  const common = { tasks, pendingDecisions: pending.length, connection };
+  const desk = deriveDirector(input.director);
+  const common = { tasks, pendingDecisions: pending.length, connection, ...(desk ?? {}) };
 
   if (session.state !== 'ready') {
     return { ...common, tier: 'closed', certainty: 'confirmed', statusText: 'Phiên đang dừng', agents: [], handoffs: [] };
   }
   if (!workforce) {
-    const agents: OfficeAgent[] = PLACEHOLDER_ROLES.map(role => ({ instanceId: `placeholder-${role}`, label: roleLabel(role), role, ...v('ghost', 'unknown', UNKNOWN) }));
+    const agents: OfficeAgent[] = (desk ? DIRECTOR_PLACEHOLDER_ROLES : PLACEHOLDER_ROLES).map(role => ({ instanceId: `placeholder-${role}`, label: roleLabel(role), role, ...v('ghost', 'unknown', UNKNOWN) }));
     return { ...common, tier: 'degraded', certainty: 'unknown', statusText: UNKNOWN, agents, handoffs: [] };
   }
 

@@ -29,7 +29,11 @@ export class Character {
   private alpha = 1;
   private readonly phase: number;
 
-  constructor(template: Object3D, private readonly clips: readonly AnimationClip[], readonly instanceId: string, role: string, proxyGeometry: BoxGeometry, proxyMaterial: MeshBasicMaterial) {
+  /**
+   * `instanceId` is the scene key (phase seed). `pick` is what the pick proxy reports: an agent's instance by default; the Director desk figure passes
+   * `{ director: true }`, so it is never picked as (or mistaken for) an agent.
+   */
+  constructor(template: Object3D, private readonly clips: readonly AnimationClip[], readonly instanceId: string, role: string, proxyGeometry: BoxGeometry, proxyMaterial: MeshBasicMaterial, pick: Record<string, unknown> = { instanceId }) {
     const body = template.clone(true);
     const suit = SUITS[role], outfit = suit ?? ROLE_COLORS[role] ?? ROLE_COLORS['developer'];
     const hoodie = body.getObjectByName('hoodie'), jacket = body.getObjectByName('suit');
@@ -50,7 +54,7 @@ export class Character {
     this.phase = hashOf(instanceId);
     this.proxy = new Mesh(proxyGeometry, proxyMaterial);
     this.proxy.position.y = 0.85; this.proxy.scale.set(0.9, 1.7, 0.9);
-    this.proxy.userData['instanceId'] = instanceId;
+    Object.assign(this.proxy.userData, pick);
     this.root.add(this.proxy);
   }
 

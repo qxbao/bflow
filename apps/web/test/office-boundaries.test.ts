@@ -13,6 +13,12 @@ const SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
 const OFFICE = join(SRC, 'features/office');
 const API_DIR = join(SRC, 'api');
 const RENDERER = join(OFFICE, 'scene/renderer');
+// Shared Director/issue controllers and the command layer: they read or write the API, so scene and model reach them only as UI-supplied props.
+const WRITERS = ['features/director', 'features/issues', 'features/operations'].map(dir => join(SRC, dir));
+const inWriter = (target: string | undefined): string | undefined => {
+  const dir = target ? WRITERS.find(d => isInside(target, d)) : undefined;
+  return dir ? `${relative(SRC, dir).split(sep).join('/')}/**` : undefined;
+};
 
 type Rule = 'scene' | 'model' | 'ui';
 type Reader = (file: string) => string | undefined;
@@ -138,6 +144,8 @@ const RULES: Record<Rule, {
     blocked: (edge, target) => {
       if (target && isInside(target, API_DIR)) return 'api/**';
       if (edge.names.includes('useCommands')) return 'useCommands';
+      const writer = inWriter(target);
+      if (writer) return writer;
       if (matchesPkg(edge.spec, 'react-router')) return 'react-router';
       return undefined;
     },
@@ -145,9 +153,11 @@ const RULES: Record<Rule, {
   // Model is pure: no React, no three.js, no clock or network access.
   model: {
     hazards: true,
-    blocked: edge => {
+    blocked: (edge, target) => {
       const pkg = [...REACT_PKGS, ...THREE_PKGS].find(name => matchesPkg(edge.spec, name));
-      return pkg;
+      if (pkg) return pkg;
+      if (target && isInside(target, API_DIR)) return 'api/**';
+      return inWriter(target);
     },
   },
   // UI may reach three.js only through a dynamic import of scene/renderer; every other path to three.js
@@ -239,6 +249,14 @@ describe('features/office import boundaries', () => {
       'features/office/scene/hud.ts': "import { Scene } from 'three';\nexport const hud = Scene;",
       'features/office/scene/bad-api.ts': "import { ApiClient } from '../../../api/client';\nexport const c = ApiClient;",
       'features/office/scene/bad-router.ts': "export { useNavigate } from 'react-router';",
+      'features/issues/index.tsx': 'export const IssueQueuePanel = 1;',
+      'features/director/status.tsx': 'export const useDirector = 1;',
+      'features/operations/index.tsx': 'export const useCommands = 1;',
+      'features/office/scene/bad-issues.ts': "import { IssueQueuePanel } from '../../issues';\nexport const q = IssueQueuePanel;",
+      'features/office/scene/bad-director.ts': "import { useDirector } from '../../director/status';\nexport const d = useDirector;",
+      'features/office/model/bad-director.ts': "import { useDirector } from '../../director/status';\nexport const d = useDirector;",
+      'features/office/model/bad-commands.ts': "import { x } from '../../operations';\nexport const c = x;",
+      'features/office/model/bad-api.ts': "import { ApiClient } from '../../../api/client';\nexport const c = ApiClient;",
       'features/office/model/bad-react.ts': "import { useState } from 'react';\nexport const s = useState;",
       'features/office/model/bad-clock.ts': 'export const now = () => Date.now();\nexport const fresh = () => new Date();',
       'features/office/model/ok-date.ts': 'export const at = (ms: number) => new Date(ms);',
@@ -266,12 +284,17 @@ describe('features/office import boundaries', () => {
       ui: inDir('ui'),
     });
     expect(describeViolations(violations)).toEqual([
+      'model features/office/model/bad-api.ts api/**',
       'model features/office/model/bad-clock.ts Date.now',
       'model features/office/model/bad-clock.ts new Date()',
+      'model features/office/model/bad-commands.ts features/operations/**',
+      'model features/office/model/bad-director.ts features/director/**',
       'model features/office/model/bad-react.ts react',
       'model features/office/model/bad-three.ts three',
       'model features/office/model/helper.ts react-dom',
       'scene features/office/scene/bad-api.ts api/**',
+      'scene features/office/scene/bad-director.ts features/director/**',
+      'scene features/office/scene/bad-issues.ts features/issues/**',
       'scene features/office/scene/bad-router.ts react-router',
       'ui features/office/scene/hud.ts three',
       'ui features/office/scene/renderer.ts three',

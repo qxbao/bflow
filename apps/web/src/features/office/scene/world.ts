@@ -4,6 +4,7 @@
 //   back row  : Conversation | Coordination (Planner, Coordinator, Architect, Specifier) | Task Board (hero wall screen above its own zone, at the right)
 //   front row : Developer zone (20 seats in north-south rows with aisles, rows appear as agents arrive) | Verification (Reviewer, QA, Tester, Security, print corner)
 import { findPath } from '../model/path';
+import { DIRECTOR_SEAT } from '../model/seats';
 import type { OfficeFocusZone, OfficeObjectId } from '../model/types';
 
 export const GRID_W = 28;
@@ -48,6 +49,8 @@ const SPARES: Readonly<Record<string, readonly Cell[]>> = {
 
 /** Cell of a seat id from `assignSeats` (`developer:3`, `verification:reviewer:2`), or undefined when unknown or beyond the spare seats. */
 export function seatCell(seat: string): Cell | undefined {
+  // The Director desk is the existing executive desk of the control room (the Conversation counter).
+  if (seat === DIRECTOR_SEAT) return OBJECT_CELLS.counter;
   const base = FIXED_BASES[seat];
   if (base) return base;
   const [zone, name, k] = seat.split(':');
@@ -170,6 +173,15 @@ export function decorPlacement(d: DecorItem): { x: number; y: number; z: number;
   if (d.mount === 'ceiling') y = PENDANT_Y;
   return { x, y, z, ry };
 }
+/**
+ * The queue board of a Director layout: the existing whiteboard on the Verification east wall, made pickable. No new mesh or asset; it is not an
+ * OBJECT_CELLS entry, so it never blocks a path. `size` is the pick volume (thin along x, the board's width along z).
+ */
+const WHITEBOARD = DECOR.find(d => d.node === 'whiteboard') as DecorItem;
+export const QUEUE_BOARD: { node: 'whiteboard'; cell: Cell; at: Vec2; size: { w: number; h: number; d: number } } = {
+  node: 'whiteboard', cell: WHITEBOARD.cell, at: { x: decorPlacement(WHITEBOARD).x - 0.3, z: decorPlacement(WHITEBOARD).z }, size: { w: 0.6, h: 2.2, d: 2.0 },
+};
+
 /** Plan rectangle a floor item covers (rotation by quarter turns only). */
 export function decorFootprint(d: DecorItem): { x0: number; x1: number; z0: number; z1: number } {
   const p = decorPlacement(d), size = DECOR_SIZE[d.node] ?? { w: 0.5, d: 0.5 };
@@ -201,7 +213,7 @@ export function deskPlan(occupiedSeats: readonly string[]): DeskPlan {
   for (const seat of occupiedSeats) {
     if (seat.startsWith('developer:')) { maxDev = Math.max(maxDev, Number(seat.slice(10)) || 0); continue; }
     const c = seatCell(seat);
-    if (c && seat !== 'conversation:conversation' && !have.has(`${c.gx},${c.gy}`)) { have.add(`${c.gx},${c.gy}`); desks.push(c); }
+    if (c && seat !== 'conversation:conversation' && seat !== DIRECTOR_SEAT && !have.has(`${c.gx},${c.gy}`)) { have.add(`${c.gx},${c.gy}`); desks.push(c); }
   }
   const developerRows = Math.min(DEVELOPER_ROWS.length, Math.ceil(Math.min(maxDev, DEVELOPER_SEAT_COUNT) / cols) + 1);
   for (let n = 1; n <= Math.min(DEVELOPER_SEAT_COUNT, developerRows * cols); n++) desks.push(seatCell(`developer:${n}`) as Cell);
@@ -253,6 +265,10 @@ export const ZONE_TITLES: readonly { id: ZoneId; text: string }[] = [
   { id: 'developer', text: 'Developer Zone' },
   { id: 'verification', text: 'QA / Reviewer' },
 ];
+/** Zone titles for a layout: in a Director layout the control room (the old Conversation room) is titled Director; legacy v2 keeps its titles. */
+export function zoneTitles(director: boolean): { id: ZoneId; text: string }[] {
+  return ZONE_TITLES.map(t => (director && t.id === 'conversation' ? { ...t, text: 'Director' } : t));
+}
 export interface ZoneSign { id: ZoneId; text: string; x: number; y: number; z: number; w: number; h: number }
 /** Signs face +z (south, towards the camera). Back rooms: on the north wall above head height; the board: on its top frame; front rooms: standing on the partition top, facing south (clear of the water coolers below). */
 const SIGN_AT: Readonly<Record<string, { x: number; y: number; z: number }>> = {

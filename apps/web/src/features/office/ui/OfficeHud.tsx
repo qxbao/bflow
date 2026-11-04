@@ -30,8 +30,9 @@ export function agentCounts(model: OfficeModel | undefined): string[] {
   return (Object.keys(n) as Bucket[]).filter(k => n[k] > 0).map(k => `${n[k]} ${BUCKET_TEXT[k]}`);
 }
 
-type IconName = 'overview' | 'tasks' | 'decision' | 'chat' | 'docs' | 'settings' | 'refresh' | 'send' | 'agents' | 'all' | 'coordinator' | 'developer' | 'qa';
+type IconName = 'issues' | 'overview' | 'tasks' | 'decision' | 'chat' | 'docs' | 'settings' | 'refresh' | 'send' | 'agents' | 'all' | 'coordinator' | 'developer' | 'qa';
 const PATHS: Readonly<Record<IconName, ReactNode>> = {
+  issues: <><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17v.5"/></>,
   overview: <><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></>,
   tasks: <><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12h6M9 16h4"/></>,
   decision: <><path d="M4 13l3-8h10l3 8v6H4z"/><path d="M4 13h5l1 2h4l1-2h5"/></>,
@@ -80,6 +81,13 @@ export interface OfficeHudProps {
   onRefresh: () => void;
   onFocusZone: (zone: OfficeFocusZone) => void;
   onAgentList: () => void;
+  /**
+   * Director layout only (from the shared Director state): the chat bar follows the Director chat gate instead of the legacy v2
+   * `chat_adapter_unavailable` blocker, and the pill shows the presence text. Absent for legacy v2 projects, which keep the old gate.
+   */
+  director?: { canSend: boolean; presenceLabel: string } | undefined;
+  /** Opens the shared issue queue panel (the queue board); the rail offers it only while the model has a Director desk. */
+  onQueue?: (() => void) | undefined;
   /** Receives the draft; the page that takes it over decides what happens. The HUD never sends anything. */
   onChatDraft: (draft: string) => void;
   /** The operations dock, rendered once at the bottom (collapsed behind a toggle until opened). */
@@ -110,7 +118,8 @@ export function OfficeHud(p: OfficeHudProps) {
     observer.observe(el);
     return () => { observer.disconnect(); onDockHeight(0); };
   }, [onDockHeight]);
-  const run = currentRun(p.runs), counts = agentCounts(p.model), chat = chatAvailable(p.session);
+  const run = currentRun(p.runs), counts = agentCounts(p.model), chat = p.director ? p.director.canSend : chatAvailable(p.session);
+  const desk = p.model?.director !== undefined, queue = p.model?.queue;
   const pending = p.model?.pendingDecisions ?? 0;
   // Questions waiting in the Overview panel (intakes), and notes the owner should see (session and current run blockers).
   const clarifications = (p.session?.pendingIntakes ?? []).reduce((n, i) => n + i.clarifications.length, 0);
@@ -127,9 +136,11 @@ export function OfficeHud(p: OfficeHudProps) {
   };
   const rail: [IconName, string, () => void, number?, string?][] = [
     ['overview', 'Tổng quan', p.onOverview, clarifications, 'Câu hỏi chờ trả lời: '], ['tasks', 'Công việc', () => p.onNavigate('runs')], ['decision', 'Quyết định', () => p.onNavigate('review'), pending, 'Đang chờ: '],
-    ['chat', 'Trò chuyện', () => p.onNavigate('chat')], ['agents', 'Nhân viên', () => p.onNavigate('agents')], ['docs', 'Tài liệu', p.onDocuments], ['settings', 'Cài đặt', () => p.onNavigate('settings')], ['refresh', 'Tải lại dữ liệu', p.onRefresh],
+    ['chat', 'Trò chuyện', () => p.onNavigate('chat')],
+    ...(desk && p.onQueue ? [['issues', 'Sự cố', p.onQueue, queue?.availability === 'ready' ? queue.open : undefined, 'Sự cố đang mở: '] as [IconName, string, () => void, number?, string?]] : []),
+    ['agents', 'Nhân viên', () => p.onNavigate('agents')], ['docs', 'Tài liệu', p.onDocuments], ['settings', 'Cài đặt', () => p.onNavigate('settings')], ['refresh', 'Tải lại dữ liệu', p.onRefresh],
   ];
-  const cams: [OfficeFocusZone, IconName, string][] = [['overview', 'all', 'Toàn cảnh'], ['conversation', 'chat', 'Conversation'], ['coordinator', 'coordinator', 'Coordinator'], ['developer', 'developer', 'Developer'], ['qa', 'qa', 'QA']];
+  const cams: [OfficeFocusZone, IconName, string][] = [['overview', 'all', 'Toàn cảnh'], ['conversation', 'chat', desk ? 'Director' : 'Conversation'], ['coordinator', 'coordinator', 'Coordinator'], ['developer', 'developer', 'Developer'], ['qa', 'qa', 'QA']];
   return <>
     <div className={`pointer-events-none absolute inset-x-3 top-3 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)_auto] ${hideOnPhone}`}>
       <section aria-label="Văn phòng Bflow" className={`pointer-events-auto m-0 min-w-0 p-3 ${panel}`}>
@@ -154,6 +165,7 @@ export function OfficeHud(p: OfficeHudProps) {
         <span>{p.session ? SESSION[p.session.state] ?? 'Phiên chưa rõ' : 'Đang đọc phiên'}</span>
         <span aria-hidden="true" className="text-line">|</span>
         <span role="status" className={link.degraded ? 'text-warning' : ''}>{link.label}</span>
+        {p.director && <><span aria-hidden="true" className="text-line">|</span><span>{p.director.presenceLabel}</span></>}
         {counts.length > 0 && <><span aria-hidden="true" className="text-line">|</span><span>{counts.join(' · ')}</span></>}
         {p.model?.tier === 'degraded' && <><span aria-hidden="true" className="text-line">|</span><span className={p.failed ? 'text-warning' : 'text-muted'}>{p.failed ? 'Không đọc được dữ liệu nhân viên' : 'Chưa có dữ liệu nhân viên'}</span></>}
         {blockers > 0 && <span className="rounded border border-warning px-1.5 text-warning">{blockers} điểm cần lưu ý</span>}

@@ -6,14 +6,14 @@ import {
 import { acquireModels, type ModelLease } from './assets';
 import type { OfficeFocusZone, OfficeModel, OfficeObjectId, OfficeTarget } from '../model/types';
 import { handoffMarks, type HandoffMark, type VisualCue } from '../model/timeline';
-import { agentTag, poseLabel } from '../model/labels';
-import { Choreographer } from './actors';
+import { agentTag, directorTag, poseLabel, queueText } from '../model/labels';
+import { Choreographer, SEAT_OFFSET_Z, SEATED_HEADING, directorPose } from './actors';
 import { LabelPlacer } from './labelPlacement';
 import { AGENT_ZOOM, CameraIntent, CameraMove, FOV, NO_INSET, withInset, type Inset, type WorldBox, cameraKey, cameraPose, clampCamera, focusOn, homeCamera, HOME_ZOOM, panByPixels, pinchFactor, wheelFactor, zoomBy, type Camera } from './camera';
 import { Character, MarkKit } from './characters';
 import { FpsGovernor, initialTier, settingsFor, type QualitySettings } from './quality';
 import { BACKGROUND, HEMI_HIGH, HEMI_LOW, Stage, setShadowCasting } from './stage';
-import { FOCUS_POINTS, OBJECT_CELLS, OFFICE_ASSET_PATHS, WORLD, cellCentre, contentBox, deskPlan, type Vec2 } from './world';
+import { FOCUS_POINTS, OBJECT_CELLS, OFFICE_ASSET_PATHS, QUEUE_BOARD, WORLD, cellCentre, contentBox, deskPlan, seatCell, zoneTitles, type Vec2 } from './world';
 
 export interface OfficeRenderer {
   /** Returns the handoff ids of the walk cues it accepted; cues dropped (paused, destroyed) are not returned, so the caller may offer them again. */
@@ -34,7 +34,7 @@ export interface OfficeRenderer {
   destroy(): void;
 }
 
-/** Text the DOM draws over the canvas. `agent` is the name tag, `bubble` the message box over a working character, `sleep` the rising z letters over a sleeping one's head; all anchored bottom-centre. */
+/** Text the DOM draws over the canvas. `agent` is the name tag (also the Director desk and queue board tags), `bubble` the message box over a working character, `sleep` the rising z letters over a sleeping one's head; all anchored bottom-centre. */
 export interface ProjectedLabel { id: string; kind: 'agent' | 'bubble' | 'sleep'; text: string; x: number; y: number }
 
 const DRAG_THRESHOLD = 4;
@@ -142,6 +142,13 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     m.userData['object'] = o.id;
     stage.group.add(m); picks.push(m);
   }
+  // The queue board (Director layout only): a pick volume over the existing whiteboard, no new mesh. Picks are ignored without a Director desk.
+  {
+    const s = QUEUE_BOARD.size, m = new Mesh(proxyGeometry, proxyMaterial);
+    m.scale.set(s.w, 1.4, s.d); m.position.set(QUEUE_BOARD.at.x, 1.4, QUEUE_BOARD.at.z);
+    m.userData['queue'] = true;
+    stage.group.add(m); picks.push(m);
+  }
   const applyQuality = (next: QualitySettings): void => {
     quality = next;
     gl.shadowMap.enabled = next.shadows;
@@ -176,6 +183,9 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const choreo = new Choreographer(!reduced());
   const characters = new Map<string, Character>();
   const marks = new Map<string, Group>();
+  // The Director desk figure: a scene object of its own, never an agent, keyed and picked apart from `characters`.
+  let director: Character | undefined;
+  let directorPoint: Vec2 | undefined;
   let warmed = false;
   let paused = false, dirty = true, destroyed = false, closed = false, raf = 0, timer = 0, lastRender = 0, ready = false, lastModel: OfficeModel | undefined;
 
@@ -194,6 +204,20 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       c.set(view, alphaFor(view.certainty, view.pose), animate);
     }
     for (const [id, c] of characters) if (!keep.has(id)) { picks.splice(picks.indexOf(c.proxy), 1); c.dispose(); characters.delete(id); }
+  };
+  /** Presence alone decides the figure (host heartbeat, never Herdr done): absent is an empty desk, unknown a ghost. */
+  const syncDirector = (model: OfficeModel): void => {
+    const d = model.director, cell = d?.seat ? seatCell(d.seat) : undefined, look = d ? directorPose(d.presence) : undefined;
+    directorPoint = cell ? { x: cellCentre(cell).x, z: cellCentre(cell).z + SEAT_OFFSET_Z } : undefined;
+    if (!d || !directorPoint || !look?.visible) {
+      if (director) { picks.splice(picks.indexOf(director.proxy), 1); director.dispose(); director = undefined; }
+      return;
+    }
+    if (!director) {
+      director = new Character(lease.models.character.scene, lease.models.character.animations, 'director-desk', 'conversation', proxyGeometry, proxyMaterial, { director: true });
+      scene.add(director.root); picks.push(director.proxy);
+    }
+    director.set({ instanceId: 'director-desk', role: 'conversation', certainty: d.certainty, pose: d.presence === 'unknown' ? 'ghost' : 'preparing', clip: look.clip, point: directorPoint, heading: SEATED_HEADING, walking: false, carrying: false }, look.alpha, !reduced());
   };
   // Desk indicators come from handoff state alone, so they are redrawn on every apply (a first snapshot carries no cues).
   const syncMarks = (model: OfficeModel): void => {
@@ -225,6 +249,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const tags = new Map<string, { label: string; pose: string; text: string; id: string; bubbleId: string; sleepId: string }>();
   let excerpts: ReadonlyMap<string, string> = new Map();
   let agentsById = new Map<string, OfficeModel['agents'][number]>();
+  let directorText = '', boardText = '', directorSigns = false;
   const pt = { x: 0, y: 0 };
   /** Projects to host pixels; false when behind the camera or outside the safe area (the HUD and panel inset). */
   const project = (x: number, y: number, z: number, w: number, h: number): boolean => {
@@ -256,6 +281,10 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       // The z letters rise from just over the (slumped) head, below the name tag, so they read as belonging to the sleeper.
       else if (extra === 'sleep' && project(view.point.x, SLEEP_Y, view.point.z, v.w, v.h)) slot(n++, tag.sleepId, 'sleep', 'Zzz');
     }
+    // The Director desk tag (also over an empty desk) and the queue board count, Director layout only.
+    const desk = lastModel?.director;
+    if (desk && directorPoint && project(directorPoint.x, 2.15, directorPoint.z, v.w, v.h) && placer.tag(pt.x, pt.y, directorText.length * 6.8 + 12, 18, far)) slot(n++, 'director', 'agent', directorText);
+    if (desk && project(QUEUE_BOARD.at.x, 2.6, QUEUE_BOARD.at.z, v.w, v.h) && placer.tag(pt.x, pt.y, boardText.length * 6.8 + 12, 18, far)) slot(n++, 'queue', 'agent', boardText);
     // Message boxes go above their name tag; far out, one that would overlap any tag or an earlier box is hidden.
     for (let i = 0; i < boxCount; i++) {
       if (!placer.bubble(boxX[i] as number, boxY[i] as number, BUBBLE_W, BUBBLE_H, far)) continue;
@@ -299,13 +328,13 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     const tick = choreo.tick(dt);
     moving = tick.moving || move !== undefined;
     if (tick.changed || tick.moving) syncActors();
-    if (!reduced()) for (const c of characters.values()) c.update(dt / 1000);
+    if (!reduced()) { for (const c of characters.values()) c.update(dt / 1000); director?.update(dt / 1000); }
     dirty = false;
     render();
     sink?.(projectLabels());
     if (quality.tier === 'high' && governor.frame(now, moving)) applyQuality(settingsFor('low', window.devicePixelRatio));
     if (moving || dirty) schedule(true);
-    else if (choreo.busy()) schedule(false);
+    else if (choreo.busy() || (director && !reduced())) schedule(false);
     else lastRender = 0; // asleep: no timer, no frame until the next apply, gesture or resize
   };
   const wake = (): void => schedule(true);
@@ -317,14 +346,19 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     if (box.width === 0 || box.height === 0) return undefined;
     ndc.set(((clientX - box.left) / box.width) * 2 - 1, -(((clientY - box.top) / box.height) * 2 - 1));
     ray.setFromCamera(ndc, cam);
-    const hit = ray.intersectObjects(picks, false)[0];
-    const data = hit?.object.userData as { instanceId?: string; object?: OfficeObjectId } | undefined;
+    // The queue board volume only counts in a Director layout; otherwise it is skipped, never blocking what is behind it.
+    const hit = ray.intersectObjects(picks, false).find(h => !(h.object.userData['queue'] && !lastModel?.director));
+    const data = hit?.object.userData as { instanceId?: string; object?: OfficeObjectId; director?: boolean; queue?: boolean } | undefined;
+    if (data?.director) return { kind: 'director' };
+    if (data?.queue) return { kind: 'queue' };
     if (data?.instanceId) return { kind: 'agent', instanceId: data.instanceId };
     if (data?.object) return { kind: 'object', object: data.object };
     return undefined;
   };
   const positionOf = (target: OfficeTarget): Vec2 | undefined => {
     if (target.kind === 'agent') return choreo.views().find(v => v.instanceId === target.instanceId)?.point;
+    if (target.kind === 'director') return directorPoint ?? cellCentre(OBJECT_CELLS.counter);
+    if (target.kind === 'queue') return QUEUE_BOARD.at;
     const o = stage.objects.find(s => s.id === target.object);
     return o ? o.position : cellCentre(OBJECT_CELLS[target.object]);
   };
@@ -335,7 +369,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const focus = (target: OfficeTarget): void => {
     const p = positionOf(target);
     if (!p || destroyed) return;
-    const zoom = target.kind === 'agent' ? AGENT_ZOOM : target.object === 'board' ? 1.6 : undefined;
+    const zoom = target.kind === 'agent' || target.kind === 'director' ? AGENT_ZOOM : target.kind === 'queue' ? 1.9 : target.object === 'board' ? 1.6 : undefined;
     easeTo(focusOn(p, box, zoom, insetArg()));
   };
   const focusZone = (zone: OfficeFocusZone): void => {
@@ -443,7 +477,12 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
         aim();
       }
       syncActors();
+      syncDirector(model);
       syncMarks(model);
+      // Signs are retitled only when the layout changes (the Stage is built with the legacy titles).
+      if ((model.director !== undefined) !== directorSigns) { directorSigns = model.director !== undefined; stage.setZoneTitles(zoneTitles(directorSigns)); }
+      directorText = model.director ? directorTag(model.director.presence) : '';
+      boardText = model.director ? `Sự cố: ${queueText(model.queue)}` : '';
       // Closed session: the office is dimmed but furniture stays visible. The last saved data stays visible.
       const off = model.tier === 'closed';
       gl.toneMappingExposure = off ? EXPOSURE_CLOSED : EXPOSURE_OPEN;
@@ -486,6 +525,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       delete host.dataset.officeRenderer;
       for (const c of characters.values()) c.dispose();
       characters.clear();
+      director?.dispose(); director = undefined;
       for (const g of marks.values()) g.removeFromParent();
       marks.clear();
       kit.dispose();

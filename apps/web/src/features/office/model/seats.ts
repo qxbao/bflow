@@ -4,6 +4,11 @@ import type { OfficeAgent, OfficeModel, OfficeRole, SeatMap } from './types';
 /** Developer pool: 20 seats, filled in order (the 3D Developer zone adds a row of six desks per sixth agent). */
 export const DEVELOPER_SEATS: readonly string[] = Array.from({ length: 20 }, (_, i) => `developer:${i + 1}`);
 
+/** The Director desk (a UI entity, not an agent): the existing executive desk of the control room, i.e. the Conversation base cell. */
+export const DIRECTOR_SEAT = 'control:director';
+/** The fixed seat the Director desk occupies; a stray conversation instance in a Director layout takes a spare seat instead. */
+const DIRECTOR_CELL_SEAT = 'conversation:conversation';
+
 /** Zone of each fixed (non-Developer) role, following the §5.1 rooms. */
 const FIXED_ZONE: Readonly<Record<Exclude<OfficeRole, 'developer'>, string>> = {
   conversation: 'conversation',
@@ -34,9 +39,10 @@ function fits(role: OfficeRole, seat: string): boolean {
  * @param previous The map returned by the last call (or an empty map). Never mutated.
  * @param agents The currently visible instances, in the order new instances should take free seats.
  */
-export function assignSeats(previous: SeatMap, agents: readonly OfficeAgent[]): SeatMap {
+export function assignSeats(previous: SeatMap, agents: readonly OfficeAgent[], options: { director?: boolean } = {}): SeatMap {
   const roleOf = new Map(agents.map(a => [a.instanceId, a.role] as const));
-  const claimed = new Set<string>();
+  // The Director desk holds the executive desk first, so no agent is ever drawn on top of it.
+  const claimed = new Set<string>(options.director ? [DIRECTOR_CELL_SEAT] : []);
   const seatOf = new Map<string, string>();
 
   // Keep the seat of every instance that is still visible and whose seat still fits its role.
@@ -79,7 +85,8 @@ function freeFixedSeat(role: Exclude<OfficeRole, 'developer'>, claimed: Readonly
 
 /** Returns the model with `seat` filled from a fresh assignment, and the map to pass as `previous` next time. Inputs are not mutated. */
 export function applySeats(previous: SeatMap, model: OfficeModel): { model: OfficeModel; seats: SeatMap } {
-  const seats = assignSeats(previous, model.agents);
+  const seats = assignSeats(previous, model.agents, { director: model.director !== undefined });
   const seatOf = new Map(seats.entries.map(e => [e.instanceId, e.seat] as const));
-  return { seats, model: { ...model, agents: model.agents.map(a => { const seat = seatOf.get(a.instanceId); return seat === undefined ? a : { ...a, seat }; }) } };
+  const agents = model.agents.map(a => { const seat = seatOf.get(a.instanceId); return seat === undefined ? a : { ...a, seat }; });
+  return { seats, model: { ...model, agents, ...(model.director ? { director: { ...model.director, seat: DIRECTOR_SEAT } } : {}) } };
 }

@@ -2,7 +2,7 @@
 // Poses come only from the OfficeModel; the only motion is a walk cue for a handoff that has a receipt. No wandering,
 // and no success animation: a finished turn has no clip of its own.
 import { dropBacklog, enqueue, type VisualCue, type VisualEndpoint, type VisualLimits } from '../model/timeline';
-import type { OfficeAgent, OfficeModel, OfficePose } from '../model/types';
+import type { OfficeAgent, OfficeDirectorPresence, OfficeModel, OfficePose } from '../model/types';
 import { OBJECT_CELLS, cellCentre, deskPlan, routeBetween, seatCell, type Cell, type Vec2 } from './world';
 
 export type Clip = 'sleep' | 'idle' | 'type' | 'type_fast' | 'walk' | 'carry' | 'raise_hand' | 'blocked' | 'ghost';
@@ -25,6 +25,21 @@ export function clipFor(pose: OfficePose): Clip {
     default: return 'idle'; // question, preparing
   }
 }
+
+/**
+ * The Director figure at its desk, from presence alone (host heartbeat, never Herdr done). Absent is an empty desk; unknown (a failed read) is a
+ * translucent ghost, so the two never look alike. There is no success clip.
+ */
+export function directorPose(presence: OfficeDirectorPresence): { visible: boolean; clip: Clip; alpha: number } {
+  switch (presence) {
+    case 'active': return { visible: true, clip: 'type', alpha: 1 };
+    case 'waiting': return { visible: true, clip: 'idle', alpha: 1 };
+    case 'unknown': return { visible: true, clip: 'ghost', alpha: 0.45 };
+    default: return { visible: false, clip: 'idle', alpha: 1 };
+  }
+}
+/** Logical roles whose work the Director owns in a Director layout: a handoff endpoint naming them (with no instance) ends at the Director desk. */
+const DIRECTOR_ROLES = new Set(['conversation', 'coordinator']);
 
 /** Each cue is an out-and-back trip of `walkMs`; with two per actor and 2500 ms in total this is the §4.5 budget. */
 export const WALK_LIMITS: VisualLimits = { maxPerActor: 2, maxTravelMs: 2500, walkMs: 1250 };
@@ -56,12 +71,15 @@ export class Choreographer {
   /** Desks drawn for the current model; only these block a walk. */
   private desks: readonly Cell[] = deskPlan([]).desks;
   private readonly animateClips: boolean;
+  /** Cell of the Director desk while the model has one. */
+  private directorDesk: Cell | undefined;
   /** `animateClips` false (reduced motion) leaves every clip frozen on its first pose, so nothing is busy at idle. */
   constructor(animateClips = true) { this.animateClips = animateClips; }
 
   /** Poses and seats always follow the model at once. Only walk cues are queued, and only when the caller allows motion. */
   apply(model: OfficeModel, cues: readonly VisualCue[]): string[] {
     const seen = new Set<string>();
+    this.directorDesk = model.director?.seat ? seatCell(model.director.seat) : undefined;
     this.desks = deskPlan(model.agents.flatMap(a => (a.seat ? [a.seat] : []))).desks;
     for (const agent of model.agents) {
       const home = agent.seat ? seatCell(agent.seat) : undefined;
@@ -93,10 +111,14 @@ export class Choreographer {
     for (const actor of this.actors.values()) delete actor.trip;
   }
 
-  /** Cell of a handoff endpoint: the instance's seat, the first seat of the role, or the Conversation counter / server for non-agent zones. */
+  /**
+   * Cell of a handoff endpoint: the instance's seat, the first seat of the role, or the Conversation counter / server for non-agent zones. In a
+   * Director layout a Conversation or Coordinator zone endpoint ends at the Director desk (visual only; the wire role is unchanged).
+   */
   cellFor(endpoint: VisualEndpoint): Cell | undefined {
     if (endpoint.kind === 'instance') return this.actors.get(endpoint.instanceId)?.home;
     for (const actor of this.actors.values()) if (actor.role === endpoint.role) return actor.home;
+    if (this.directorDesk && DIRECTOR_ROLES.has(endpoint.role)) return this.directorDesk;
     return endpoint.role === 'conversation' ? OBJECT_CELLS.counter : OBJECT_CELLS.server;
   }
 

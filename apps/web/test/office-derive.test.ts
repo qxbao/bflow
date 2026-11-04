@@ -166,3 +166,18 @@ test('role labels are Vietnamese, not raw ids', () => {
   expect(m.agents.find(a => a.role === 'coordinator')!.label).toBe('Điều phối viên');
   for (const a of m.agents) expect(a.label).not.toBe(a.role);
 });
+
+describe('Director layout (C/D Task 7)', () => {
+  const director = { layout: 'director' as const, directorLayout: true, presence: 'waiting' as const, waitingSince: full.observedAt, issues: [] };
+  test('without a Director projection the model is unchanged: no director, no queue, legacy placeholders', () => {
+    const legacy = deriveOffice(base({ workforce: undefined }));
+    expect(legacy.director).toBeUndefined(); expect(legacy.queue).toBeUndefined();
+    expect(legacy.agents.map(a => a.role)).toContain('conversation');
+    expect(deriveOffice(base({ workforce: undefined, director: { ...director, layout: 'legacy_v2', directorLayout: false } }))).toEqual(legacy);
+  });
+  test('a Director layout keeps real workforce agents (history/labels) and adds the desk beside them', () => {
+    const m = deriveOffice(base({ director }));
+    expect(m.agents).toEqual(deriveOffice(base()).agents);
+    expect(m.director).toMatchObject({ presence: 'waiting', statusText: 'Đang chờ tin của bạn', waitingSince: full.observedAt });
+  });
+});

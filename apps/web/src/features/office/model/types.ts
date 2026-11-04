@@ -17,6 +17,46 @@ export interface OfficeInput {
   connection: OfficeConnection;
   /** Browser clock in ms. Used ONLY for the 30-second snapshot staleness check. */
   now: number;
+  /** Projection of the shared Director read state (Task 5), handed in by the UI. Absent or not a Director layout: the legacy v2 office. */
+  director?: OfficeDirectorInput;
+}
+
+export type OfficeDirectorPresence = 'active' | 'waiting' | 'absent' | 'unknown';
+/**
+ * What the UI hands the model about the Director (D-CD-01). Presence is the host heartbeat projection read by the shared Director view, never a
+ * Herdr transport state; `unknown` is a failed or pending read and never means absent. `issues` is present only for a fresh view.
+ */
+export interface OfficeDirectorInput {
+  layout: 'director' | 'not_started' | 'legacy_v2' | 'unknown' | 'unsupported';
+  /** The Director state's own `directorLayout` (confirmed view or last confirmed hint). UX only: never enables anything. */
+  directorLayout: boolean;
+  presence: OfficeDirectorPresence;
+  provider?: string | undefined;
+  heartbeatAt?: string | undefined;
+  waitingSince?: string | undefined;
+  issues?: readonly { status: string }[] | undefined;
+}
+
+/** The Director desk: a UI entity of its own, never an OfficeAgent (no instanceId, pane or AgentRole). */
+export interface OfficeDirector {
+  label: 'Director';
+  presence: OfficeDirectorPresence;
+  certainty: Certainty;
+  statusText: string;
+  provider?: string;
+  heartbeatAt?: string;
+  waitingSince?: string;
+  /** Filled by the seat assignment: always the dedicated Director seat. */
+  seat?: string;
+}
+
+/** Summary of the parked-issue queue for the queue board. `unknown` is a read that failed or has not landed; it is never an empty queue. */
+export interface OfficeQueue {
+  availability: 'ready' | 'unknown';
+  open: number;
+  retrying: number;
+  /** The view caps its issue list; the counts may be a lower bound. */
+  truncated: boolean;
 }
 
 export interface OfficeAgent {
@@ -58,6 +98,9 @@ export interface OfficeModel {
   handoffs: OfficeHandoff[];
   observedAt?: string;
   connection: OfficeConnection;
+  /** Present only in a Director layout. */
+  director?: OfficeDirector;
+  queue?: OfficeQueue;
 }
 
 /** One seated instance. Plain data: JSON round-trips unchanged. */
@@ -75,7 +118,8 @@ export interface SeatMap {
 
 /** What a click or keypress on the stage selects. Emitted by the scene; resolved by the UI (V4). */
 export type OfficeObjectId = 'counter' | 'board' | 'mailbox' | 'cabinet' | 'server' | 'settings' | 'door';
-export type OfficeTarget = { kind: 'agent'; instanceId: string } | { kind: 'object'; object: OfficeObjectId };
+/** `director` is the Director desk and `queue` the queue board; both exist only in a Director layout and are not agents or furniture objects. */
+export type OfficeTarget = { kind: 'agent'; instanceId: string } | { kind: 'object'; object: OfficeObjectId } | { kind: 'director' } | { kind: 'queue' };
 
 /** Camera presets the HUD can ask of the scene. */
 export type OfficeFocusZone = 'overview' | 'conversation' | 'coordinator' | 'developer' | 'qa';
