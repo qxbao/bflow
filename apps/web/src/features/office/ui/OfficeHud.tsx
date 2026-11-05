@@ -73,6 +73,10 @@ export interface OfficeHudProps {
   onMode: (mode: UiMode) => void;
   panelOpen: boolean;
   immersive?: boolean;
+  /** Optional stable compact status slot for the opt-in immersive presentation. */
+  notifications?: ReactNode;
+  /** Three-step onboarding and its persistent replay control. */
+  firstVisit?: ReactNode;
   onCameraControl?: (action: 'left' | 'right' | 'up' | 'down' | 'zoom-in' | 'zoom-out') => void;
   /** Seatless Developers, for the "+n" chip. */
   overflow: number;
@@ -160,6 +164,8 @@ export function OfficeHud(p: OfficeHudProps) {
           </> : <p className="m-0 mt-0.5 font-data text-xs text-muted">Chưa có công việc đang chạy</p>}
         </div>
       </section>
+      {p.immersive && p.notifications}
+      {p.immersive && p.firstVisit}
       <div role="group" aria-label="Chế độ hiển thị" className={`pointer-events-auto inline-flex overflow-hidden ${panel}`}>
         {(['classic', 'visual'] as const).map(value => <button type="button" key={value} aria-pressed={p.mode === value} className="min-w-14 rounded-none border-0 px-3 font-data text-xs aria-pressed:bg-accent aria-pressed:text-surface lg:min-w-16" onClick={() => { if (p.mode !== value) p.onMode(value); }}>{value === 'classic' ? 'Web' : '3D'}</button>)}
       </div>

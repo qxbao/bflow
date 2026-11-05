@@ -23,7 +23,7 @@ import type { OfficeFocusZone } from './features/office/model/types';
 import { Overview } from './features/overview';
 import { DirectorProvider, presenceLabels, useDirector } from './features/director/status';
 import { DirectorChat, DirectorChatControllerProvider } from './features/director/chat';
-import { DirectorDialogue } from './features/office/ui/DirectorDialogue';
+import { DirectorDialogue } from './features/office/ui/interaction/DirectorDialogue';
 import { immersiveOfficeEnabled } from './features/office/immersive';
 import { DirectorInspector } from './features/office/ui/DirectorInspector';
 import { useUiMode, type UiMode } from './features/office/mode';
@@ -37,6 +37,9 @@ import { TaskBoard } from './features/office/ui/interaction/TaskBoard';
 import { TaskDetail } from './features/office/ui/interaction/TaskDetail';
 import { DecisionInbox } from './features/office/ui/interaction/DecisionInbox';
 import { DecisionDraftProvider } from './features/office/ui/interaction/decision-drafts';
+import { AgentDialogue } from './features/office/ui/interaction/AgentDialogue';
+import { OfficeNotifications } from './features/office/ui/interaction/OfficeNotifications';
+import { FirstVisit, replayFirstVisit } from './features/office/ui/interaction/FirstVisit';
 import type { DecisionDraft } from './features/decisions';
 import { AgentInspector, AgentList, handoffEvidence } from './features/office/ui/AgentInspector';
 import { CabinetInspector, ServerInspector, runEvidence } from './features/office/ui/ObjectInspector';
@@ -122,7 +125,7 @@ function ProjectSurfaces({api,project,projects,revision,refresh,onPair,frame,ses
   const dialogueOpener=useRef<HTMLElement|null>(null);
   const composerRoute=Boolean(useMatch({path:'/projects/:projectId/chat',end:true}));
   const immersive=immersiveOfficeEnabled()&&frame.mode==='visual';
-  const list=<ul className="m-0 list-none p-0">{[['runs','Công việc'],['chat','Trò chuyện'],['agents','Nhân viên'],['review','Cần bạn quyết định'],['issues','Cần xử lý'],['settings','Cài đặt dự án']].map(([path,title])=><li key={path} className="border-t border-line py-2 first:border-t-0"><Link to={`/projects/${encodeURIComponent(id)}/${path}`}>{title}</Link></li>)}</ul>;
+  const list=<><ul className="m-0 list-none p-0">{[['runs','Công việc'],['chat','Trò chuyện'],['agents','Nhân viên'],['review','Cần bạn quyết định'],['issues','Cần xử lý'],['settings','Cài đặt dự án']].map(([path,title])=><li key={path} className="border-t border-line py-2 first:border-t-0"><Link to={`/projects/${encodeURIComponent(id)}/${path}`}>{title}</Link></li>)}</ul>{immersive&&<button type="button" className="mt-3" onClick={()=>replayFirstVisit(id)}>Xem lại hướng dẫn</button>}</>;
   const mark=<div className="flex flex-wrap items-center gap-3"><span className="font-semibold text-ink">{project.displayName}</span><ConnectionBanner state={connection} inactive={Boolean(sessionRead.data&&!sessionRead.error&&['stopped','unavailable'].includes(sessionRead.data.state))}/></div>;
   const openDialogue=()=>{const active=document.activeElement instanceof HTMLElement?document.activeElement:null;dialogueOpener.current=active&&active!==document.body?active:null;dialogueOrigin.current=location.pathname;setDialoguePath(projectBase);expectedDialoguePath.current=location.pathname===projectBase?undefined:projectBase;frame.closePanels();setDialogueOpen(true);};
   const leaveDialogue=(restoreFocus=true)=>{if(!dialogueOpen)return;setDialogueOpen(false);if(restoreFocus)requestAnimationFrame(()=>{if(dialogueOpener.current?.isConnected)dialogueOpener.current.focus();else frame.hud?.focus();dialogueOpener.current=null;});};
@@ -147,6 +150,7 @@ function RunRoute({api,id,revision,refresh,immersive=false}:{api:ApiClient;id:st
  */
 function VisualOffice({api,project,projects,onPair,session,connection,revision,refresh,list,frame,dialogueOpen,onDirectorDialogue,onLeaveDialogue}:{api:ApiClient;project:WebProject;projects:WebProject[];onPair:(secret:string)=>Promise<void>;session:WebProjectSession|undefined;connection:Connection;revision:number;refresh:()=>void;list:ReactNode;frame:Frame;dialogueOpen:boolean;onDirectorDialogue:()=>void;onLeaveDialogue:(restoreFocus?:boolean)=>void}) {
   const id=project.projectId,base=`/projects/${encodeURIComponent(id)}`,navigate=useNavigate();
+  const immersive=immersiveOfficeEnabled();
   // The Director desk and queue board read the shared Director state (Task 5) as a projection; the scene and model never call the API.
   const d=useDirector();
   const directorInput=useMemo<OfficeDirectorInput>(()=>({layout:d.layout,directorLayout:d.directorLayout,presence:d.presence,provider:d.provider,heartbeatAt:d.heartbeatAt,waitingSince:d.waitingSince,issues:d.presence!=='unknown'?d.view?.snapshot.issues:undefined}),
@@ -219,7 +223,7 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
   const agent=inspector?.kind==='agent'?model?.agents.find(a=>a.instanceId===inspector.instanceId):undefined;
   const inspected=inspector&&frame.inspectorHost?createPortal(
     inspector.kind==='repair'?<ErrorState error={error} retry={refresh} onPair={onPair}/>
-    :inspector.kind==='agent'?(agent?<AgentInspector api={api} projectId={id} agent={agent} view={workforce?.agents.find(a=>a.instanceId===agent.instanceId)} handoffs={workforce?.handoffs??[]} revision={revision} titleOf={titleOf}/>:<EmptyState title="Nhân viên này không còn trong danh sách"><p>Có thể phiên đã thay đổi. Tải lại dữ liệu để xem danh sách hiện tại.</p></EmptyState>)
+    :inspector.kind==='agent'?(agent?(immersive?<AgentDialogue key={agent.instanceId} api={api} projectId={id} agent={agent} view={workforce?.agents.find(a=>a.instanceId===agent.instanceId)} handoffs={workforce?.handoffs??[]} revision={revision} titleOf={titleOf}/>:<AgentInspector api={api} projectId={id} agent={agent} view={workforce?.agents.find(a=>a.instanceId===agent.instanceId)} handoffs={workforce?.handoffs??[]} revision={revision} titleOf={titleOf}/>):<EmptyState title="Nhân viên này không còn trong danh sách"><p>Có thể phiên đã thay đổi. Tải lại dữ liệu để xem danh sách hiện tại.</p></EmptyState>)
     :inspector.kind==='unseated'?<AgentList title="Lập trình viên chưa hiện trong cảnh" note="Cảnh có tối đa 20 chỗ ngồi. Những nhân viên dưới đây vẫn đang được theo dõi." agents={(model?.agents??[]).filter(a=>!a.seat)} onPick={instanceId=>openInspector({kind:'agent',instanceId})}/>
     :inspector.kind==='director'?<DirectorInspector onChat={()=>go(`${base}/chat`)} onQueue={()=>openInspector({kind:'queue'})}/>
     :inspector.kind==='queue'?<IssueQueuePanel/>
@@ -232,6 +236,8 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
       onOverview={frame.openOverview} onNavigate={path=>{if(path==='')frame.openOverview();else go(`${base}/${path}`);}} onDocuments={()=>openInspector({kind:'cabinet'})} onRefresh={refresh}
       onFocusZone={focusZone} onAgentList={()=>openInspector({kind:'unseated'})}
       director={d.directorLayout?{canSend:d.chat.canSend,presenceLabel:presenceLabels[d.presence]}:undefined} onQueue={()=>openInspector({kind:'queue'})}
+      notifications={immersive?<OfficeNotifications connection={connection} session={session} stale={stale} authRequired={authRequired} model={model} onInbox={()=>go(`${base}/review`)} onClarifications={frame.openOverview}/>:undefined}
+      firstVisit={immersive?<>{!frame.panelOpen&&!dialogueOpen&&<button type="button" className="pointer-events-auto min-h-9 rounded-lg border border-line bg-surface/90 px-3 py-1.5 text-xs backdrop-blur-md" onClick={()=>replayFirstVisit(id)}>Xem lại hướng dẫn</button>}<FirstVisit projectId={id} active={!frame.panelOpen&&!dialogueOpen} onDirector={()=>model?.director?select({kind:'director'}):go(`${base}/chat`)} onTasks={()=>go(`${base}/runs`)} onInbox={()=>go(`${base}/review`)}/></>:undefined}
       onChatDraft={draft=>{openInspector(undefined);navigate(`${base}/chat`,{state:{draft}});}} dock={<OperationsDock/>} dockSummary={dockSummary} onDockHeight={frame.setDockPx}/>,frame.hud)}
   </>;
 }
