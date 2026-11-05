@@ -18,7 +18,7 @@ Phạm vi: apps/cli. Không thay public contracts. Dùng cơ chế /verify → /
 - [x] Bỏ đường reuse cùng build; kiểm tra cổng đích trước retirement; cập nhật help và package README.
 - [x] Build CLI/Web; kiểm tra vòng đời bằng child process thật: latest PID nhận HTTP, old PID thoát, SIGTERM old không dừng latest.
 - [x] Rà độc lập và chạy các kiểm tra CLI/Local Server liên quan.
-- [ ] Đưa mã đã xác minh vào checkout mà launcher bflow đang trỏ tới, build và khởi động một Web owner mới; kiểm tra cổng/PID cuối.
+- [x] Đưa mã đã xác minh vào checkout mà launcher bflow đang trỏ tới, build và khởi động một Web owner mới; kiểm tra cổng/PID cuối.
 
 TDD required cho thay đổi lifecycle; pure docs dùng review. Không chỉnh root config/lockfile hay shared docs.
 
@@ -29,3 +29,6 @@ TDD required cho thay đổi lifecycle; pure docs dùng review. Không chỉnh r
 - Child process CLI thật: 3 lần chạy liên tiếp trong cùng BFLOW_HOME, lần hai cùng build/cùng port và lần ba đổi port; hai PID trước thoát exit 0, chỉ PID mới còn trả HTTP. Kiểm tra đạt, không sử dụng Herdr/provider.
 - Build CLI, dependency graph, typecheck workspace đạt. Reviewer độc lập không tìm thấy blocker/important regression.
 - Giới hạn đã có của cơ chế thay Web owner: cổng vẫn có thể bị một process khác chiếm sau preflight và trước bind thực tế; lệnh báo EADDRINUSE, giữ dữ liệu trên đĩa và không dừng listener ngoài. Không tuyên bố chuyển socket nguyên tử.
+
+- Hồi quy CLI Web + Local Server: 31 files, 168/168 tests đạt.
+- Kiểm tra máy thật sau build qua launcher bflow: lần đầu PID 2881833, lần chạy tiếp PID 2884745 cùng build abd70623d040; PID đầu thoát exit 0. Chỉ còn PID 2884745 phục vụ 127.0.0.1:4317, HTTP 200. PID cũ 495948 và Vite 343018 đã dừng; Gateway 3756 còn hoạt động. Không commit dist hoặc private state.
