@@ -25,7 +25,7 @@ import {
 } from "./setup-gateway-config.js";
 export { approvedGitNexusExecutable, repositoryHasCommits };
 import { MachineConfigSchema, McpConfigComponent, ServicesComponent, SetupStateStore, EnvironmentManifestComponent,
-  loadMachineConfig, MACHINE_CONFIG_FILE, digest, McpConfigFileSchema, SERVICE_MARKER,
+  loadMachineConfig, MACHINE_CONFIG_FILE, canonicalJson, digest, McpConfigFileSchema, SERVICE_MARKER,
   type MachineConfig, type PlatformProfile, type SetupComponent, type SetupContext, type CommandRunner,
   type ServiceDefinition, type ServiceManager } from "@bflow/machine-setup";
 
@@ -365,18 +365,30 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
         const generatedIds = new Set(generated.map(item => item.serviceId));
         const services = [...operatorServices, ...generated];
         const mcpFile = join(platform.paths.config, "mcp.json");
+        // Normal setup regenerates its MCP file, including older/invalid envelopes, with the existing
+        // backup and salvage path. Approval still covers the same target; check/plan returned above.
+        // Validate bounded regular-file access before the repair reader touches an existing file.
+        let originalManagedIds: Set<string> | undefined;
+        try {
+          const original = McpConfigFileSchema.safeParse(await readJson(mcpFile));
+          if (original.success) originalManagedIds = new Set(original.data.managedIds);
+        }
+        catch (error) { if (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        const mcp = new McpConfigComponent({ platform, store, services });
+        const mcpResult = await mcp.apply({ ...ctx, mode: "repair" });
+        if (mcpResult.diagnostics.length) return mcpResult;
         try {
           const existing = McpConfigFileSchema.parse(await readJson(mcpFile));
           let changed = false;
-          for (const id of priorOwnedIds) if (!generatedIds.has(id) && existing.managedIds.includes(id) &&
+          // Repair has refreshed managedIds. Respect explicit ownership removal in a valid original file;
+          // for older envelopes, use the previous Gateway and byte-equal validated service definitions.
+          for (const id of priorOwnedIds) if (!generatedIds.has(id) && existing.services[id] !== undefined &&
+            (originalManagedIds === undefined || originalManagedIds.has(id)) &&
             priorConfiguration!.services.some(previous => previous.serviceId === id && digest(previous) === digest(existing.services[id]))) {
             delete existing.services[id]; existing.managedIds = existing.managedIds.filter(candidate => candidate !== id); changed = true;
           }
-          if (changed) { unwrap(await store.backupFile(mcpFile)); unwrap(await store.writeFileAtomic(mcpFile, JSON.stringify(existing) + "\n", 0o600)); }
+          if (changed) { unwrap(await store.backupFile(mcpFile)); unwrap(await store.writeFileAtomic(mcpFile, JSON.stringify(JSON.parse(canonicalJson(existing)), null, 2) + "\n", 0o600)); }
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-        const mcp = new McpConfigComponent({ platform, store, services });
-        const mcpResult = await mcp.apply(ctx);
-        if (mcpResult.diagnostics.length) return mcpResult;
         const saved = GatewayConfigSchema.parse({ schemaVersion: 3, desiredDigest, definitionDigest: digest(services), operation,
           services, generatedIds: [...generatedIds], receiptPath, paths: platform.paths, approval });
         const machine = MachineConfigSchema.parse({ ...config, mcpServices: services, services: desiredServices });

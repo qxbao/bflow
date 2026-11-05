@@ -546,16 +546,32 @@ export class AgenticWorkflowRuntime {
     }
     return result;
   }
-  /** R-B2-12: a run created by a v2 Conversation is read-only in a Director session (inspect, cancel and reconciliation only). */
-  private assertDirectorWritable(run: RunRecord): void {
-    if (this.ports.director && run.delegation.requestedBy !== "director")
-      throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+  /** Mutating Director tools remain scoped to the run's original interaction session after token rotation or host restart. */
+  private async assertDirectorSession(run: RunRecord): Promise<void> {
+    const manifest = SessionManifestSchema.parse(unwrap(await this.ports.panes.getManifest()));
+    if (manifest.schemaVersion !== 3 || manifest.conversationSessionId !== run.delegation.sessionId)
+      throw new AdmissionRejectedError("Cross-session Director mutation");
+  }
+  private async assertDirectorWritable(run: RunRecord): Promise<void> {
+    if (!this.ports.director) return;
+    if (run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+    await this.assertDirectorSession(run);
+  }
+  /** Authenticated Director tools retain read access across sessions, but cancellation/reconciliation require the owning session. */
+  async assertDirectorToolSession(input: { runId?: string; messageId?: string }): Promise<void> {
+    await this.journal.exclusive(async state => {
+      const message = input.messageId === undefined ? undefined : state.outbound.find(out => out.message.message_id === input.messageId)?.message ??
+        state.runs.flatMap(run => run.nativeDeliveries ?? []).find(item => item.message.message_id === input.messageId)?.message;
+      const runId = input.messageId === undefined ? input.runId : message?.run_id;
+      const run = state.runs.find(item => item.runId === runId);
+      if (run) await this.assertDirectorSession(run);
+    });
   }
   /** Tool-layer guard (Director principal): true when the run was created by a v2 Conversation. */
   async assertDirectorRunWritable(runId: string): Promise<void> {
     await this.journal.exclusive(async state => {
       const run = state.runs.find(item => item.runId === runId);
-      if (run) this.assertDirectorWritable(run);
+      if (run) await this.assertDirectorWritable(run);
     });
   }
   private run(state: JournalState, runId: string): RunRecord {
@@ -1773,7 +1789,7 @@ export class AgenticWorkflowRuntime {
     await this.initialize();
     return this.transaction(async (state, save, core, outbox) => {
       const run = this.run(state, args.runId);
-      this.assertDirectorWritable(run);
+      await this.assertDirectorWritable(run);
       if (args.source === "director" && run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
       if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) throw new Error(`Run đang ở trạng thái ${run.status}; không thể treo task`);
       if (args.taskId === FINAL_TASK) throw new Error("Không thể treo kiểm chứng toàn workflow");
@@ -1944,7 +1960,7 @@ export class AgenticWorkflowRuntime {
     await this.initialize();
     const result = await this.transaction(async (state, save, core) => {
       const run = this.run(state, args.runId);
-      this.assertDirectorWritable(run);
+      await this.assertDirectorWritable(run);
       if (args.source === "director" && run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
       if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) throw new Error(`Run đang ở trạng thái ${run.status}; không thể mở lại task`);
       const task = run.tasks.find(item => item.taskId === args.taskId);
@@ -2617,7 +2633,7 @@ export class AgenticWorkflowRuntime {
     const runId = textField(runIdInput), actionId = textField(actionIdInput);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId), action = run.pendingAction;
-      this.assertDirectorWritable(run);
+      await this.assertDirectorWritable(run);
       if (options.webCommand) {
         const command = WebCommandSchema.parse(options.webCommand);
         if (options.automatic || options.conversationUserMessageId || command.kind !== "resume" || command.runId !== runId || command.actionId !== actionId ||
@@ -3291,7 +3307,7 @@ export class AgenticWorkflowRuntime {
     const userMessageId = textField(conversationUserMessageId);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId);
-      this.assertDirectorWritable(run);
+      await this.assertDirectorWritable(run);
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
       if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status) || run.status === "completed_with_parked") throw new Error(`Run is ${run.status}; it cannot be resumed`);
       if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending"))
@@ -4176,6 +4192,7 @@ export class AgenticWorkflowRuntime {
         idempotencyKey: decision.idempotencyKey }));
       run.decision = decision; run.status = "implementing";
     } else if (run.approvalKind === "delivery") {
+      await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       if (!run.workflowCycle || run.workflowCycle.status !== "passed" || !run.integrationKey ||
           (await this.ports.policies.git.getIntegration(run.integrationKey)).status !== "verified") throw new Error("Delivery lacks verified integration");
       const integrated = await this.ports.policies.git.getIntegration(run.integrationKey);
@@ -4631,6 +4648,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           out.handle.target.worktreePath !== binding.worktreePath || digest(out.handle.target.session) !== digest(binding.session) ||
           task.worktrees.at(-1)?.worktreePath !== binding.worktreePath)
         throw new Error("No current Developer assignment owns this task workspace");
+      await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       await outbox.renew(out);
       if (task.cycle?.status !== "rework_required" || !task.cycle.history.length) return undefined;
       const rawReworkContext = record(out.message.payload).reworkContext;
@@ -4772,6 +4790,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
         assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
       }
+      await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       return use(task, definition);
     });
   }
@@ -4811,6 +4830,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (!run || runId !== out.message.run_id) throw new Error("Tool action has no matching Runtime run holder");
       if (run.tasks.some(task => failoverHoldsTask(task.failovers))) throw new Error("Tool actions are held during provider continuation");
       this.live(run);
+      await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       if (binding.roleProfile || out.roleProfile) {
         const profile = selectRoleProfile(run.roleProfiles, binding.role, out.roleProfile);
         assertProfileBinding(profile, binding);
@@ -4867,6 +4887,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         assertProfileBinding(profile, binding);
         assertProfileSnapshotCurrent(profile, this.ports.roleProfiles);
       }
+      await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       return use({ runId, ...(taskId ? { taskId } : {}), transportTaskId: request.taskId,
         attemptId: out.attemptId, leaseId: renewed.leaseId, fencingToken: renewed.fencingToken });
     });
@@ -5503,6 +5524,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated", "awaiting_approval", "intake", "clarifying", "specifying", "planning"].includes(run.status)) continue;
           // One run's failure is recorded on that run; the other runs and the outbox flush below still proceed.
           try {
+            await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
             if (!run.coreCreated) await core.create(run);
             let awaitingWriterStop = false;
             for (const task of run.tasks.filter(item => item.result && ["failed", "timed_out"].includes(item.result.status))) {
@@ -5893,6 +5915,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const currentCycle = task?.cycle ?? run.workflowCycle;
       // A superseded job (e.g. a coroutine of a lost process, or a cycle replaced by a retry) finishing late is stale, not a new failure.
       if (digest(currentCycle) !== digest(job.cycle) && digest(currentCycle) !== digest(cycle)) { clearPending(); await save(); return; }
+      await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       // Durable outcomes may have been produced by an older host. Never recover a pass from absent verdicts.
       if (task && ["passed", "failed"].includes(result.status)) {
         try {
@@ -5983,6 +6006,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     });
   }
   private async integrate(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox, run: RunRecord): Promise<void> {
+    await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
     let integration: Integration;
     if (run.integrationKey) {
       integration = await this.ports.policies.git.getIntegration(run.integrationKey);
@@ -6216,7 +6240,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         out.handle.target.paneId !== binding.paneId || out.handle.target.worktreePath !== binding.worktreePath ||
         binding.worktreePath !== resolution.worktreePath || digest(out.handle.target.session) !== digest(binding.session))
       throw new Error("No current conflict resolver assignment owns this integration worktree");
+    await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
     await outbox.renew(out); // current lease and fencing token, immediately before the write
+    await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
     return { run, resolution, attempt, out };
   }
   /**
@@ -6281,6 +6307,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const resolving = run.conflictResolution?.attempts.find(attempt => attempt.status === "assigned");
       if (run.cancelled || !run.integrationKey || !(run.status === "escalated" && run.error?.startsWith("Git integration conflict") ||
           resolving && !TERMINAL_RUN_STATUSES.includes(run.status))) throw new Error("No pending conflict");
+      await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       const integration = await this.ports.policies.git.acceptConflictResolution(run.integrationKey, { taskKey, resolutionCommitHash });
       if (resolving) { resolving.status = "accepted"; resolving.commitHash = resolutionCommitHash; }
       run.status = "implementing"; delete run.error;

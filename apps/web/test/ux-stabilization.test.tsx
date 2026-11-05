@@ -66,6 +66,63 @@ describe('Web UX stabilization & functional regression guards', () => {
     expect((screen.getByLabelText('Công cụ AI (developer)') as HTMLSelectElement).value).toBe('claude');
   });
 
+  it.each([
+    ['codex', 'GPT-6.1-Sol', 'gpt-6.1-sol'],
+    ['codex', 'GPT-6.1-Terra', 'gpt-6.1-terra'],
+    ['codex', 'GPT-5.6-Terra', 'gpt-5.6-terra'],
+    ['agy', 'Gemini 4 Argon (High)', 'gemini-4-argon-high'],
+    ['agy', 'Claude Sonnet 5.5 (Medium)', 'claude-sonnet-5-5-medium'],
+    ['agy', 'GPT-OSS 120B (Medium)', 'gpt-oss-120b-medium'],
+  ])('selects %s model %s by its native ID and keeps other providers out of quick picks', async (provider, label, modelId) => {
+    const config = {
+      apiVersion: 1, projectId: 'p', revision: 'a'.repeat(64), yaml: '',
+      values: { environment: { roles: [
+        { role: 'conversation', cli: 'claude', model: 'sonnet' },
+        { role: 'developer', cli: 'codex', model: 'team-codex-model' },
+        { role: 'reviewer', cli: 'agy', model: 'team-agy-model' },
+      ] } },
+    };
+    let saved: any;
+    vi.stubGlobal('fetch', vi.fn(async (_path: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        saved = JSON.parse(String(init.body));
+        return Response.json({ ok: true, value: { ...config, values: saved.values } });
+      }
+      return Response.json(config);
+    }));
+    render(<ProjectConfiguration api={new ApiClient()} id="p" revision={0} />);
+    await screen.findByLabelText('Công cụ AI (developer)');
+    fireEvent.change(screen.getByLabelText('Công cụ AI cho cả nhóm'), { target: { value: provider } });
+    expect(screen.queryByRole('button', { name: 'sonnet' })).toBeNull();
+    expect(screen.queryByRole('button', { name: provider === 'codex' ? 'team-agy-model' : 'team-codex-model' })).toBeNull();
+    expect(screen.getByRole('button', { name: provider === 'codex' ? 'team-codex-model' : 'team-agy-model' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: provider === 'codex' ? 'o4-mini' : 'gemini-2.5-pro' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: label }));
+    expect((screen.getByLabelText('Mô hình AI cho cả nhóm') as HTMLInputElement).value).toBe(modelId);
+    fireEvent.click(screen.getByRole('button', { name: 'Áp dụng cho tất cả vai trò' }));
+    expect((screen.getByLabelText('Mô hình AI (developer)') as HTMLInputElement).value).toBe(modelId);
+    expect((screen.getByLabelText('Mô hình AI (conversation)') as HTMLInputElement).value).toBe(provider === 'agy' ? 'sonnet' : modelId);
+    fireEvent.click(screen.getByRole('button', { name: 'Lưu cấu hình' }));
+    await screen.findByText(/Đã lưu cấu hình/);
+    expect(saved.values.environment.roles[1]).toEqual({ role: 'developer', cli: provider, model: modelId });
+  });
+
+  it('clears the bulk model when switching providers so a stale selection cannot be applied', async () => {
+    const config = {
+      apiVersion: 1, projectId: 'p', revision: 'a'.repeat(64), yaml: '',
+      values: { environment: { roles: [{ role: 'developer', cli: 'claude', model: 'sonnet' }] } },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(config)));
+    render(<ProjectConfiguration api={new ApiClient()} id="p" revision={0} />);
+    await screen.findByLabelText('Công cụ AI (developer)');
+    fireEvent.click(screen.getByRole('button', { name: 'haiku' }));
+    fireEvent.change(screen.getByLabelText('Công cụ AI cho cả nhóm'), { target: { value: 'codex' } });
+    expect((screen.getByLabelText('Mô hình AI cho cả nhóm') as HTMLInputElement).value).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'Áp dụng cho tất cả vai trò' }));
+    expect((screen.getByLabelText('Công cụ AI (developer)') as HTMLSelectElement).value).toBe('codex');
+    expect((screen.getByLabelText('Mô hình AI (developer)') as HTMLInputElement).value).toBe('');
+  });
+
   it('keeps warnings advisory and expands blocking failures independently of readiness', async () => {
     let ready = true;
     vi.stubGlobal(

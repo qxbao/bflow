@@ -59,6 +59,7 @@ import type {
 } from "./types.js";
 import type { AgentLaunchProfile } from "./types.js";
 import { checkLaunchProfile } from "./launch-profile.js";
+import { prepareSupervisedShell } from "./supervised-shell.js";
 import { balanceOwnedTab } from "./layout.js";
 import { readBuiltinRolePrompt } from "./role-prompts.js";
 import { buildProviderRoleLaunch } from "./provider-launch.js";
@@ -484,6 +485,24 @@ export class RolePaneManager {
     if (outcome.exitCode !== 0 || outcome.failure) return toCommandError(outcome, `Could not label ${role} pane '${paneId}'`);
     parsePaneInfoResult(outcome); return ok(undefined);
   }
+  async #checkRestoredRole(expected: HerdrAgentInfo, role: TopologyRole, options?: OperationOptions): Promise<OperationResult<void>> {
+    const observed = await this.#runHerdr(["agent", "get", expected.paneId], options);
+    let current: HerdrAgentInfo | undefined;
+    if (observed.exitCode === 0 && !observed.failure) {
+      try { current = parseAgentInfoResult(observed, "agent_info"); } catch { /* Uncertain identity stays preserved. */ }
+    }
+    if (!current || current.name !== expected.name || current.agent !== expected.agent ||
+        current.paneId !== expected.paneId || current.workspaceId !== expected.workspaceId || current.tabId !== expected.tabId ||
+        current.terminalId !== expected.terminalId || !current.session || !expected.session ||
+        current.session.source !== expected.session.source || current.session.kind !== expected.session.kind ||
+        current.session.value !== expected.session.value || !["idle", "done"].includes(current.agentStatus) ||
+        current.interactiveReady === false || current.launchPending === true) {
+      return conflictError(`Restored terminal for ${role} in pane '${expected.paneId}' changed or is no longer ready. Preserve its work, inspect bflow doctor, then retry bflow up after reconciliation.`,
+        { role, agentName: expected.name ?? role, paneId: expected.paneId, sessionId: this.#config.sessionId, reason: "restored_terminal_not_ready" });
+    }
+    return ok(undefined);
+  }
+
   async #startupBlocked(role: TopologyRole, agentName: string, kind: string, paneId: string, state: string, options?: OperationOptions): Promise<OperationResult<never>> {
     // Classify locally. Terminal snapshots can contain secrets; do not return or
     // log raw screens and never answer an update/trust/permission dialog here.
@@ -685,6 +704,7 @@ export class RolePaneManager {
       // losing an acknowledgement. Reconcile every recorded workspace, including
       // Developer workspaces, before closing any remaining owned pane.
       const livePaneIds = new Set<string>();
+      const livePanesById = new Map<string, HerdrPaneInfo>();
       const workspaceIds = new Set([manifest.herdrWorkspaceId, ...manifest.panes.map(pane => pane.workspaceId)]);
       for (const workspaceId of workspaceIds) {
         const listed = await this.#runHerdr(["pane", "list", "--workspace", workspaceId], options);
@@ -708,11 +728,30 @@ export class RolePaneManager {
             return conflictError(`Pane listing does not match workspace '${workspaceId}'; shutdown state preserved`);
           }
           livePaneIds.add(pane.paneId);
+          livePanesById.set(pane.paneId, pane);
         }
       }
       // Herdr refuses to close the source workspace's last pane while a linked worktree workspace is still open
       // ("would close a worktree group"), so Developer worktree panes close first.
-      const closeOrder = [...manifest.panes.filter(pane => pane.role === "developer"), ...manifest.panes.filter(pane => pane.role !== "developer")];
+      const replacements: PaneBinding[] = [];
+      for (const binding of manifest.panes) {
+        if (binding.metadata?.["replacementLaunchIntent"] === undefined) continue;
+        const parsed = PaneBindingSchema.safeParse(binding.metadata["replacementLaunchIntent"]);
+        if (!parsed.success || parsed.data.sessionId !== manifest.sessionId || parsed.data.role !== binding.role ||
+            parsed.data.agentId !== binding.agentId || parsed.data.workspaceId !== binding.workspaceId)
+          return validationError("Invalid permanent-role replacement launch intent during shutdown");
+        const live = livePanesById.get(parsed.data.paneId);
+        if (live) {
+          if (live.terminalId !== parsed.data.terminalId || live.workspaceId !== parsed.data.workspaceId || live.tabId !== parsed.data.tabId || live.agent !== null)
+            return conflictError(`Pending replacement pane '${live.paneId}' changed; preserve its work and inspect it before shutdown`);
+          const processes = await this.#runHerdr(["pane", "process-info", "--pane", live.paneId], options);
+          if (processes.exitCode !== 0 || processes.failure) return toCommandError(processes, "Cannot inspect pending replacement before shutdown");
+          if (!isShellReadyForAgent(live, parsePaneProcessInfoResult(processes)).ready)
+            return conflictError(`Pending replacement pane '${live.paneId}' is busy; preserve its work before shutdown`);
+        }
+        replacements.push(parsed.data);
+      }
+      const closeOrder = [...replacements, ...manifest.panes.filter(pane => pane.role === "developer"), ...manifest.panes.filter(pane => pane.role !== "developer")];
       for (const pane of closeOrder) {
         if (!livePaneIds.has(pane.paneId)) continue;
         const outcome = await this.#runHerdr(["pane", "close", pane.paneId], options);
@@ -829,6 +868,7 @@ export class RolePaneManager {
     }
     let liveAgents: readonly HerdrAgentInfo[] = parseAgentListResult(agentListOutcome);
     let preflightTabs: readonly HerdrTabInfo[] | undefined;
+    const restoredTerminals = new Set<string>();
     for (const role of configuredRoles) {
       const spec = ROLE_TOPOLOGY_SPECS[role];
       const roleConfig = this.#config.roleConfigs?.[role];
@@ -844,11 +884,26 @@ export class RolePaneManager {
         const sameNativeSession = !binding?.session || occupant.session !== undefined &&
           binding.session.source === occupant.session.source && binding.session.kind === occupant.session.kind &&
           binding.session.value === occupant.session.value;
-        const recordedOccupant = binding !== undefined && binding.agentId === agentName && occupant.name === binding.agentId &&
-          binding.paneId === occupant.paneId && binding.workspaceId === occupant.workspaceId &&
-          binding.agentKind === occupant.agent && (binding.terminalId === undefined || binding.terminalId === occupant.terminalId);
+        const recordedIdentity = binding !== undefined && binding.agentId === agentName && occupant.name === binding.agentId &&
+          binding.paneId === occupant.paneId && binding.workspaceId === occupant.workspaceId && binding.tabId === occupant.tabId &&
+          binding.agentKind === occupant.agent;
+        const sameTerminal = binding?.terminalId === undefined || binding.terminalId === occupant.terminalId;
+        // Herdr can restore a pane and resume its native session under a new terminal.
+        // Only the exact recorded native identity proves ownership across that change;
+        // a matching name/pane or a missing session never permits adoption or closure.
+        const restoredTerminal = recordedIdentity && !sameTerminal && binding.session !== undefined && sameNativeSession;
+        const recordedOccupant = recordedIdentity && (sameTerminal || restoredTerminal);
         if (recordedOccupant && !sameNativeSession) {
           return conflictError(`Native session changed for ${role} in pane '${occupant.paneId}'; refusing to adopt or close it as the old role execution. Preserve work and inspect bflow doctor before recovery.`);
+        }
+        if (restoredTerminal) {
+          if (!["idle", "done"].includes(occupant.agentStatus) || occupant.interactiveReady === false || occupant.launchPending === true) {
+            return conflictError(
+              `Restored terminal for ${role} in pane '${occupant.paneId}' of Herdr session '${this.#config.sessionId}' is ${occupant.agentStatus} or not interactively ready. Preserve its work, inspect bflow doctor and this exact session; let the role settle or resolve its startup before retrying bflow up. No topology changes were made.`,
+              { role, agentName, paneId: occupant.paneId, sessionId: this.#config.sessionId, reason: "restored_terminal_not_ready" }
+            );
+          }
+          restoredTerminals.add(occupant.paneId);
         }
         if (recordedOccupant && sameNativeSession && (occupant.agent === agentKind || replacesRecordedLaunch)) continue;
 
@@ -1085,7 +1140,12 @@ export class RolePaneManager {
       // Env is fixed at pane creation: an env-bearing launch may only reuse a pane recorded for that exact launch.
       const launch = roleConfig?.launch;
       const env = launchEnvOf(launch);
-      const reusable = env === undefined || savedBinding?.metadata?.["launchId"] === launch?.launchId;
+      // A resumed provider does not prove the old shell env survived restoration.
+      // Recreate env-bearing terminals even when their launch id is unchanged.
+      const savedPane = livePanes.find(pane => pane.paneId === savedBinding?.paneId);
+      const originalTerminal = savedBinding !== undefined && savedPane !== undefined &&
+        (savedBinding.terminalId === undefined || savedBinding.terminalId === savedPane.terminalId);
+      const reusable = env === undefined || originalTerminal && savedBinding?.metadata?.["launchId"] === launch?.launchId;
       const staleBinding = env !== undefined && savedBinding !== undefined && !reusable ? savedBinding : undefined;
 
       let healthyOccupant: HerdrAgentInfo | null = null;
@@ -1164,6 +1224,35 @@ export class RolePaneManager {
           "launch pending or interactive not ready", options);
       }
 
+      const restoredAgent = staleBinding && restoredTerminals.has(staleBinding.paneId)
+        ? liveAgents.find(agent => agent.paneId === staleBinding.paneId) : undefined;
+      if (restoredAgent) {
+        const checked = await this.#checkRestoredRole(restoredAgent, role, options);
+        if (!checked.ok) return checked;
+      }
+
+      // A replacement allocated before an interrupted/busy recovery keeps its
+      // env proof without overwriting the old native binding's ownership proof.
+      let replacementIntent: PaneBinding | undefined;
+      if (savedBinding?.metadata?.["replacementLaunchIntent"] !== undefined) {
+        const parsed = PaneBindingSchema.safeParse(savedBinding.metadata["replacementLaunchIntent"]);
+        if (!parsed.success) return validationError("Invalid permanent-role replacement launch intent");
+        replacementIntent = parsed.data;
+        const replacementPane = livePanes.find(pane => pane.paneId === replacementIntent!.paneId);
+        if (replacementPane) {
+          if (replacementIntent.sessionId !== this.#config.sessionId || replacementIntent.role !== spec.contractRole ||
+              replacementIntent.agentId !== agentName || replacementIntent.agentKind !== agentKind ||
+              replacementIntent.workspaceId !== herdrWorkspaceId || replacementIntent.tabId !== targetTabId ||
+              replacementIntent.terminalId !== replacementPane.terminalId || replacementPane.agent !== null ||
+              replacementIntent.metadata?.["launchId"] !== launch?.launchId ||
+              replacementIntent.metadata?.["launchFingerprint"] !== launch?.launchFingerprint) {
+            return conflictError(`Permanent role '${role}' cannot use agent name '${agentName}': its pending replacement pane '${replacementPane.paneId}' changed. Preserve it and inspect bflow doctor before retrying bflow up.`,
+              { role, agentName, paneId: replacementPane.paneId, sessionId: this.#config.sessionId, reason: "unowned_agent_name_collision" });
+          }
+          if (launch) envPaneLaunch.set(replacementPane.paneId, launch.launchId);
+        }
+      }
+
       // Otherwise, obtain an available shell pane in targetTabId
       let candidatePane: HerdrPaneInfo | null = null;
       // A recorded launch intent owns its pane even if startup is blocked or its
@@ -1219,14 +1308,6 @@ export class RolePaneManager {
         if (env !== undefined && launch !== undefined) envPaneLaunch.set(selectedPaneId, launch.launchId);
       }
 
-      // Close the Bflow-owned role pane whose env belongs to a different launch; it is never reused.
-      if (staleBinding !== undefined && staleBinding.paneId !== selectedPaneId && livePanes.some(p => p.paneId === staleBinding.paneId)) {
-        await this.#closePane(staleBinding.paneId, options);
-        livePanes = livePanes.filter(p => p.paneId !== staleBinding.paneId);
-      }
-
-      assignedPaneIds.add(selectedPaneId);
-
       const pending = this.#buildAndValidateBinding({ spec, agentName, agentKind,
         agentInfo: { name: agentName, agent: agentKind, paneId: selectedPaneId,
           terminalId: livePanes.find(p => p.paneId === selectedPaneId)!.terminalId,
@@ -1235,6 +1316,31 @@ export class RolePaneManager {
           cwd: this.#config.workspaceRoot, permanent: true,
           metadata: { launchIntent: true, launchQueued: true, ...(launch !== undefined ? { launchId: launch.launchId, launchFingerprint: launch.launchFingerprint } : {}) } } });
       if (!pending.ok) return pending;
+      if (staleBinding && savedBinding && savedManifest) {
+        // Retain every replacement before closing the old pane, including an unchanged terminal with a stale launch.
+        savedManifest = { ...savedManifest, panes: savedManifest.panes.map(binding => binding.bindingId === savedBinding.bindingId
+          ? { ...binding, metadata: { ...binding.metadata, replacementLaunchIntent: JSON.parse(canonicalReceiptJson(pending.value)) } }
+          : binding) };
+        const reserved = await persistProgress();
+        if (!reserved.ok) return reserved;
+        if (restoredAgent) {
+          const checked = await this.#checkRestoredRole(restoredAgent, role, options);
+          if (!checked.ok) return checked;
+        }
+      }
+
+      // A restored shell without a native occupant cannot prove ownership. Leave
+      // it intact; only the original terminal or the exact resumed native role may close.
+      if (staleBinding !== undefined && staleBinding.paneId !== selectedPaneId &&
+          (originalTerminal || restoredTerminals.has(staleBinding.paneId)) && livePanes.some(p => p.paneId === staleBinding.paneId)) {
+        const closed = await this.#runHerdr(["pane", "close", staleBinding.paneId], options);
+        if (closed.exitCode !== 0 || closed.failure) return toCommandError(closed, `Could not close prior role pane '${staleBinding.paneId}'`);
+        parseOkResponse(closed);
+        livePanes = livePanes.filter(p => p.paneId !== staleBinding.paneId);
+      }
+
+      assignedPaneIds.add(selectedPaneId);
+
       manifestPanes.push(pending.value);
       const intentSaved = await persistProgress(pending.value);
       if (!intentSaved.ok) return intentSaved;
@@ -1643,12 +1749,29 @@ export class RolePaneManager {
         // Shell readiness, prompt validation and acknowledged busy waits consume the lifecycle budget.
         const budget = launchBudget();
         if (!budget.ok) return budget;
-        const args = [...startArgs, "--timeout", String(budget.value), ...providerArgs];
-        return ok(await this.#runHerdr(args, { ...options, timeoutMs: budget.value }));
+        if (launch?.env.BFLOW_PROCESS_SCOPE_ID !== undefined) {
+          const bootstrapped = await prepareSupervisedShell({ launch, pane, processes: processInfo,
+            timeoutMs: budget.value, ...(options?.signal ? { signal: options.signal } : {}),
+            run: (args, timeoutMs) => this.#runHerdr(args, { ...options, timeoutMs }),
+            observe: async () => {
+              const currentPane = await this.#runHerdr(["pane", "get", request.paneId], { ...options, timeoutMs: budget.value });
+              const currentProcesses = await this.#runHerdr(["pane", "process-info", "--pane", request.paneId], { ...options, timeoutMs: budget.value });
+              if (currentPane.failure || currentProcesses.failure) throw new Error("Cannot confirm supervised shell");
+              return { pane: parsePaneInfoResult(currentPane), processes: parsePaneProcessInfoResult(currentProcesses) };
+            } });
+          if (!bootstrapped.ok) return bootstrapped;
+        }
+        const remaining = launchBudget();
+        if (!remaining.ok) return remaining;
+        const args = [...startArgs, "--timeout", String(remaining.value), ...providerArgs];
+        return ok(await this.#runHerdr(args, { ...options, timeoutMs: remaining.value }));
       };
+      const supervisedDeveloper = spec.topologyRole === "developer" && launch?.env.BFLOW_PROCESS_SCOPE_ID !== undefined;
       let recordedDynamicProfileIntent = false;
       const clearUnstartedProfileIntent = async (): Promise<void> => {
-        if (!recordedDynamicProfileIntent) return;
+        // Scoped panes retain their exact cleanup obligation even when native startup was not confirmed.
+        // Only releaseDeveloper/closeCancelledDeveloper may remove it after proving closure or absence.
+        if (!recordedDynamicProfileIntent || supervisedDeveloper) return;
         const current = await this.#store.load(this.#config.sessionId, options);
         if (!current.ok || !current.value) return;
         const entry = current.value.panes.find(item => item.paneId === pane.paneId);
@@ -1663,10 +1786,10 @@ export class RolePaneManager {
         );
         recordedDynamicProfileIntent = false;
       };
-      if (request.roleProfile) {
+      if (request.roleProfile || supervisedDeveloper) {
         const stored = await this.#store.load(this.#config.sessionId, options);
         if (!stored.ok) return stored;
-        if (!stored.value) return notFoundError("Session manifest is required for profile launch");
+        if (!stored.value) return notFoundError("Session manifest is required for profile or supervised launch");
         const intent = this.#buildAndValidateBinding({ spec, agentName, agentKind,
           agentInfo: { ...pane, name: agentName, agent: agentKind, agentStatus: "unknown", revision: pane.revision },
           request: { ...request, metadata: { ...request.metadata, ...launchMetadata, launchIntent: true } } });
@@ -2991,6 +3114,8 @@ export class RolePaneManager {
       // The same allocation whose pane vanished (e.g. with an earlier host generation) runs no provider process; drop it so
       // Runtime can reallocate the task instead of colliding with its stale binding or a reused Herdr pane ID.
       if (existingTaskDeveloper) {
+        if (existingTaskDeveloper.metadata?.["processScopeId"] !== undefined && existingTaskDeveloper.metadata?.["launchIntent"] === true)
+          return conflictError(`Supervised Developer '${existingTaskDeveloper.agentId}' has an unresolved launch intent in pane '${existingTaskDeveloper.paneId}'; confirm closure before allocating again`);
         const health = await this.inspectRoleHealth(existingTaskDeveloper.bindingId, options);
         if (health.ok && (!health.value.paneExists || !health.value.occupantMatches)) {
           if (

@@ -32,3 +32,74 @@ it('binds caller-provided private digests before use and notices optional missin
  const read=await createExecutionResolutionReader({schemaVersion:3,plan,files:[{component:'profile-optional',path:optional,format:'json',optional:true}]});
  await read();await writeFile(optional,'{}');await expect(read()).rejects.toMatchObject({code:'execution_plan_drift'});
 });
+
+describe('execution after a host startup baseline refresh', () => {
+ async function acceptedRun() {
+  const { lifecycleFixture } = await import('../helpers/lifecycle-fixture.js');
+  const cleanups: (() => Promise<void>)[] = [];
+  const f = await lifecycleFixture(cleanups);
+  after.push(...cleanups);
+  const settings = join(f.repository, 'settings.json');
+  await writeFile(settings, '{"model":"before"}');
+  const sources = { schemaVersion: 3, plan, files: [{ component: 'native-settings', path: settings, format: 'json' }] };
+  const read = await createExecutionResolutionReader(sources);
+  f.ports.readExecutionResolution = read;
+  await f.runtime.initialize();
+  await f.runtime.queueHerdr(f.intakeMessage);
+  await f.runtime.flushOutbound();
+  await f.runtime.receiveHerdr(f.intakeMessage);
+  await f.runtime.proposeWorkflow('run-1', f.spec, f.def);
+  const { readFile } = await import('node:fs/promises');
+  const state = JSON.parse(await readFile(join(f.root, 'journal/state.json'), 'utf8'));
+  return { f, run: state.runs[0], settings, sources };
+ }
+ const after: (() => Promise<void>)[] = [];
+ afterEach(async () => { for (const fn of after.splice(0).reverse()) await fn(); });
+ it('keeps an accepted run pinned when fresh host sources select another model', async () => {
+  const { assertRunExecutionPlan } = await import('../../src/agentic/execution-binding.js');
+  const { run, settings, sources } = await acceptedRun();
+  expect(run.executionPlan?.snapshot.mode).toBe('accepted');
+  const binding = structuredClone(run.executionPlan);
+  const digests = structuredClone(run.executionSourceDigests);
+  await writeFile(settings, '{"model":"after"}');
+  const fresh = await createExecutionResolutionReader(sources);
+  await expect(assertRunExecutionPlan(run, fresh)).rejects.toMatchObject({ code: 'execution_plan_drift' });
+  expect(run.executionPlan).toEqual(binding);
+  expect(run.executionSourceDigests).toEqual(digests);
+ });
+ it('holds accepted legacy work with no baseline before a guarded side effect', async () => {
+  const { assertRunExecutionPlan } = await import('../../src/agentic/execution-binding.js');
+  const { f, run, sources } = await acceptedRun();
+  expect(run.coreCreated).toBe(true);
+  expect(run.executionPlan).toBeDefined();
+  delete run.executionPlan;
+  delete run.executionSourceDigests;
+  const fresh = await createExecutionResolutionReader(sources);
+  const effect = vi.fn();
+  await expect(assertRunExecutionPlan(run, fresh).then(effect)).rejects.toMatchObject({ code: 'execution_plan_drift' });
+  expect(effect).not.toHaveBeenCalled();
+  expect(run.executionPlan).toBeUndefined();
+  expect(run.executionPlanDrift).toBeDefined();
+ });
+});
+
+it.each(['workspace', 'tool'] as const)('fences an unprofiled retained Developer %s effect without an accepted baseline', async kind => {
+ const { fixture, cleanups } = await import('../helpers/agentic-integration-fixture.js');
+ const f = await fixture();
+ try {
+  await f.runtime.proposeWorkflow('run-1', f.spec, f.def);
+  await f.runtime.tick();
+  const developer = f.panes.bindings.find(pane => pane.role === 'developer');
+  expect(developer).toBeDefined();
+  const settings = join(f.repository, 'startup-settings.json');
+  await writeFile(settings, '{}');
+  f.ports.readExecutionResolution = await createExecutionResolutionReader({ schemaVersion: 3, plan,
+   files: [{ component: 'settings', path: settings, format: 'json' }] });
+  const effect = vi.fn(async () => 'mutated');
+  const operation = kind === 'workspace'
+   ? f.runtime.withDeveloperWorkspace(developer!, 'run-1', 'implement', effect)
+   : f.runtime.withAssignedToolAction(developer!, effect);
+  await expect(operation).rejects.toMatchObject({ code: 'execution_plan_drift' });
+  expect(effect).not.toHaveBeenCalled();
+ } finally { for (const action of cleanups.splice(0).reverse()) await action(); }
+});

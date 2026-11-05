@@ -34,7 +34,37 @@ const roleLabels:Record<string,string>={
  reviewer:'Kiểm duyệt mã',qa:'Kiểm thử QA',sos:'Cứu hộ sự cố (SOS)',
 };
 const choices:Record<string,string[]>={permissionMode:['restricted','workspace_auto','unattended_isolated'],cli:['claude','codex','agy'],effort:['minimal','low','medium','high','xhigh','max'],mode:['restricted','workspace_auto','unattended_isolated'],isolation:['provider_policy','os_sandbox','container'],minimumLevel:['lightweight','full'],regressionScope:['affected','full','mapped_only']};
-const presetModels:Record<string,string[]>={claude:['haiku','sonnet','opus'],codex:['gpt-5.4','o4-mini'],agy:['gemini-2.5-pro']};
+// Suggestions from native catalogs and owner-provided model IDs (2026-11-05).
+// Native catalogs vary by account/version;
+// keep display names separate from the exact IDs passed to the provider, and allow custom IDs.
+const presetModels:Record<string,{id:string;label:string}[]>={
+ claude:['haiku','sonnet','opus'].map(id=>({id,label:id})),
+ codex:[
+  {id:'gpt-6.1-sol',label:'GPT-6.1-Sol'},
+  {id:'gpt-6.1-terra',label:'GPT-6.1-Terra'},
+  {id:'gpt-6-astra',label:'GPT-6-Astra'},
+  {id:'gpt-6-sol',label:'GPT-6-Sol'},
+  {id:'gpt-6-luna',label:'GPT-6-Luna'},
+  {id:'gpt-5.6-sol',label:'GPT-5.6-Sol'},
+  {id:'gpt-5.6-terra',label:'GPT-5.6-Terra'},
+  {id:'gpt-5.6-luna',label:'GPT-5.6-Luna'},
+ ],
+ agy:[
+  {id:'gemini-4-argon-medium',label:'Gemini 4 Argon (Medium)'},
+  {id:'gemini-4-argon-high',label:'Gemini 4 Argon (High)'},
+  {id:'gemini-4-argon-low',label:'Gemini 4 Argon (Low)'},
+  {id:'gemini-3.8-flash-high',label:'Gemini 3.8 Flash (High)'},
+  {id:'gemini-3.8-flash-medium',label:'Gemini 3.8 Flash (Medium)'},
+  {id:'gemini-3.8-flash-low',label:'Gemini 3.8 Flash (Low)'},
+  {id:'claude-opus-5-5-low',label:'Claude Opus 5.5 (Low)'},
+  {id:'claude-opus-5-5-medium',label:'Claude Opus 5.5 (Medium)'},
+  {id:'claude-opus-5-5-high',label:'Claude Opus 5.5 (High)'},
+  {id:'claude-sonnet-5-5-low',label:'Claude Sonnet 5.5 (Low)'},
+  {id:'claude-sonnet-5-5-medium',label:'Claude Sonnet 5.5 (Medium)'},
+  {id:'claude-sonnet-5-5-high',label:'Claude Sonnet 5.5 (High)'},
+  {id:'gpt-oss-120b-medium',label:'GPT-OSS 120B (Medium)'},
+ ],
+};
 
 const fieldDescriptions:Record<string,{help:string;example?:string}>={
  required:{help:'Khi bật, thành phần hoặc vai trò này là điều kiện bắt buộc để khởi động phiên. Nếu máy chưa đáp ứng, bước kiểm tra sẵn sàng sẽ chặn an toàn trước khi mở phiên.'},
@@ -95,17 +125,18 @@ function Field({name,path,value,onChange,disabled=false}:{name:string;path:strin
 
 function Roles({value,onChange}:{value:WebConfigValue[];onChange:(v:WebConfigValue[])=>void}){
  const [bulkCli,setBulkCli]=useState('claude'),[bulkModel,setBulkModel]=useState('');
- const configuredModels=[...new Set(value.flatMap(item=>item && typeof item==='object' && !Array.isArray(item) && typeof item.model==='string' && item.model?[item.model]:[]))];
- const suggestions=[...new Set([...configuredModels,...(presetModels[bulkCli]??[])])];
- const applyAll=()=>{onChange(value.map(item=>{if(!item || typeof item!=='object' || Array.isArray(item))return item;const role=String(item.role);const targetCli=bulkCli==='agy' && role==='conversation'?String(item.cli??'claude'):bulkCli;const cliChanged=item.cli!==targetCli;const next:Record<string,WebConfigValue>={...item,cli:targetCli};if(targetCli==='agy')delete next.effort;if(bulkModel.trim())next.model=bulkModel.trim();else if(cliChanged)delete next.model;return next;}));};
+ const configuredModels=[...new Set(value.flatMap(item=>item && typeof item==='object' && !Array.isArray(item) && (item.cli??'claude')===bulkCli && typeof item.model==='string' && item.model?[item.model]:[]))];
+ const presets=presetModels[bulkCli]??[];
+ const suggestions=[...configuredModels.filter(id=>!presets.some(model=>model.id===id)).map(id=>({id,label:id})),...presets];
+ const applyAll=()=>{onChange(value.map(item=>{if(!item || typeof item!=='object' || Array.isArray(item))return item;if(bulkCli==='agy' && item.role==='conversation')return item;const targetCli=bulkCli;const cliChanged=item.cli!==targetCli;const next:Record<string,WebConfigValue>={...item,cli:targetCli};if(targetCli==='agy')delete next.effort;if(bulkModel.trim())next.model=bulkModel.trim();else if(cliChanged)delete next.model;return next;}));};
  return <>
   <div className="my-2 border border-line bg-canvas p-2.5 text-xs">
    <div className="flex flex-wrap items-end gap-2">
-    <div className="min-w-32"><FieldLabel htmlFor="bulk-role-cli" label="Công cụ AI cho cả nhóm" labelClassName="text-xs" help="Chọn công cụ AI (claude, codex hoặc agy) để gán đồng loạt cho tất cả vai trò bên dưới khi bấm “Áp dụng cho tất cả vai trò”."/><select id="bulk-role-cli" value={bulkCli} onChange={e=>setBulkCli(e.target.value)}>{['claude','codex','agy'].map(cli=><option key={cli}>{cli}</option>)}</select></div>
-    <div className="min-w-40 flex-1"><FieldLabel htmlFor="bulk-role-model" label="Mô hình AI cho cả nhóm" labelClassName="text-xs" help="Nhập tên model muốn gán đồng loạt cho mọi vai trò (hoặc bấm nút chọn nhanh bên dưới), rồi bấm “Áp dụng cho tất cả vai trò” và “Lưu cấu hình”." example="Ví dụ: haiku, sonnet, opus, gpt-5.4"/><input id="bulk-role-model" value={bulkModel} placeholder="Ví dụ: haiku hoặc sonnet" onChange={e=>setBulkModel(e.target.value)}/></div>
+    <div className="min-w-32"><FieldLabel htmlFor="bulk-role-cli" label="Công cụ AI cho cả nhóm" labelClassName="text-xs" help="Chọn công cụ AI (claude, codex hoặc agy) để gán đồng loạt cho tất cả vai trò bên dưới khi bấm “Áp dụng cho tất cả vai trò”."/><select id="bulk-role-cli" value={bulkCli} onChange={e=>{setBulkCli(e.target.value);setBulkModel('');}}>{['claude','codex','agy'].map(cli=><option key={cli}>{cli}</option>)}</select></div>
+    <div className="min-w-40 flex-1"><FieldLabel htmlFor="bulk-role-model" label="Mô hình AI cho cả nhóm" labelClassName="text-xs" help="Nhập ID model hoặc bấm gợi ý bên dưới, rồi bấm “Áp dụng cho tất cả vai trò” và “Lưu cấu hình”. Gợi ý có thể khác danh sách model được cấp cho tài khoản; bạn vẫn có thể nhập ID khác. Với Agy, giữ nguyên vai trò conversation vì chưa được hỗ trợ." example={`Ví dụ: ${presets.slice(0,3).map(model=>model.id).join(', ')}`} /><input id="bulk-role-model" value={bulkModel} placeholder={`Ví dụ: ${presets[0]?.id??'ID model'}`} onChange={e=>setBulkModel(e.target.value)}/></div>
     <button type="button" onClick={applyAll}>Áp dụng cho tất cả vai trò</button>
    </div>
-   {suggestions.length>0 && <div className="mt-2 flex flex-wrap items-center gap-1.5"><span className="font-data text-muted">Gợi ý mô hình:</span>{suggestions.map(m=><button type="button" key={m} className="min-h-7 px-2 py-0.5 text-xs" onClick={()=>setBulkModel(m)}>{m}</button>)}</div>}
+   {suggestions.length>0 && <div className="mt-2 flex flex-wrap items-center gap-1.5"><span className="font-data text-muted">Gợi ý mô hình:</span>{suggestions.map(model=><button type="button" key={model.id} title={model.id} className="min-h-7 px-2 py-0.5 text-xs" onClick={()=>setBulkModel(model.id)}>{model.label}</button>)}</div>}
   </div>
   <div className="content-grid grid items-start gap-2.5 md:grid-cols-2 2xl:grid-cols-3">{value.map((item,index)=>{
    if(!item || typeof item!=='object' || Array.isArray(item))return null;

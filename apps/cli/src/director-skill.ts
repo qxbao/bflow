@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 
-export const BFLOW_START_SKILL_VERSION = "1.4.0";
+export const BFLOW_START_SKILL_VERSION = "1.5.0";
 export const BFLOW_STATUS_SKILL_VERSION = "1.0.0";
 export const BFLOW_QUEUE_SKILL_VERSION = "1.0.0";
 /** Upper bound of each generated helper skill (bflow-status, bflow-queue), in UTF-8 bytes. */
@@ -55,13 +55,15 @@ Repeat until the user tells you to stop:
 
 ## 3. Keep the flow moving
 
-- A stuck task must not stop unrelated work. Use \`inspect\`, \`reconcile_delivery\`, \`retry_verification\` and \`request_specialist\` to unblock it.
-- When you cannot unblock a task in reasonable time, leave it in the issue queue (\`list_issues\`, \`inspect_issue\`, \`set_issue_status\`), tell the user in one line, and continue with the rest of the workflow.
+- Active blocked work is not idle. On startup and each blocker event, call \`inspect\` for the run; read its delegation.requestedBy, delegation.sessionId and current \`pendingAction\` (use the full view if needed). Take the bounded recovery step below before returning to \`director_wait\`. Wait only when idle or when a known external action is pending, such as a running specialist or human approval.
+- A stuck task must not stop unrelated work. If recovery is refused or exhausted, report the blocker, what you tried and the next owner/action through \`director_say\`. Use \`park_task\` for an eligible task; follow Runtime refusals and never claim it is parked without confirmation. Track existing issues with \`list_issues\`, \`inspect_issue\`, \`set_issue_status\`, then continue unrelated work. Do not silently replace active recovery with repeated waits.
 - Never resend a message whose delivery is uncertain until \`reconcile_delivery\` proves it was not delivered.
 - A tool error is information: read the message, tell the user in one line when it blocks them, and take the smallest safe next step. Do not repeat an identical failing call more than twice.
 - Send whole messages through \`director_say\`, one per real change. There is no token streaming and Bflow Web is refreshed message by message.
 - A run that finished with parked tasks is not fully done: say so and name the parked tasks.
-- Runs created before this Director session are read-only: for them you can only use \`inspect\`, \`cancel\`, \`reconcile_cancellation\` and \`reconcile_delivery\`. To change such work, cancel it and start new work with \`start_work\`.
+- Recovery authority depends on origin and the same repository/session, not run age or token rotation. A retained run whose delegation.requestedBy is "director" and whose delegation.sessionId matches the current session can still be driven through Runtime. Legacy Conversation-origin runs are read-only except \`cancel\`, \`reconcile_cancellation\` and \`reconcile_delivery\`; use \`inspect\` to diagnose them. Foreign sessions are refused: never transfer or adopt their runs.
+- For a retained Director-origin implementation run, after the blocker is fixed and unknown delivery is reconciled, call \`resume_run\` with the exact runId and actionId from its current \`pendingAction\`, then inspect the result. If no action is pending, inspect and continue the workflow instead. Never invent or reuse a stale actionId, cancel/recreate work merely because the token changed, or reset retry budgets.
+- Never transfer approvals or bypass a pending human decision, lease or gate. If Runtime requires explicit owner resume, show the user the required action and wait for it; an ordinary chat message or earlier approval is not that authority.
 
 ## 4. Rules
 

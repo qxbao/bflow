@@ -313,8 +313,8 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   return ensureHost(options, false);
 }
 
-/** A fresh owner resolution may repair an interrupted bootstrap, never an existing workflow binding. */
-async function refreshEmptyStartupSources(configuration: HostConfiguration, configPath: string,
+/** Refresh only a stopped host's startup baseline. Accepted run bindings remain immutable and are revalidated before effects. */
+async function refreshStoppedStartupSources(configuration: HostConfiguration, configPath: string,
   sources: ExecutionResolutionSources, reader: ExecutionResolutionReader): Promise<void> {
   const owner = record(JSON.parse((await readResolutionFile(join(configuration.directory, "owner.json"))).toString("utf8")));
   if (!Number.isSafeInteger(owner.pid) || Number(owner.pid) < 1) throw new Error("Startup refresh requires a valid stopped host owner");
@@ -322,10 +322,9 @@ async function refreshEmptyStartupSources(configuration: HostConfiguration, conf
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
     const storage = resolve(configuration.directory, "../../agentic");
-    await new AgenticJournal(join(storage, "journal"), configuration.repositoryPath).exclusive(async state => {
-      if ([state.runs, state.outbound, state.inbox, state.pendingCore, state.pendingVerifications].some(items => items.length))
-        throw new Error("Startup source refresh is forbidden when workflow state exists");
-      // A missing journal is legitimate before intake only when the authoritative RunStore is also empty.
+    await new AgenticJournal(join(storage, "journal"), configuration.repositoryPath).exclusive(async () => {
+      // Parse existing history under its lock, but never rewrite runs, approvals or uncertain deliveries.
+      // A nonempty RunStore is normal on restart, including when no agentic journal exists yet.
       const database = join(storage, "runs.db");
       try {
         const info = await lstat(database);
@@ -334,10 +333,13 @@ async function refreshEmptyStartupSources(configuration: HostConfiguration, conf
         const opened = openSqliteRunStore({ filename: database });
         if (!opened.ok) throw new Error("Startup refresh cannot verify the existing RunStore");
         try {
-          const found = await opened.value.find(RunQuerySchema.parse({ limit: 1 }));
-          if (!found.ok) throw new Error("Startup refresh cannot verify the existing RunStore");
-          if (found.value.items.map(item => StoredRunSchema.parse(item)).length || found.value.nextCursor)
-            throw new Error("Startup source refresh is forbidden when workflow state exists");
+          let cursor: string | undefined;
+          do {
+            const found = await opened.value.find(RunQuerySchema.parse({ limit: 100, ...(cursor ? { cursor } : {}) }));
+            if (!found.ok) throw new Error("Startup refresh cannot verify the existing RunStore");
+            for (const item of found.value.items) StoredRunSchema.parse(item);
+            cursor = found.value.nextCursor;
+          } while (cursor);
         } finally { opened.value.close(); }
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const executionSourceDigests = await readPrivateExecutionSources(reader);
@@ -469,7 +471,7 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
     if (sourceSnapshotChanged) {
       if (reopening || !startupReader || !options.executionResolution)
         throw new Error("Persisted recovery cannot refresh execution sources");
-      await refreshEmptyStartupSources(configuration, configPath, options.executionResolution, startupReader);
+      await refreshStoppedStartupSources(configuration, configPath, options.executionResolution, startupReader);
       configuration = await readHostConfiguration(configPath);
     }
     if (platformChanged || policyChanged || impactIndexChanged || layoutChanged) {

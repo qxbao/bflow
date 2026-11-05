@@ -350,7 +350,9 @@ export class DirectorWebBridge {
       this.observed = next;
       if (!previous || !feed) return;
       if (next.messageSeq > previous.messageSeq) {
-        const fresh = (await this.options.endpoint.transcript()).filter(message => message.seq > previous.messageSeq).map(message => message.messageId);
+        // A concurrent append can make the transcript newer than the version captured above.
+        // Leave those messages for the next refresh so its observed cursor cannot publish them twice.
+        const fresh = (await this.options.endpoint.transcript()).filter(message => message.seq > previous.messageSeq && message.seq <= next.messageSeq).map(message => message.messageId);
         for (let offset = 0; offset < fresh.length; offset += 100) feed.publish("chat", fresh.slice(offset, offset + 100));
       }
       if (next.messageSeq < previous.messageSeq || next.issuesRevision !== previous.issuesRevision || next.presence !== previous.presence || next.cli !== previous.cli)

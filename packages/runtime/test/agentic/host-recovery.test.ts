@@ -25,8 +25,8 @@ const basePolicy: NonNullable<AgenticHostOptions["policy"]> = {
   concurrency: { maxConcurrency: 2 }
 };
 
-describe.skipIf(process.platform !== "linux")("empty stopped host execution-source recovery", () => {
-  async function fixture(pinned = true) {
+describe.skipIf(process.platform !== "linux")("stopped host execution-source recovery", () => {
+  async function fixture(pinned = true, legacy = false) {
     const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-source-recovery-")));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const binary = join(root, "herdr-fixture.mjs");
@@ -38,7 +38,7 @@ describe.skipIf(process.platform !== "linux")("empty stopped host execution-sour
         ...(pinned ? { expectedDigest: canonicalPlanDigest({ model }) } : {}) }] });
     await writeFile(watched, JSON.stringify({ model: "before-trust" }));
     const options = { repositoryPath: root, sessionId: "source-recovery", herdrBinary: binary };
-    const original = await ensureAgenticHost({ ...options, executionResolution: sources("before-trust") });
+    const original = await ensureAgenticHost({ ...options, ...(legacy ? {} : { executionResolution: sources("before-trust") }) });
     cleanup.push(() => original.shutdown().catch(() => undefined));
     const configPath = join(root, ".bflow/state/host/source-recovery/host.json");
     const before = await readHostConfiguration(configPath);
@@ -64,7 +64,50 @@ describe.skipIf(process.platform !== "linux")("empty stopped host execution-sour
       .toEqual({ token: before.token, socketPath: before.socketPath, directory: before.directory });
   }, 30_000);
 
-  it.each(["inbox", "missing-owner", "live-owner-missing-socket"])(
+  it.each([false, true])("handles stopped legacy RunStore history without overlooking later corruption (corrupt=%s)", async corrupt => {
+    const { root, options, configPath, before, sources, stop } = await fixture(true, true);
+    await stop();
+    const { openSqliteRunStore } = await import("@bflow/persistence");
+    const { StoredRunSchema } = await import("@bflow/contracts");
+    const { workflow, now } = await import("../../../contracts/test/fixtures.js");
+    const definition = workflow([]);
+    const stored = StoredRunSchema.parse({ definition, snapshot: {
+      runId: "historical-run", workflowId: definition.id, workflowVersion: definition.version,
+      status: "queued", tasks: definition.tasks.map(task => ({ taskId: task.id, status: "pending", attempt: 0, generation: 0, version: 0 })),
+      createdAt: now, updatedAt: now, version: 0, lastEventSequence: 0
+    } });
+    await mkdir(join(root, ".bflow/state/agentic"), { recursive: true, mode: 0o700 });
+    const opened = openSqliteRunStore({ filename: join(root, ".bflow/state/agentic/runs.db") });
+    if (!opened.ok) throw new Error(opened.error.message);
+    try {
+      for (let index = 0; index < 101; index++) {
+        const run = { ...stored, snapshot: { ...stored.snapshot, runId: `historical-${String(index).padStart(3, "0")}` } };
+        expect(await opened.value.create(run, `historical-create-${index}`)).toMatchObject({ ok: true });
+      }
+    }
+    finally { opened.value.close(); }
+    if (corrupt) {
+      const { createRequire } = await import("node:module");
+      const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+      const db = new DatabaseSync(join(root, ".bflow/state/agentic/runs.db"));
+      try { db.prepare("UPDATE runs SET payload='{}' WHERE run_id=?").run("historical-100"); }
+      finally { db.close(); }
+      const bytes = await readFile(configPath);
+      await expect(ensureAgenticHost({ ...options, executionResolution: sources("before-trust") }))
+        .rejects.toThrow("Startup refresh cannot verify the existing RunStore");
+      expect(await readFile(configPath)).toEqual(bytes);
+      return;
+    }
+    const recovered = await ensureAgenticHost({ ...options, executionResolution: sources("before-trust") });
+    cleanup.push(() => recovered.shutdown().catch(() => undefined));
+    expect(await recovered.runtime.getRun("historical-100"))
+      .toEqual({ ok: true, value: { ...stored.snapshot, runId: "historical-100" } });
+    const after = await readHostConfiguration(configPath);
+    expect(after.executionResolution).toEqual(sources("before-trust"));
+    expect(after.token).toBe(before.token);
+  }, 30_000);
+
+  it.each(["missing-owner", "live-owner-missing-socket"])(
     "guards changed unpinned source contents against %s without rewriting authority", async scenario => {
       const { root, watched, options, configPath, before, sources, stop } = await fixture(false);
       await stop();
@@ -72,16 +115,6 @@ describe.skipIf(process.platform !== "linux")("empty stopped host execution-sour
       if (scenario === "missing-owner") await rm(join(before.directory, "owner.json"));
       if (scenario === "live-owner-missing-socket")
         await writeFile(join(before.directory, "owner.json"), JSON.stringify({ pid: process.pid }));
-      if (scenario === "inbox") {
-        const directory = join(root, ".bflow/state/agentic/journal");
-        await mkdir(directory, { recursive: true, mode: 0o700 });
-        const state = { version: 1, repository: root, runs: [], outbound: [], pendingCore: [], pendingVerifications: [],
-          inbox: [{ status: "applied", message: { schema_version: 2, message_id: "prior-message", correlation_id: "prior-correlation",
-            run_id: "prior-run", sender: { role: "coordinator" }, recipient: { role: "conversation" },
-            type: "conversation.progress", payload: {}, artifact_references: [] } }] };
-        parseAgenticJournalState(state, root);
-        await writeFile(join(directory, "state.json"), JSON.stringify(state), { mode: 0o600 });
-      }
       const bytes = await readFile(configPath);
       await expect(ensureAgenticHost({ ...options, executionResolution: sources("after-trust") }).then(controller => {
         cleanup.push(() => controller.shutdown().catch(() => undefined)); return controller;
@@ -114,7 +147,7 @@ describe.skipIf(process.platform !== "linux")("empty stopped host execution-sour
 
   it.each(["live-host", "live-owner-missing-socket", "missing-owner", "malformed-owner", "malformed-journal",
     "foreign-journal", "existing-run", "unknown-delivery", "inbox", "persisted-reopen", "stale-fresh-sources"])(
-    "refuses %s without changing durable authority or starting a replacement", async scenario => {
+    "reconciles %s without changing workflow history", async scenario => {
       const { root, watched, options, configPath, before, sources, stop } = await fixture();
       if (scenario !== "live-host") await stop();
       await writeFile(watched, JSON.stringify({ model: "after-trust" }));
@@ -153,6 +186,18 @@ describe.skipIf(process.platform !== "linux")("empty stopped host execution-sour
       const log = await readFile(join(before.directory, "host.log"));
       const operation = scenario === "persisted-reopen" ? openPersistedAgenticHost(options) : ensureAgenticHost({ ...options,
         executionResolution: sources(scenario === "stale-fresh-sources" ? "before-trust" : "after-trust") });
+      if (["existing-run", "unknown-delivery", "inbox"].includes(scenario)) {
+        const historyPath = join(root, ".bflow/state/agentic/journal/state.json");
+        const history = await readFile(historyPath);
+        const recovered = await operation;
+        cleanup.push(() => recovered.shutdown().catch(() => undefined));
+        expect(await readFile(historyPath)).toEqual(history);
+        const after = await readHostConfiguration(configPath);
+        expect(after.executionResolution).toEqual(sources("after-trust"));
+        expect(after.token).toBe(before.token);
+        expect(after.socketPath).toBe(before.socketPath);
+        return;
+      }
       await expect(operation).rejects.toThrow();
       expect(await readFile(configPath)).toEqual(bytes);
       expect(await readFile(join(before.directory, "host.log"))).toEqual(log);

@@ -269,6 +269,74 @@ it("identifies newly selected MCP services as a setup plan change", async () => 
   expect(runtime).toBeUndefined();
 });
 
+it.each(["invalid-json", "old-schema"])("regenerates %s MCP configuration during normal setup, with a backup", async kind => {
+  const { input, ctx, platform } = fixture();
+  const [component] = wrapSetupComponents([], { ...input, launchRequirements: [] });
+  expect((await component!.apply(ctx)).diagnostics).toEqual([]);
+  const path = join(platform.paths.config, "mcp.json");
+  const old = kind === "invalid-json" ? '{"schemaVersion":3,' : JSON.stringify({ schemaVersion: 2, services: {}, external: { custom: "keep" } });
+  await writeFile(path, old);
+  for (const mode of ["check", "dry_run"] as const) {
+    await component!.apply({ ...ctx, mode });
+    expect(await readFile(path, "utf8")).toBe(old);
+  }
+  expect((await component!.apply(ctx)).diagnostics).toEqual([]);
+  expect((await component!.observe(ctx)).valid).toBe(true);
+  const fresh = await readFile(path, "utf8");
+  expect(JSON.parse(fresh)).toMatchObject({ schemaVersion: 3, services: {}, managedIds: [] });
+  if (kind === "old-schema") expect(JSON.parse(fresh).external).toEqual({ custom: "keep" });
+  const backups = (await readFile(join(platform.paths.state, "backups/index.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  const backup = backups.find(entry => entry.original === path && entry.sha256 === createHash("sha256").update(old).digest("hex"));
+  expect(backup).toBeDefined();
+  expect(await readFile(backup.backup, "utf8")).toBe(old);
+  expect((await component!.apply(ctx)).diagnostics).toEqual([]);
+  expect(await readFile(path, "utf8")).toBe(fresh);
+});
+
+it.each(["old-schema", "managed", "unmanaged"])("replaces retired generated services while preserving operator settings (%s)", async kind => {
+  const { input, ctx, platform } = fixture();
+  const tools = await import("@bflow/tool-installer");
+  const deepwiki = tools.createDeepWikiRemoteService({ operation: { schemaVersion: 3,
+    scope: { kind: "machine", machineId: platform.machineId }, idempotencyKey: "setup-gateway" } });
+  const legacy = MCPServiceDefinitionSchema.parse({ ...deepwiki, serviceId: "context7", tool: { ...deepwiki.tool, toolId: "context7" },
+    connection: { ...deepwiki.connection, endpoint: "https://mcp.context7.com/mcp" } });
+  const operator = MCPServiceDefinitionSchema.parse({ ...deepwiki, serviceId: "operator-docs" });
+  const [initial] = wrapSetupComponents([], { ...input, launchRequirements: [], config: { ...input.config, mcpServices: [operator] } });
+  expect((await initial!.apply(ctx)).diagnostics).toEqual([]);
+  const gatewayPath = join(platform.paths.config, "setup-gateway.json");
+  const saved = JSON.parse(await readFile(gatewayPath, "utf8"));
+  saved.services = [operator, legacy]; saved.generatedIds = [legacy.serviceId];
+  saved.definitionDigest = digest(saved.services); saved.desiredDigest = "f".repeat(64);
+  saved.approval.remoteServices = [{ toolId: "context7", authenticated: false, keyFingerprint: null }];
+  const oldGateway = JSON.stringify(saved);
+  await writeFile(gatewayPath, oldGateway);
+  const machinePath = join(platform.paths.config, "machine.json");
+  const machine = JSON.parse(await readFile(machinePath, "utf8")); machine.mcpServices = saved.services;
+  await writeFile(machinePath, JSON.stringify(machine));
+  const mcpPath = join(platform.paths.config, "mcp.json");
+  const oldMcp = JSON.stringify({ schemaVersion: kind === "old-schema" ? 2 : 3, managedIds: kind === "unmanaged" ? [] : [legacy.serviceId],
+    services: { [operator.serviceId]: operator, [legacy.serviceId]: legacy }, external: { custom: "keep" } });
+  await writeFile(mcpPath, oldMcp);
+  const [updated] = wrapSetupComponents([], { ...input, launchRequirements: [], config: machine, remoteServices: [{ toolId: "deepwiki" }] });
+  expect((await updated!.apply(ctx)).diagnostics).toEqual([]);
+  expect((await updated!.observe(ctx)).valid).toBe(true);
+  const freshMcp = await readFile(mcpPath, "utf8"), freshGateway = await readFile(gatewayPath, "utf8");
+  expect(JSON.parse(freshMcp)).toMatchObject({ external: { custom: "keep" }, services: { deepwiki, "operator-docs": operator } });
+  if (kind === "unmanaged") expect(JSON.parse(freshMcp).services.context7).toEqual(legacy);
+  else expect(JSON.parse(freshMcp).services).not.toHaveProperty("context7");
+  expect(JSON.parse(freshGateway).approval.remoteServices).toEqual([{ toolId: "deepwiki" }]);
+  expect(JSON.parse(await readFile(machinePath, "utf8")).mcpServices).toEqual([operator, deepwiki]);
+  expect((await updated!.apply(ctx)).diagnostics).toEqual([]);
+  expect(await readFile(mcpPath, "utf8")).toBe(freshMcp);
+  expect(await readFile(gatewayPath, "utf8")).toBe(freshGateway);
+  const backupIndex = (await readFile(join(platform.paths.state, "backups/index.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  for (const [original, bytes] of [[gatewayPath, oldGateway], [mcpPath, oldMcp]]) {
+    const backup = backupIndex.find(entry => entry.original === original && entry.sha256 === createHash("sha256").update(bytes!).digest("hex"));
+    expect(backup).toBeDefined();
+    expect(await readFile(backup.backup, "utf8")).toBe(bytes);
+  }
+});
+
 it("retains registered repository GitNexus services and reader locks across Gateway restarts and setup updates", async () => {
   const { input, ctx, platform } = fixture();
   await installFixtureTools(["query", "context", "impact"], { executableName: "gitnexus" });

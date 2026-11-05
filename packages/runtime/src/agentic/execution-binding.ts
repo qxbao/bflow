@@ -386,7 +386,12 @@ export async function assertRunExecutionPlan(run: RunRecord | undefined, read: E
   if (!read) return;
   try {
     const current = await read();
-    if (!run?.executionPlan) return;
+    if (!run?.executionPlan) {
+      // Startup may resolve new host inputs, but cannot manufacture acceptance authority for historical work.
+      if (run && (run.coreCreated || run.workflowSpec?.specification.status === 'approved'))
+        throw privateSourceDrift(buildExecutionPlan(current).fingerprint, ['legacy-execution-binding-unavailable']);
+      return;
+    }
     if (run.executionSourceDigests) {
       if (!read.readPrivateSources) throw privateSourceDrift(run.executionPlan.fingerprint, ['source-reader-unavailable']);
       const sources = await read.readPrivateSources();

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import type { OperationResult } from "@bflow/contracts";
+import { PaneBindingSchema, type OperationResult } from "@bflow/contracts";
 import type {
   AgentLaunchProfile,
   CommandInvocation,
@@ -50,6 +50,9 @@ class EnvHerdr implements HerdrCommandRunner {
   readonly tabs = new Map<string, { id: string; wsId: string; label: string }>();
   readonly panes = new Map<string, { id: string; tabId: string; wsId: string; agent: string | null; cwd: string }>();
   readonly agents = new Map<string, { name: string; kind: string; paneId: string }>();
+  nativeSessions = false;
+  readonly restoredTerminals = new Map<string, string>();
+  agentStatus = "idle";
   failSocketMethod: string | undefined;
   #seq = 0;
 
@@ -115,15 +118,16 @@ class EnvHerdr implements HerdrCommandRunner {
 
   paneJson(id: string): Json {
     const pane = this.panes.get(id)!;
-    return { pane_id: id, terminal_id: `term-${id}`, workspace_id: pane.wsId, tab_id: pane.tabId, focused: false,
+    return { pane_id: id, terminal_id: this.restoredTerminals.get(id) ?? `term-${id}`, workspace_id: pane.wsId, tab_id: pane.tabId, focused: false,
       agent: pane.agent, agent_status: "idle", revision: 1, cwd: pane.cwd };
   }
 
   agentJson(name: string): Json {
     const agent = this.agents.get(name)!;
     const pane = this.panes.get(agent.paneId)!;
-    return { name, agent: agent.kind, pane_id: agent.paneId, terminal_id: `term-${agent.paneId}`, workspace_id: pane.wsId, tab_id: pane.tabId,
-      focused: false, agent_status: "idle", revision: 1, interactive_ready: true, launch_pending: false };
+    return { name, agent: agent.kind, pane_id: agent.paneId, terminal_id: this.restoredTerminals.get(agent.paneId) ?? `term-${agent.paneId}`, workspace_id: pane.wsId, tab_id: pane.tabId,
+      focused: false, agent_status: this.agentStatus, revision: 1, interactive_ready: true, launch_pending: false,
+      ...(this.nativeSessions ? { agent_session: { source: "herdr:claude", kind: "id", value: `native-${agent.paneId}` } } : {}) };
   }
 
   reply(result: Json): CommandOutcome {
@@ -376,6 +380,44 @@ describe("launch env is applied at pane creation through the Herdr socket", () =
     assertNoTokens(runner);
   });
 
+  it.each([false, true])("retains the replacement for an original terminal when closure is uncertain (closed=%s)", async closed => {
+    const { runner, store, manager } = setup({ planner: plannerLaunch() });
+    const initial = await manager.initializeTopology();
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const planner = initial.value.panes.find(pane => pane.role === "planner")!;
+    const updatedLaunch = { ...plannerLaunch(), launchId: "launch-planner-2", launchFingerprint: "launch-planner-2-fingerprint" };
+    const fresh = createRolePaneManager({ config: config({}, { planner: updatedLaunch }), runner, store,
+      socket: runner.socket, worktreeInspector: inspector });
+    const run = runner.run.bind(runner);
+    let failClose = true;
+    runner.run = async invocation => {
+      if (failClose && invocation.args[0] === "pane" && invocation.args[1] === "close" && invocation.args[2] === planner.paneId) {
+        if (closed) await run(invocation);
+        return { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: true };
+      }
+      return run(invocation);
+    };
+    const paneCount = runner.panes.size;
+    expect(await fresh.reconcileTopology()).toMatchObject({ ok: false });
+    const retained = await store.load("bflow-env-test");
+    const receipt = retained.ok && retained.value?.panes.find(pane => pane.role === "planner")?.metadata?.replacementLaunchIntent;
+    expect(receipt).toBeDefined();
+    const replacement = PaneBindingSchema.parse(receipt);
+    if (!closed) {
+      expect(await fresh.reconcileTopology()).toMatchObject({ ok: false });
+      expect(runner.panes.size).toBe(paneCount + 1);
+    }
+    failClose = false;
+    const result = await fresh.reconcileTopology();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.panes.find(pane => pane.role === "planner")?.paneId).toBe(replacement.paneId);
+    expect(runner.panes.size).toBe(paneCount);
+    expect(runner.panes.has(planner.paneId)).toBe(false);
+    assertNoTokens(runner);
+  });
+
   it.each([
     { withEnv: true, retainedManifest: false },
     { withEnv: true, retainedManifest: true },
@@ -439,6 +481,194 @@ describe("launch env is applied at pane creation through the Herdr socket", () =
     expect(runner.calls.slice(beforeCalls).every(call => ["list", "get"].includes(call.args[1]!))).toBe(true);
     expect(runner.socketCalls).toHaveLength(beforeSocketCalls);
     expect(runner.agents.get("external-agent")?.paneId).toBe(planner.paneId);
+  });
+
+  it.each(["up", "down"] as const)("replaces a restored owned terminal with fresh launch env from a %s manifest", async status => {
+    const { runner, store, manager } = setup({ planner: plannerLaunch() });
+    runner.nativeSessions = true;
+    const initial = await manager.initializeTopology();
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const planner = initial.value.panes.find(pane => pane.role === "planner")!;
+    expect((await store.save({ ...initial.value, status })).ok).toBe(true);
+    runner.restoredTerminals.set(planner.paneId, "restored-terminal");
+    runner.paneEnv.delete(planner.paneId); // Herdr resumed the native session without the original pane env.
+    const startsBefore = runner.agentStarts().length;
+    const result = await manager.reconcileTopology();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const replacement = result.value.panes.find(pane => pane.role === "planner")!;
+    expect(replacement.paneId).not.toBe(planner.paneId);
+    expect(runner.paneEnv.get(replacement.paneId)).toEqual({ BFLOW_MCP_TOKEN_PLANNER: PLANNER_TOKEN });
+    expect(replacement.session?.value).toBe(`native-${replacement.paneId}`);
+    expect(runner.agentStarts()).toHaveLength(startsBefore + 1);
+    expect(runner.panes.has(planner.paneId)).toBe(false);
+    expect((await manager.reconcileTopology()).ok).toBe(true);
+    expect(runner.agentStarts()).toHaveLength(startsBefore + 1);
+    assertNoTokens(runner);
+  });
+
+  it("creates fresh env when the restored role is absent and preserves its unproven shell", async () => {
+    const { runner, manager } = setup({ planner: plannerLaunch() });
+    const initial = await manager.initializeTopology();
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const planner = initial.value.panes.find(pane => pane.role === "planner")!;
+    runner.restoredTerminals.set(planner.paneId, "restored-shell-terminal");
+    runner.paneEnv.delete(planner.paneId);
+    runner.agents.delete("planner");
+    runner.panes.get(planner.paneId)!.agent = null;
+    const result = await manager.reconcileTopology();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const replacement = result.value.panes.find(pane => pane.role === "planner")!;
+    expect(replacement.paneId).not.toBe(planner.paneId);
+    expect(runner.paneEnv.get(replacement.paneId)).toEqual({ BFLOW_MCP_TOKEN_PLANNER: PLANNER_TOKEN });
+    expect(runner.panes.has(planner.paneId)).toBe(true);
+    expect(runner.calls.some(call => call.args[0] === "pane" && call.args[1] === "close" && call.args[2] === planner.paneId)).toBe(false);
+    assertNoTokens(runner);
+  });
+
+  it("rebinds a restored no-env terminal only to the same recorded native session", async () => {
+    const { runner, manager } = setup({});
+    runner.nativeSessions = true;
+    const initial = await manager.initializeTopology();
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const planner = initial.value.panes.find(pane => pane.role === "planner")!;
+    runner.restoredTerminals.set(planner.paneId, "restored-terminal");
+    const startsBefore = runner.agentStarts().length;
+    const result = await manager.reconcileTopology();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.panes.find(pane => pane.role === "planner")).toMatchObject({
+      paneId: planner.paneId, terminalId: "restored-terminal", session: planner.session
+    });
+    expect(runner.agentStarts()).toHaveLength(startsBefore);
+  });
+
+  it.each(["missing", "source", "kind", "value", "workspace", "tab", "provider"] as const)(
+    "preserves a restored occupant with %s identity mismatch before any mutation", async mismatch => {
+      const { runner, store, manager } = setup({ planner: plannerLaunch() });
+      runner.nativeSessions = true;
+      const initial = await manager.initializeTopology();
+      expect(initial.ok).toBe(true);
+      if (!initial.ok) return;
+      const planner = initial.value.panes.find(pane => pane.role === "planner")!;
+      runner.restoredTerminals.set(planner.paneId, "restored-terminal");
+      const original = runner.agentJson.bind(runner);
+      runner.agentJson = name => {
+        const json = original(name);
+        if (name !== "planner") return json;
+        if (mismatch === "missing") delete json["agent_session"];
+        else if (mismatch === "workspace") json["workspace_id"] = "foreign-workspace";
+        else if (mismatch === "tab") json["tab_id"] = "foreign-tab";
+        else if (mismatch === "provider") json["agent"] = "codex";
+        else (json["agent_session"] as Json)[mismatch] = mismatch === "kind" ? "path" : "foreign";
+        return json;
+      };
+      const beforeManifest = await store.load("bflow-env-test");
+      const beforePanes = structuredClone([...runner.panes]);
+      const beforeCalls = runner.calls.length;
+      const beforeSocketCalls = runner.socketCalls.length;
+      expect(await manager.reconcileTopology()).toMatchObject({ ok: false, error: { code: "conflict" } });
+      expect(await store.load("bflow-env-test")).toEqual(beforeManifest);
+      expect([...runner.panes]).toEqual(beforePanes);
+      expect(runner.calls.slice(beforeCalls).every(call => ["list", "get"].includes(call.args[1]!))).toBe(true);
+      expect(runner.socketCalls).toHaveLength(beforeSocketCalls);
+    });
+
+  it("does not allocate or close panes when a restored role starts working after preflight", async () => {
+    const { runner, store, manager } = setup({ planner: plannerLaunch() });
+    runner.nativeSessions = true;
+    const initial = await manager.initializeTopology();
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const planner = initial.value.panes.find(pane => pane.role === "planner")!;
+    runner.restoredTerminals.set(planner.paneId, "restored-terminal");
+    const original = runner.agentJson.bind(runner);
+    let observations = 0;
+    runner.agentJson = name => {
+      const json = original(name);
+      if (name === "planner" && ++observations > 1) json["agent_status"] = "working";
+      return json;
+    };
+    const startsBefore = runner.agentStarts().length;
+    const paneCount = runner.panes.size;
+    for (let retry = 0; retry < 2; retry++) {
+      observations = 0;
+      expect(await manager.reconcileTopology()).toMatchObject({ ok: false, error: {
+        code: "conflict", details: { paneId: planner.paneId, sessionId: "bflow-env-test" }
+      } });
+      expect(runner.panes.size).toBe(paneCount);
+    }
+    expect(runner.panes.has(planner.paneId)).toBe(true);
+    expect(runner.agentStarts()).toHaveLength(startsBefore);
+    const saved = await store.load("bflow-env-test");
+    expect(saved.ok && saved.value?.panes.some(pane => pane.paneId === planner.paneId)).toBe(true);
+  });
+
+  it.each(["resume", "shutdown", "foreign-replacement"])("retains a durable replacement when the restored role starts working during pane creation (%s)", async recovery => {
+    const { runner, store, manager } = setup({ planner: plannerLaunch() });
+    runner.nativeSessions = true;
+    const initial = await manager.initializeTopology();
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const planner = initial.value.panes.find(pane => pane.role === "planner")!;
+    runner.restoredTerminals.set(planner.paneId, "restored-terminal");
+    const request = runner.socket.request;
+    runner.socket.request = async (method, ...args) => {
+      const result = await request(method, ...args);
+      if (method === "pane.split") runner.agentStatus = "working";
+      return result;
+    };
+    const paneCount = runner.panes.size;
+    const startsBefore = runner.agentStarts().length;
+    expect(await manager.reconcileTopology()).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(runner.panes.has(planner.paneId)).toBe(true);
+    expect(runner.panes.size).toBe(paneCount + 1);
+    const saved = await store.load("bflow-env-test");
+    const receipt = saved.ok && saved.value?.panes.find(pane => pane.role === "planner")?.metadata?.replacementLaunchIntent;
+    expect(receipt).toBeDefined();
+    const replacementId = PaneBindingSchema.parse(receipt).paneId;
+    if (recovery === "shutdown") {
+      expect((await manager.shutdownTopology()).ok).toBe(true);
+      expect(runner.panes.has(replacementId)).toBe(false);
+      expect(runner.panes.has(planner.paneId)).toBe(false);
+      return;
+    }
+    if (recovery === "foreign-replacement") {
+      runner.panes.get(replacementId)!.agent = "codex";
+      runner.agents.set("foreign", { name: "foreign", kind: "codex", paneId: replacementId });
+      expect(await manager.shutdownTopology()).toMatchObject({ ok: false, error: { code: "conflict" } });
+      expect(runner.panes.has(replacementId)).toBe(true);
+      expect(runner.panes.has(planner.paneId)).toBe(true);
+      return;
+    }
+    expect(await manager.reconcileTopology()).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(runner.panes.size).toBe(paneCount + 1);
+    runner.agentStatus = "idle";
+    expect((await manager.reconcileTopology()).ok).toBe(true);
+    expect(runner.panes.size).toBe(paneCount);
+    expect(runner.agentStarts()).toHaveLength(startsBefore + 1);
+    expect((await manager.reconcileTopology()).ok).toBe(true);
+    expect(runner.agentStarts()).toHaveLength(startsBefore + 1);
+  });
+
+  it("preserves a working restored role instead of replacing its terminal", async () => {
+    const { runner, store, manager } = setup({ planner: plannerLaunch() });
+    runner.nativeSessions = true;
+    const initial = await manager.initializeTopology();
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const planner = initial.value.panes.find(pane => pane.role === "planner")!;
+    runner.restoredTerminals.set(planner.paneId, "restored-terminal");
+    runner.agentStatus = "working";
+    const before = await store.load("bflow-env-test");
+    const beforeCalls = runner.calls.length;
+    expect(await manager.reconcileTopology()).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(await store.load("bflow-env-test")).toEqual(before);
+    expect(runner.calls.slice(beforeCalls).every(call => ["list", "get"].includes(call.args[1]!))).toBe(true);
   });
 
   it("keeps an env-bearing role's pane when its recorded launch is unchanged", async () => {

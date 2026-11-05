@@ -148,18 +148,59 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
   const now = launchOptions.now ?? Date.now;
   const pending = new Map<string, PendingDeveloper>();
   /** Proven Developers by task: their pane and launch, so a degraded launch can be held back from new prompts. */
-  const ready = new Map<string, { readonly paneId: string; readonly launchId: string }>();
-  /** Releases a Developer that failed its gate: pane closed, launch and registrations revoked. Reports a release failure too. */
-  const retire = async (taskId: string, callOptions: OperationOptions | undefined): Promise<string | undefined> => {
-    pending.delete(taskId); ready.delete(taskId);
-    await base.releaseDeveloper({ taskId, closePane: true, removeWorktree: false }, callOptions);
-    try { await launches.release(taskId); return undefined; }
-    catch (error) { return String(error); }
+  const ready = new Map<string, PendingDeveloper & { readonly paneId: string }>();
+  // Keep a rejected allocation quarantined until both its pane close and launch revocation are confirmed.
+  // This is process-local retry state; the persisted Pane Manager binding fences a fresh wrapper after host restart.
+  const cleanup = new Map<string, { reason: string; request: Parameters<PanePolicy["releaseDeveloper"]>[0]; paneClosed: boolean;
+    launchId?: string; paneId?: string; allocationFailure?: ContractError }>();
+  const cleanupError = (taskId: string, reason: string): ContractError => ({ code: "conflict", retryable: true,
+    message: `Developer ${taskId} cleanup is not confirmed; its allocation is retained and cannot be replaced: ${reason}`,
+    details: { stage: "developer_cleanup" } });
+  const retire = async (taskId: string, callOptions: OperationOptions | undefined): Promise<ContractError | undefined> => {
+    const obligation = cleanup.get(taskId)!;
+    try {
+      if (!obligation.paneClosed) {
+        if (obligation.launchId !== undefined) {
+          const observed = await base.getManifest(callOptions);
+          if (!observed.ok || !observed.value) return cleanupError(taskId, "the allocation manifest is not readable");
+          const manifest = SessionManifestSchema.parse(observed.value);
+          const candidates = manifest.panes.filter(pane => pane.role === "developer" && pane.metadata?.taskId === taskId);
+          const target = candidates.find(pane => pane.metadata?.launchId === obligation.launchId &&
+            (obligation.paneId === undefined || pane.paneId === obligation.paneId));
+          // With no retained binding, an explicit not_started timeout leaves no native launch to reconcile.
+          const notStarted = obligation.allocationFailure?.code === "timeout" && obligation.allocationFailure.retrySafety === "not_started";
+          if (target) {
+            obligation.paneId ??= target.paneId;
+            // Pane Manager releases the active task binding first. Do not close a replacement while an older obligation remains.
+            const releaseTarget = candidates.find(pane => pane.metadata?.allocationStatus !== "released") ?? candidates[0];
+            if (releaseTarget?.bindingId !== target.bindingId)
+              return cleanupError(taskId, "another allocation now owns this task; reconcile the exact retained pane before release");
+          } else if (obligation.paneId !== undefined || candidates.length > 0 || obligation.allocationFailure &&
+              !["conflict", "validation"].includes(obligation.allocationFailure.code) && !notStarted) {
+            return cleanupError(taskId, "the exact launch awaiting cleanup has no verified pane-stop observation");
+          }
+        }
+        const closed = await base.releaseDeveloper(obligation.request, callOptions);
+        if (!closed.ok) {
+          // A missing release target alone could mean a missing manifest. Require its authoritative manifest to prove absence.
+          const manifest = closed.error.code === "not_found" ? await base.getManifest(callOptions) : undefined;
+          if (!manifest?.ok || !manifest.value || manifest.value.panes.some(pane => pane.role === "developer" && pane.metadata?.taskId === taskId))
+            return cleanupError(taskId, closed.error.message);
+        }
+        obligation.paneClosed = true;
+      }
+      await launches.release(taskId);
+      pending.delete(taskId); ready.delete(taskId); cleanup.delete(taskId);
+      return undefined;
+    } catch (error) { return cleanupError(taskId, String(error)); }
   };
   const failClosed = async (entry: PendingDeveloper, reason: string, callOptions: OperationOptions | undefined): Promise<OperationResult<AllocatedPane>> => {
-    const releaseFailure = await retire(entry.taskId, callOptions);
-    return { ok: false, error: { code: "validation", retryable: false,
-      message: `Developer ${entry.taskId} ${reason}; its pane and launch were released${releaseFailure === undefined ? "" : `, but the launch release failed: ${releaseFailure}`}` } };
+    if (!cleanup.has(entry.taskId)) cleanup.set(entry.taskId, { reason,
+      request: { taskId: entry.taskId, closePane: true, removeWorktree: false }, paneClosed: false,
+      launchId: entry.launchId, paneId: entry.allocated.paneId });
+    const failure = await retire(entry.taskId, callOptions);
+    return { ok: false, error: failure ?? { code: "validation", retryable: false,
+      message: `Developer ${entry.taskId} ${reason}; its pane and launch were released` } };
   };
   return {
     ...(base.allocateSpecialist ? { allocateSpecialist: base.allocateSpecialist.bind(base) } : {}),
@@ -170,7 +211,11 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
     // A degraded launch (Gateway registration lost) stays unready: the outbox keeps its messages queued, never drops them.
     async inspectRoleHealth(role, options) {
       const health = await base.inspectRoleHealth(role, options);
-      if (!health.ok || !health.value.readyForPrompt || launches.degradation === undefined) return health;
+      if (!health.ok || !health.value.readyForPrompt) return health;
+      const allocation = [...pending.values(), ...ready.values()].find(item => item.allocated.paneId === health.value.paneId);
+      if ((allocation && cleanup.has(allocation.taskId)) || [...cleanup.values()].some(item => item.paneId === health.value.paneId))
+        return { ok: true, value: { ...health.value, readyForPrompt: false } };
+      if (launches.degradation === undefined) return health;
       const degraded = launches.degradation();
       const developer = [...ready.values()].find(item => item.paneId === health.value.paneId);
       if (degraded.roles.includes(role) || (developer !== undefined && degraded.launchIds.includes(developer.launchId)))
@@ -178,8 +223,20 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
       return health;
     },
     async allocateDeveloper(request, callOptions) {
-      let entry = pending.get(request.taskId);
+      const obligation = cleanup.get(request.taskId);
+      if (obligation) {
+        const failure = await retire(request.taskId, callOptions);
+        return { ok: false, error: failure ?? obligation.allocationFailure ?? { code: "validation", retryable: false,
+          message: `Developer ${request.taskId} ${obligation.reason}; its pane and launch were released` } };
+      }
+      let entry = pending.get(request.taskId) ?? ready.get(request.taskId);
       if (entry === undefined) {
+        // Before preparing (which may revoke a previous launch), fence persisted allocations from a prior wrapper/host.
+        const manifest = await base.getManifest(callOptions);
+        if (!manifest.ok) return manifest;
+        if (manifest.value?.panes.some(pane => pane.role === "developer" && pane.metadata?.taskId === request.taskId &&
+            pane.metadata?.allocationStatus !== "released"))
+          return { ok: false, error: cleanupError(request.taskId, "reconcile the persisted Developer binding before preparing another launch") };
         let launch;
         try { launch = await launches.allocate({ runId: request.runId, taskId: request.taskId, worktreePath: request.worktreePath,
             ...(request.roleProfile ? { roleProfile: request.roleProfile } : {}),
@@ -197,8 +254,13 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
         }
         const allocated = await base.allocateDeveloper(allocation, callOptions);
         if (!allocated.ok) {
-          try { await launches.release(request.taskId); } catch { /* the refused allocation's error is the one to report */ }
-          return allocated;
+          // A refused allocation may still own a persisted launch intent or a native process after an uncertain start.
+          // Settle that exact pane before revoking its registration, even though no binding was returned to Runtime.
+          cleanup.set(request.taskId, { reason: `allocation failed: ${allocated.error.message}`,
+            request: { taskId: request.taskId, closePane: true, removeWorktree: false }, paneClosed: false,
+            launchId: launch.launchId, allocationFailure: allocated.error });
+          const failure = await retire(request.taskId, callOptions);
+          return failure ? { ok: false, error: failure } : allocated;
         }
         entry = { taskId: request.taskId, launchId: launch.launchId, allocated: allocated.value, since: now() };
         pending.set(request.taskId, entry);
@@ -220,9 +282,14 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
         if (binding?.session && nativeSourceMatches && health?.ok && health.value.readyForPrompt && health.value.occupantMatches &&
             health.value.paneId === binding.paneId && health.value.agentId === binding.agentId) {
           try { await launches.assertProcessScope?.(binding); }
-          catch (error) { return failClosed(entry, `has no verified process supervision: ${String(error)}`, callOptions); }
+          catch (error) {
+            const diagnostic = String(error);
+            const hint = diagnostic.includes("no started, authenticated process-scope witness")
+              ? "; shell startup may have bypassed the supervised provider; inspect this pane's launch binding and supervised shell bootstrap before retrying" : "";
+            return failClosed(entry, `has no verified process supervision: ${diagnostic}${hint}`, callOptions);
+          }
           pending.delete(entry.taskId);
-          ready.set(entry.taskId, { paneId: binding.paneId, launchId: entry.launchId });
+          ready.set(entry.taskId, { ...entry, allocated: binding, paneId: binding.paneId });
           return { ok: true, value: binding };
         }
         verdict = { state: "pending", reason: "native-session binding or the completed startup turn is not ready" };
@@ -244,7 +311,7 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
       // Retain the pane and exact binding; retry after a crash observes the same released allocation, not a missing shell.
       try { await launches.release(request.taskId); }
       catch (error) { return { ok: false, error: { code: "conflict", retryable: true, message: String(error) } }; }
-      pending.delete(request.taskId); ready.delete(request.taskId);
+      pending.delete(request.taskId); ready.delete(request.taskId); cleanup.delete(request.taskId);
       return released;
     },
     async closeCancelledDeveloper(request, callOptions) {
@@ -253,17 +320,14 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
       if (!closed.ok) return closed;
       try { await launches.release(request.taskId); }
       catch (error) { return { ok: false, error: { code: "conflict", retryable: true, message: String(error) } }; }
-      pending.delete(request.taskId); ready.delete(request.taskId);
+      pending.delete(request.taskId); ready.delete(request.taskId); cleanup.delete(request.taskId);
       return closed;
     },
     async releaseDeveloper(request, callOptions) {
-      pending.delete(request.taskId); ready.delete(request.taskId);
-      const released = await base.releaseDeveloper({ ...request, closePane: true }, callOptions);
-      // Already released: the binding is gone, so the launch is already dropped as well.
-      if (!released.ok && released.error.code !== "not_found") return released;
-      try { await launches.release(request.taskId); }
-      catch (error) { return { ok: false, error: { code: "conflict", retryable: true, message: String(error) } }; }
-      return released.ok ? released : { ok: true, value: undefined };
+      if (!cleanup.has(request.taskId)) cleanup.set(request.taskId, { reason: "was explicitly released",
+        request: { ...request, closePane: true }, paneClosed: false });
+      const failure = await retire(request.taskId, callOptions);
+      return failure ? { ok: false, error: failure } : { ok: true, value: undefined };
     }
   };
 }
