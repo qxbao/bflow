@@ -288,7 +288,7 @@ export const OPEN_HELP = `Cách dùng: bflow open [--provider claude|codex|agy] 
 Mở một cửa sổ terminal chạy CLI nhà cung cấp trong kho này với skill /bflow-start (giống nút "Khởi động phiên" trên Web).
 Không mở được terminal (SSH, không có màn hình) thì in lệnh để bạn tự chạy. Phiên chỉ sẵn sàng khi Director đăng ký với host;
 cửa sổ đã mở chưa chứng minh Director đã chạy. Director Codex/Claude bỏ sandbox/prompt quyền trong riêng phiên được mở;
-Codex dùng --no-daemon để tách khỏi daemon chung. Quyền specialist và phê duyệt của Runtime vẫn theo chính sách Bflow.
+Codex dùng daemon cục bộ để đánh thức đúng thread tương tác khi Bflow có sự kiện. Quyền specialist và phê duyệt của Runtime vẫn theo chính sách Bflow.
 Lệnh này không cấp token, không cài đặt, không đăng nhập và không sửa cấu hình provider toàn cục.
   --provider        Chọn CLI; mặc định là CLI sẵn sàng đầu tiên (claude, codex, agy)
   --profile NAME    Dùng profile ai-isolator đã có (cần --provider; hỗ trợ Codex/Claude)

@@ -778,6 +778,7 @@ Lệnh:
 - `bflow director start [--provider claude|codex|agy] --json`: bắt đầu phiên Director và trả về thông tin phiên dạng JSON. Lệnh vẫn gọi lại `up` khi cần.
 - `bflow director call <tool> [<argsJson>]`: gọi một tool Director. Token được đọc từ biến môi trường `BFLOW_DIRECTOR_TOKEN`.
 - `bflow director mcp`: chạy MCP server stdio của Director.
+- `director_suspend` (MCP): trong phiên Director Codex, chuyển việc chờ sự kiện sang watcher nền và kết thúc lượt model mà không đặt token vào lệnh shell. Lệnh thủ công `bflow director suspend <cursor>` vẫn có cho môi trường đã cấp sẵn `BFLOW_DIRECTOR_TOKEN`. `bflow director watch-status` báo `armed`, `queueing`, `queued`, `cancelled`, `wake_failed`, `absent` hoặc `invalid`.
 - `bflow director hook <claude|codex>`: chỉ ghi nhận sự kiện từ hook của provider. Lệnh luôn thoát với mã 0 và bỏ qua khi có `HERDR_PANE_ID`.
 - `bflow progress [--follow] [--json]`: hiển thị tiến độ workflow; `--follow` theo dõi liên tục (đây là lệnh tab `progress` chạy).
 - `bflow queue list|show|retry|dismiss`: xem, thử lại hoặc bỏ qua các mục trong hàng đợi lỗi.
@@ -788,10 +789,10 @@ Luồng sử dụng:
 
 1. Người dùng chạy `bflow up` (một lần), rồi gõ `/bflow-start` trong CLI provider.
 2. Skill chạy `bflow director start --json`.
-3. Skill lặp vòng `director_wait` (tin nhắn, thay đổi issue, sự kiện Runtime và mục trong hộp thư), `director_say` (trả lời người dùng) và các tool lập kế hoạch (`planning_reference`, `read_coordinator_guide`, `assess`, `propose_workflow`, `start_work`, `request_specialist`, `tick`, `inspect`, `retry_verification`). Cursor được truyền lại ở mỗi lần gọi.
+3. Skill dùng `director_wait` (tin nhắn, thay đổi issue, sự kiện Runtime và mục trong hộp thư), `director_say` (trả lời người dùng) và các tool lập kế hoạch (`planning_reference`, `read_coordinator_guide`, `assess`, `propose_workflow`, `start_work`, `request_specialist`, `tick`, `inspect`, `retry_verification`). Codex khởi tạo cursor Runtime bằng `director_wait`, gọi MCP `director_suspend` và kết thúc lượt khi rảnh; watcher nền chờ bằng chính cursor đó, rồi `codex queue --resume` đánh thức cùng thread khi có sự kiện. Claude/Agy vẫn chờ bằng vòng `director_wait`.
 4. Khi run cần phê duyệt, Director đưa cho người dùng hai cách: nút phê duyệt trên Bflow Web, hoặc người dùng tự gõ `! bflow approve '#n'`.
 
-`bflow init` ghi skill `bflow-start` (phiên bản 1.3.0), cấu hình MCP và hook cho Claude Code, Codex và Agy:
+`bflow init` ghi skill `bflow-start` (phiên bản 1.7.0), cấu hình MCP và hook cho Claude Code, Codex và Agy:
 
 - `--no-director`: bỏ qua phần Director.
 - `--commit-skills`: không ghi khối Director vào `<git-common-dir>/info/exclude` (mặc định các tệp Director bị git bỏ qua qua exclude, không sửa `.gitignore`), để nhóm commit skill/MCP/hook vào repo; nếu khối đã có thì được gỡ.
@@ -808,6 +809,7 @@ Giới hạn đã biết sau B2:
 - Hook ghi tin nhắn chỉ ghi cho đúng phiên provider đã khởi động bằng `/bflow-start` (gắn theo `session_id` của hook, lưu trong bộ nhớ host). Phiên không có hook (ví dụ Agy) dùng `director_note_user_message`. Host khởi động lại thì chạy lại `director start`.
 - `tools/list` của MCP Director chỉ mô tả đối số `token`; các tham số còn lại nằm trong mô tả của từng tool. Hãy gọi `planning_reference` trước khi lập kế hoạch.
 - Token Director hiển thị trong transcript của provider và trong argv của lệnh shell (đường dự phòng).
+- Watcher Codex không truyền token vào `codex queue`, không tự gửi lại khi không chắc tin wake đã được queue; `bflow director watch-status` báo `wake_failed` để đối soát thủ công. Phiên Codex cũ cần `bflow init --update` rồi mở lại bằng `bflow open --provider codex` để dùng daemon cục bộ và skill mới.
 - Codex và Agy chưa được kiểm live (hết hạn mức); chỉ Claude Code có spike live.
 - Hàng đợi `parked` (B2b) và trang Web cho hàng đợi lỗi thuộc các lát sau; B3 mới xoá mã Conversation/Coordinator cũ.
 

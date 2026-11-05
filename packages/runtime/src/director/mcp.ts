@@ -10,6 +10,10 @@ export interface DirectorMcpOptions {
 }
 
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
+/** Runs in the provider-local MCP shim, not in the host's DirectorTools. */
+export const DIRECTOR_LOCAL_MCP_TOOLS = [
+  { name: "director_suspend", description: "Codex only: authenticate, start the local event watcher for this thread, and end the current model turn. Arguments: cursor from director_wait, threadId from director start. On failure keep using director_wait." }
+] as const;
 const INPUT_SCHEMA = {
   type: "object",
   properties: { token: { type: "string", description: "Director token from bflow director start" } },
@@ -23,7 +27,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** Line-delimited JSON-RPC MCP server. Each tools/call runs independently so a long wait never blocks other calls. */
 export async function runDirectorMcp(options: DirectorMcpOptions): Promise<void> {
-  const known = new Set(DIRECTOR_TOOLS.map(tool => tool.name));
+  const availableTools = [...DIRECTOR_TOOLS, ...DIRECTOR_LOCAL_MCP_TOOLS];
+  const known = new Set(availableTools.map(tool => tool.name));
   const pending = new Set<Promise<void>>();
   const send = (message: unknown) => { options.output.write(JSON.stringify(message) + "\n"); };
   const handleCall = async (id: unknown, params: Record<string, unknown>) => {
@@ -67,7 +72,7 @@ export async function runDirectorMcp(options: DirectorMcpOptions): Promise<void>
         break;
       case "ping": send({ jsonrpc: "2.0", id, result: {} }); break;
       case "tools/list":
-        send({ jsonrpc: "2.0", id, result: { tools: DIRECTOR_TOOLS.map(tool => ({ name: tool.name, description: tool.description, inputSchema: INPUT_SCHEMA })) } });
+        send({ jsonrpc: "2.0", id, result: { tools: availableTools.map(tool => ({ name: tool.name, description: tool.description, inputSchema: INPUT_SCHEMA })) } });
         break;
       case "tools/call": {
         const task: Promise<void> = handleCall(id, isRecord(request.params) ? request.params : {})

@@ -1,7 +1,10 @@
 import type { JsonValue } from "@bflow/contracts";
 import { fileURLToPath } from 'node:url';
+import { spawn } from "node:child_process";
+import { z } from "zod";
 import { restoreDirectorMachineEnvironment } from './director-machine-environment.js';
 import { environmentProcessRunner } from './environment-process.js';
+import { armCodexDirectorWatch, cancelCodexDirectorWatch, cancelCodexDirectorWatchIfThread, isCodexDirectorWakeMarker, queueCodexDirectorThread, readCodexDirectorWatchStatus, runCodexDirectorWatch } from "./director-wake.js";
 import { CLI_EXIT_CODES } from "./types.js";
 
 export type DirectorProvider = "claude" | "codex" | "agy";
@@ -9,11 +12,15 @@ const PROVIDERS: readonly DirectorProvider[] = ["claude", "codex", "agy"];
 const MAX_HOOK_STDIN_BYTES = 1024 * 1024;
 const HOOK_NOTE_TIMEOUT_MS = 3000;
 const HOOK_STDIN_DEADLINE_MS = 2000;
+const SuspendMcpArgs = z.object({ cursor: z.string().min(1).max(512), threadId: z.string().uuid() }).strict();
 
 export type DirectorArgs =
   | { readonly sub: "start"; readonly provider?: DirectorProvider | undefined; readonly json: boolean }
   | { readonly sub: "call"; readonly tool: string; readonly argsJson: string; readonly json: boolean }
   | { readonly sub: "mcp" }
+  | { readonly sub: "suspend"; readonly cursor: string }
+  | { readonly sub: "watch"; readonly generation: string }
+  | { readonly sub: "watch-status" }
   | { readonly sub: "hook"; readonly provider: "claude" | "codex" }
   | { readonly sub: "help" };
 
@@ -22,6 +29,8 @@ export const DIRECTOR_HELP = `Cách dùng: bflow director <lệnh con>
   start [--provider claude|codex|agy] [--json]   Đăng ký phiên Director và in token (chỉ dùng trong skill /bflow-start)
   call <tool> [--json] [<argsJson>]              Gọi một tool Director (cần biến BFLOW_DIRECTOR_TOKEN)
   mcp                                            Máy chủ MCP qua stdio cho Director
+  suspend <cursor>                               Codex: ngủ đến khi có sự kiện, rồi tiếp tục thread
+  watch-status                                   Trạng thái watcher Codex hiện tại
   hook <claude|codex>                            Hook ghi lại tin nhắn người dùng (luôn thoát 0)`;
 
 export function parseDirectorArgs(args: readonly string[]): { ok: true; value: DirectorArgs } | { ok: false; message: string } {
@@ -52,12 +61,17 @@ export function parseDirectorArgs(args: readonly string[]): { ok: true; value: D
     return { ok: true, value: { sub, tool, argsJson: argsJson ?? "{}", json } };
   }
   if (sub === "mcp") return rest.length === 0 ? { ok: true, value: { sub } } : { ok: false, message: "'bflow director mcp' không nhận tham số." };
+  if (sub === "suspend") return rest.length === 1 && rest[0]!.length > 0 && rest[0]!.length <= 512
+    ? { ok: true, value: { sub, cursor: rest[0]! } } : { ok: false, message: "Cách dùng: bflow director suspend <cursor>." };
+  if (sub === "watch") return rest.length === 1 && /^[0-9a-fA-F-]{36}$/.test(rest[0]!)
+    ? { ok: true, value: { sub, generation: rest[0]! } } : { ok: false, message: "Watcher generation không hợp lệ." };
+  if (sub === "watch-status") return rest.length === 0 ? { ok: true, value: { sub } } : { ok: false, message: "'watch-status' không nhận tham số." };
   if (sub === "hook") {
     const p = rest[0];
     if ((p !== "claude" && p !== "codex") || rest.length !== 1) return { ok: false, message: "Cách dùng: bflow director hook <claude|codex>" };
     return { ok: true, value: { sub, provider: p } };
   }
-  return { ok: false, message: `Lệnh con không hợp lệ '${sub}' cho 'bflow director'. Dùng: start, call, mcp, hook.` };
+  return { ok: false, message: `Lệnh con không hợp lệ '${sub}' cho 'bflow director'. Dùng: start, call, mcp, suspend, watch-status, hook.` };
 }
 
 export interface DirectorRepositoryIdentity { readonly root: string; readonly sessionName: string }
@@ -75,6 +89,19 @@ export interface DirectorCommandDeps {
   readonly stdout: { write(chunk: string): unknown };
   readonly stderr: { write(chunk: string): unknown };
   readonly hookStdinDeadlineMs?: number | undefined;
+  readonly suspendWatch?: (input: { root: string; sessionName: string; cursor: string; threadId: string; token: string }) => Promise<void>;
+  readonly watch?: (input: { root: string; sessionName: string; generation: string;
+    wait: (cursor: string, timeoutMs: number) => Promise<unknown> }) => Promise<void>;
+}
+
+async function spawnWatcher(root: string, generation: string, token: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL("./bin.js", import.meta.url)), "director", "watch", generation], {
+      cwd: root, env: { ...process.env, BFLOW_DIRECTOR_TOKEN: token }, detached: true, stdio: "ignore"
+    });
+    child.once("error", reject);
+    child.once("spawn", () => { child.unref(); resolve(); });
+  });
 }
 
 export async function defaultDirectorDeps(cwd: string): Promise<DirectorCommandDeps> {
@@ -99,6 +126,11 @@ export async function defaultDirectorDeps(cwd: string): Promise<DirectorCommandD
     ownerCall: (opts, method, input, timeoutMs) => runtime.callDirectorOwnerHost(opts, method, input, timeoutMs),
     toolCall: (opts, token, name, args) => runtime.callDirectorTool(opts, token, name, args),
     runMcp: options => runtime.runDirectorMcp(options),
+    suspendWatch: async input => { await armCodexDirectorWatch({ ...input, spawn: generation => spawnWatcher(input.root, generation, input.token) }); },
+    watch: async input => runCodexDirectorWatch({ root: input.root, sessionName: input.sessionName,
+      generation: input.generation, wait: input.wait,
+      queue: (threadId, message, env) => queueCodexDirectorThread({ executable: "codex", cwd: input.root, threadId, message, env }),
+      delay: ms => new Promise(resolve => setTimeout(resolve, ms)) }),
     env: process.env,
     stdin: process.stdin,
     stdout: process.stdout,
@@ -164,6 +196,13 @@ export async function runDirectorCommand(args: DirectorArgs, deps: DirectorComma
     case "start": return runStart(args, deps);
     case "call": return runCall(args, deps);
     case "mcp": return runMcp(deps);
+    case "suspend": return runSuspend(args.cursor, deps);
+    case "watch": return runWatch(args.generation, deps);
+    case "watch-status": {
+      const repository = await deps.identify(deps.cwd);
+      deps.stdout.write(`${await readCodexDirectorWatchStatus(repository.root, repository.sessionName)}\n`);
+      return 0;
+    }
     case "hook": return runHook(args.provider, deps);
   }
 }
@@ -175,8 +214,11 @@ async function runStart(args: Extract<DirectorArgs, { sub: "start" }>, deps: Dir
     await deps.ensureUp(deps.cwd);
     const registered = await deps.ownerCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, "director_register", { provider });
     if (!isRecord(registered) || typeof registered.token !== "string") throw new Error("Host trả về phản hồi đăng ký không hợp lệ.");
+    if (provider === "codex") await cancelCodexDirectorWatch(repository.root, repository.sessionName);
     const presence = isRecord(registered.session) ? registered.session.presence : undefined;
-    const out = { ok: true, token: registered.token, cursor: typeof registered.cursor === "string" ? registered.cursor : "", sessionId: repository.sessionName, repositoryRoot: repository.root, provider, presence };
+    const threadId = provider === "codex" ? z.string().uuid().safeParse(deps.env.CODEX_THREAD_ID) : undefined;
+    const out = { ok: true, token: registered.token, cursor: typeof registered.cursor === "string" ? registered.cursor : "", sessionId: repository.sessionName, repositoryRoot: repository.root, provider, presence,
+      ...(threadId?.success ? { threadId: threadId.data } : {}) };
     deps.stdout.write(args.json ? `${JSON.stringify(out)}\n` : `Director đã sẵn sàng (nhà cung cấp ${provider}, phiên ${repository.sessionName}).\n`);
     return 0;
   } catch (error) {
@@ -185,6 +227,37 @@ async function runStart(args: Extract<DirectorArgs, { sub: "start" }>, deps: Dir
     deps.stdout.write(args.json ? `${JSON.stringify({ ok: false, message, fix })}\n` : `${message}\n${fix}\n`);
     return CLI_EXIT_CODES.RUNTIME_ERROR;
   }
+}
+
+async function runSuspend(cursor: string, deps: DirectorCommandDeps): Promise<number> {
+  const token = deps.env.BFLOW_DIRECTOR_TOKEN;
+  const threadId = deps.env.CODEX_THREAD_ID;
+  if (!token || !threadId || !deps.suspendWatch) {
+    deps.stderr.write("Không thể ngủ: cần BFLOW_DIRECTOR_TOKEN và CODEX_THREAD_ID của phiên Codex.\n");
+    return CLI_EXIT_CODES.RUNTIME_ERROR;
+  }
+  try {
+    const repository = await deps.identify(deps.cwd);
+    await deps.toolCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, token, "inspect", { view: "summary" });
+    await deps.suspendWatch({ root: repository.root, sessionName: repository.sessionName, cursor, threadId, token });
+    deps.stdout.write("watching\n");
+    return 0;
+  } catch (error) {
+    deps.stderr.write(`${scrub((error instanceof Error ? error.message : String(error)).split(token).join("[đã ẩn]"))}\n`);
+    return CLI_EXIT_CODES.RUNTIME_ERROR;
+  }
+}
+
+async function runWatch(generation: string, deps: DirectorCommandDeps): Promise<number> {
+  const token = deps.env.BFLOW_DIRECTOR_TOKEN;
+  if (!token || !deps.watch) return CLI_EXIT_CODES.RUNTIME_ERROR;
+  try {
+    const repository = await deps.identify(deps.cwd);
+    const host = { repositoryPath: repository.root, sessionId: repository.sessionName };
+    await deps.watch({ root: repository.root, sessionName: repository.sessionName, generation,
+      wait: (cursor, timeoutMs) => deps.toolCall(host, token, "director_wait", { cursor, timeoutMs }) });
+    return 0;
+  } catch { return CLI_EXIT_CODES.RUNTIME_ERROR; }
 }
 
 async function runCall(args: Extract<DirectorArgs, { sub: "call" }>, deps: DirectorCommandDeps): Promise<number> {
@@ -218,7 +291,15 @@ async function runMcp(deps: DirectorCommandDeps): Promise<number> {
     const repository = await deps.identify(deps.cwd);
     const opts = { repositoryPath: repository.root, sessionId: repository.sessionName };
     await deps.runMcp({
-      call: (name, token, a) => deps.toolCall(opts, token, name, a),
+      call: async (name, token, a) => {
+        if (name !== "director_suspend") return deps.toolCall(opts, token, name, a);
+        if (!deps.suspendWatch) throw new Error("Codex Director watcher unavailable");
+        const input = SuspendMcpArgs.parse(a);
+        await deps.toolCall(opts, token, "inspect", { view: "summary" });
+        await deps.suspendWatch({ root: repository.root, sessionName: repository.sessionName,
+          cursor: input.cursor, threadId: input.threadId, token });
+        return { status: "watching" };
+      },
       input: deps.stdin,
       output: deps.stdout as unknown as NodeJS.WritableStream
     });
@@ -239,8 +320,13 @@ async function runHook(provider: "claude" | "codex", deps: DirectorCommandDeps):
     const providerSession = isRecord(payload) ? payload.session_id : undefined;
     const sessionId = typeof providerSession === "string" && providerSession.length > 0 && providerSession.length <= 200 ? providerSession : undefined;
     const repository = await deps.identify(deps.cwd);
-    await deps.ownerCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, "director_hook_note",
+    if (provider === "codex" && isCodexDirectorWakeMarker(prompt)) return 0;
+    const cancelledEarly = provider === "codex" && sessionId !== undefined
+      ? await cancelCodexDirectorWatchIfThread(repository.root, repository.sessionName, sessionId) : false;
+    const noted = await deps.ownerCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, "director_hook_note",
       { provider, prompt, ...(sessionId !== undefined ? { sessionId } : {}) }, HOOK_NOTE_TIMEOUT_MS);
+    if (provider === "codex" && !cancelledEarly && isRecord(noted) && noted.recorded === true)
+      await cancelCodexDirectorWatch(repository.root, repository.sessionName);
   } catch (error) {
     if (deps.env.BFLOW_DEBUG) { try { deps.stderr.write(`director hook: ${scrub(error instanceof Error ? error.message : String(error))}\n`); } catch {} }
   }

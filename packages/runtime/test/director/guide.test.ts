@@ -7,6 +7,7 @@ import {
   DIRECTOR_GUIDE_MAX_BYTES,
   DIRECTOR_GUIDE_SOURCE,
   DIRECTOR_TOOLS,
+  DIRECTOR_LOCAL_MCP_TOOLS,
   DirectorEndpoint,
   DirectorStore,
   DirectorTools,
@@ -82,8 +83,9 @@ describe("Director guide instruction coverage", () => {
   it("covers the loop: idle wait for Web, message-level updates, absence, errors, issue queue and bounded context", async () => {
     const text = await load();
     expect(text).toContain("director_wait");
-    expect(text).toMatch(/Idle means wait, not stop/);
-    expect(text).toMatch(/Bflow Web at any time/);
+    expect(text).toMatch(/Codex idle means suspend/);
+    expect(text).toContain("director_suspend");
+    expect(text).toMatch(/Bflow Web/);
     expect(text).toMatch(/no token streaming/i);
     expect(text).toMatch(/invalidation events/);
     expect(text).toMatch(/user may be absent/i);
@@ -122,7 +124,7 @@ describe("Director guide instruction coverage", () => {
 
   it("only names tools that exist in the Director tool list", async () => {
     const text = await load();
-    const known = new Set(DIRECTOR_TOOLS.map(tool => tool.name));
+    const known = new Set([...DIRECTOR_TOOLS, ...DIRECTOR_LOCAL_MCP_TOOLS].map(tool => tool.name));
     const identifiers = [...new Set([...text.matchAll(/`([a-z]+(?:_[a-z]+)+)`/g)].map(match => match[1]!))];
     // `user_decision_pending` is a ParkedIssue kind, not a tool.
     expect(identifiers.filter(name => !known.has(name) && name !== "user_decision_pending")).toEqual([]);

@@ -55,6 +55,7 @@ describe("DirectorEndpoint", () => {
     const first = (await endpoint.call(token, "director_wait", { timeoutMs: 1000 })) as unknown as { cursor: string; runtimeEvents: unknown[]; timedOut: boolean };
     expect(first.runtimeEvents).toEqual([]);
     expect(first.timedOut).toBe(true);
+    expect(first.cursor).toMatch(/\.r[A-Za-z0-9_-]+$/);
     setTimeout(() => feed.publish("workforce_changed", ["a", "b", "c", "d", "e", "f"]), 100);
     const second = (await endpoint.call(token, "director_wait", { cursor: first.cursor, timeoutMs: 1500 })) as unknown as { runtimeEvents: { type: string; summary: string }[] };
     expect(second.runtimeEvents).toEqual([{ type: "projection.workforce_changed", summary: "workforce_changed: a, b, c, d, e" }]);

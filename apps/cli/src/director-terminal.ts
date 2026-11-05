@@ -9,12 +9,12 @@ export const DIRECTOR_PROVIDER_HINT_ENV = "BFLOW_DIRECTOR_PROVIDER";
 
 /**
  * Invocation-scoped Director permissions: it must be able to start and contact the local host.
- * Keep Codex off the shared daemon so daemon updates cannot drain this Director's turns.
+ * Codex uses its shared daemon so a background watcher can queue the next turn in this interactive thread.
  * These flags do not change specialist launch policy or Runtime human approval gates.
  */
 export const DIRECTOR_START_ARGS: Readonly<Record<DirectorLaunchProvider, readonly string[]>> = {
   claude: ["--dangerously-skip-permissions", "/bflow-start"],
-  codex: ["--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"],
+  codex: ["--dangerously-bypass-approvals-and-sandbox", "$bflow-start"],
   agy: ["-i", "/bflow-start"]
 };
 

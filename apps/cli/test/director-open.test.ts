@@ -63,7 +63,7 @@ afterAll(async () => { await rm(base, { recursive: true, force: true }); });
 describe("provider start arguments", () => {
   it("uses the exact fixed /bflow-start prompt per provider", () => {
     expect(DIRECTOR_START_ARGS.claude).toEqual(["--dangerously-skip-permissions", "/bflow-start"]);
-    expect(DIRECTOR_START_ARGS.codex).toEqual(["--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"]);
+    expect(DIRECTOR_START_ARGS.codex).toEqual(["--dangerously-bypass-approvals-and-sandbox", "$bflow-start"]);
     expect(DIRECTOR_START_ARGS.agy).toEqual(["-i", "/bflow-start"]);
   });
 });
@@ -132,14 +132,14 @@ describe("buildDirectorLaunchPlan", () => {
   it("builds shell-free argv with the canonical cwd and a correctly quoted manual command (spaces, $, quotes)", async () => {
     const plan = await buildDirectorLaunchPlan(project(), "codex", deps({ findTerminal: async () => ({ available: true, kind: "xterm", executable: "/usr/bin/xterm" }) }));
     expect(plan.cwd).toBe(repo);
-    expect(plan.argv).toEqual([join(bin, "codex"), "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"]);
-    expect(plan.manualCommand).toBe(`cd '${repo.replace(/'/g, "'\\''")}' && BFLOW_DIRECTOR_PROVIDER=codex 'codex' '--no-daemon' '--dangerously-bypass-approvals-and-sandbox' '$bflow-start'`);
-    expect(plan.terminal).toEqual({ kind: "xterm", executable: "/usr/bin/xterm", args: ["-e", join(bin, "env"), "BFLOW_DIRECTOR_PROVIDER=codex", join(bin, "codex"), "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"] });
+    expect(plan.argv).toEqual([join(bin, "codex"), "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"]);
+    expect(plan.manualCommand).toBe(`cd '${repo.replace(/'/g, "'\\''")}' && BFLOW_DIRECTOR_PROVIDER=codex 'codex' '--dangerously-bypass-approvals-and-sandbox' '$bflow-start'`);
+    expect(plan.terminal).toEqual({ kind: "xterm", executable: "/usr/bin/xterm", args: ["-e", join(bin, "env"), "BFLOW_DIRECTOR_PROVIDER=codex", join(bin, "codex"), "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"] });
     expect(plan.env.BFLOW_DIRECTOR_PROVIDER).toBe("codex");
     // The manual command round-trips through a POSIX shell to exactly the planned words.
     const { execFileSync } = await import("node:child_process");
     const echoed = execFileSync("/bin/sh", ["-c", plan.manualCommand.replace(/ && BFLOW_DIRECTOR_PROVIDER=codex 'codex'/, " && printf '%s\\n' \"$PWD\" ")], { env: { PATH: "/usr/bin:/bin" } }).toString();
-    expect(echoed).toBe(`${repo}\n--no-daemon\n--dangerously-bypass-approvals-and-sandbox\n$bflow-start\n`);
+    expect(echoed).toBe(`${repo}\n--dangerously-bypass-approvals-and-sandbox\n$bflow-start\n`);
   });
 
   it("uses only the requested invocation flags without login, install, hook trust or credential changes", async () => {
@@ -148,7 +148,7 @@ describe("buildDirectorLaunchPlan", () => {
       const words = [...plan.argv, ...(plan.terminal?.args ?? []), plan.manualCommand].join(" ");
       expect(words).not.toMatch(/--yolo|login|install|trust|full-auto|secretsecret/);
       expect(plan.argv.slice(1)).toEqual(provider === "codex"
-        ? ["--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"]
+        ? ["--dangerously-bypass-approvals-and-sandbox", "$bflow-start"]
         : ["--dangerously-skip-permissions", "/bflow-start"]);
       expect(Object.keys(plan.env)).not.toContain("BFLOW_DIRECTOR_TOKEN");
     }
@@ -181,7 +181,7 @@ describe("buildDirectorLaunchPlan", () => {
   });
 
   it.each([
-    ["codex", ["--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "$bflow-start"]],
+    ["codex", ["--dangerously-bypass-approvals-and-sandbox", "$bflow-start"]],
     ["claude", ["--dangerously-skip-permissions", "/bflow-start"]]
   ] as const)("the %s manual command delivers the launch flags and literal prompt to the executable", async (provider, expected) => {
     const captureBin = await mkdtemp(join(base, "capture-"));
