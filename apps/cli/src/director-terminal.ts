@@ -91,7 +91,8 @@ export function sanitizeDirectorLaunchEnvironment(
 }
 
 /** POSIX command line: `cd <cwd> && BFLOW_DIRECTOR_PROVIDER=<p> <argv...>`, every word single-quoted. */
-export function directorCommandLine(cwd: string, provider: DirectorLaunchProvider, argv: readonly string[]): string {
+export function directorCommandLine(cwd: string, provider: DirectorLaunchProvider, argv: readonly string[], assignments:Readonly<Record<string,string>>={}): string {
+  if(Object.keys(assignments).length)argv=['env',...Object.entries(assignments).map(([key,value])=>`${key}=${value}`),...argv];
   return `cd ${shellQuoteArgv([cwd])} && ${DIRECTOR_PROVIDER_HINT_ENV}=${provider} ${shellQuoteArgv(argv)}`;
 }
 
@@ -104,6 +105,7 @@ export type DirectorTerminalInvocation =
  * `env` wrapper carries the hint even when a terminal server does not forward the client environment.
  */
 export function directorTerminalInvocation(input: {
+  readonly environmentAssignments?: Readonly<Record<string,string>>;
   readonly selection: Extract<DirectorTerminalSelection, { available: true }>;
   readonly cwd: string;
   readonly provider: DirectorLaunchProvider;
@@ -112,7 +114,7 @@ export function directorTerminalInvocation(input: {
   readonly env: Readonly<Record<string, string | undefined>>;
 }): DirectorTerminalInvocation {
   const { selection, cwd } = input;
-  const inner = [input.envExecutable, `${DIRECTOR_PROVIDER_HINT_ENV}=${input.provider}`, ...input.argv];
+  const inner = [input.envExecutable, `${DIRECTOR_PROVIDER_HINT_ENV}=${input.provider}`, ...Object.entries(input.environmentAssignments??{}).map(([key,value])=>`${key}=${value}`), ...input.argv];
   const done = (args: readonly string[]): DirectorTerminalInvocation => ({ ok: true, kind: selection.kind, executable: selection.executable, args });
   switch (selection.kind) {
     case "gnome-terminal": return done([`--working-directory=${cwd}`, "--", ...inner]);
@@ -126,7 +128,7 @@ export function directorTerminalInvocation(input: {
     case "macos_terminal":
       // The command line is an osascript argv item, never interpolated into AppleScript source.
       return done(["-e", "on run argv", "-e", "tell application \"Terminal\"", "-e", "activate", "-e", "do script (item 1 of argv)",
-        "-e", "end tell", "-e", "end run", directorCommandLine(cwd, input.provider, input.argv)]);
+        "-e", "end tell", "-e", "end run", directorCommandLine(cwd, input.provider, input.argv, input.environmentAssignments)]);
     case "windows_terminal": {
       // Windows Terminal splits its command line on ';' even inside one argument.
       if ([cwd, ...inner].some(part => part.includes(";"))) return { ok: false, reason: "Đường dẫn có ký tự ';' nên không thể mở an toàn qua Windows Terminal." };

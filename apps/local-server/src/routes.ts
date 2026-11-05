@@ -86,7 +86,7 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
           authorize:()=>{ctx.sessions.authenticate(req);},requireProject:()=>ctx.registry.require(id),critical:ctx.serialize,
           queue:(key,fn)=>serializeInteraction(ctx,key,fn),
           launch:(project,request,port)=>ctx.operations.directorLaunch(id,request,project.canonicalPath,()=>{ctx.sessions.authenticate(req);},
-            ()=>port.launch(id,{provider:request.provider,replaceActive:request.replaceActive},authentication))});
+            ()=>port.launch(id,{provider:request.provider,...(request.profileName!==undefined?{profileName:request.profileName}:{}),replaceActive:request.replaceActive},authentication))});
         return;
       }
       await ctx.registry.require(id);

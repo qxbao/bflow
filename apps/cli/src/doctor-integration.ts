@@ -1573,8 +1573,17 @@ export async function runDoctorDiagnostics(
             report.workspaceRoot === repository.root &&
             (report.sessionId === undefined || report.sessionId === repository.sessionName)
           ) {
-            legacyChecks.push(...report.checks);
-            if (!report.healthy) {
+            // A stopped named server makes pane transport snapshots historical, not live readiness failures.
+            // Keep malformed manifests and every failure from a running/unknown server conclusive.
+            const historicalPanes = observedServer === 'stopped';
+            const failedChecks = report.checks.filter(check => check.status === 'failed');
+            const onlyHistoricalFailures = historicalPanes && failedChecks.length > 0 && failedChecks.every(check => check.checkId.startsWith('pane-binding-'));
+            legacyChecks.push(...report.checks.map(check => historicalPanes && check.checkId.startsWith('pane-binding-')
+              ? { ...check, status: 'warn' as const, message: `Phiên Herdr đã dừng; quan sát pane lịch sử: ${check.message}` }
+              : historicalPanes && check.checkId === 'p13-v2-session'
+                ? { ...check, message: 'Còn bản ghi phiên v2 cũ trong kho; Herdr hiện đã dừng. Chạy `bflow down` rồi `bflow up` để đối chiếu và chuyển sang Director.' }
+                : check));
+            if (!report.healthy && !onlyHistoricalFailures) {
               roleManagerPassed = false;
             }
           }

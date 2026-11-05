@@ -1,9 +1,10 @@
 import { afterEach,expect,it,vi } from 'vitest';
-import { mkdtemp,rm,readdir } from 'node:fs/promises';
+import { mkdtemp,rm,readdir,cp,readFile,writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { startWebCommand,type WebCommandHandle } from '../src/web-command.js';
+import { getWebAssetDirectory } from '@bflow/web/assets';
 import { initializeEnvironmentConfig } from '../src/environment-config.js';
 const roots:string[]=[],servers:WebCommandHandle[]=[];
 afterEach(async()=>{await Promise.all(servers.splice(0).map(s=>s.close()));await Promise.all(roots.splice(0).map(p=>rm(p,{recursive:true,force:true})));});
@@ -13,7 +14,7 @@ async function setup(options:object={}){
  const send=(path:string,method='GET',body?:unknown,headers:Record<string,string>={})=>fetch(server.origin+path,{method,headers:{Origin:server.origin,'content-type':'application/json',...headers},...(body===undefined?{}:{body:JSON.stringify(body)})});
  const secret=new URLSearchParams(new URL(output[0]!).hash.slice(1)).get('bootstrap');const response=await send('/api/v1/session/bootstrap','POST',{apiVersion:1,secret});expect(response.status).toBe(200);
  const session=await response.json();const headers={Cookie:response.headers.get('set-cookie')!.split(';')[0]!,'x-bflow-csrf':session.csrfToken};const registered=await send('/api/v1/projects','POST',{apiVersion:1,path:repo},headers);expect(registered.status).toBe(201);const project=await registered.json();
- return {repo,server,send,headers,project,output};
+ return {repo,server,send,headers,project,output,stateDirectory:join(root,'web')};
 }
 it('default binary composition resolves browser registration, reads missing host safely and refuses missing config without init/setup',async()=>{
  const f=await setup();const before=await readdir(f.repo);const session=await f.send(`/api/v1/projects/${f.project.projectId}/session`,'GET',undefined,f.headers);
@@ -34,3 +35,21 @@ it('HTTP timeout is recovered from correlated CLI receipt without repeating life
   await f.server.close();expect(down).not.toHaveBeenCalled();
  }finally{release();}
 },15000);
+
+it('refuses a build replacement while a lifecycle effect is pending and allows it after settlement',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'web-replace-'));roots.push(root);const assets=join(root,'client');await cp(getWebAssetDirectory(),assets,{recursive:true});
+ let release!:()=>void;const pending=new Promise<void>(r=>{release=r;});const up=vi.fn(()=>pending);
+ const f=await setup({assetsDirectory:assets,createLifecycle:()=>({up,down:vi.fn(),doctor:vi.fn()}),
+  readSession:async(project:any)=>({ok:true,value:{apiVersion:1,projectId:project.projectId,state:'ready',pendingIntakes:[],blockers:[],updatedAt:new Date().toISOString()}})});
+ await initializeEnvironmentConfig({cwd:f.repo});
+ const path=`/api/v1/projects/${f.project.projectId}`;
+ try{
+  const response=await f.send(path+'/session/start','POST',{apiVersion:1,operationId:crypto.randomUUID()},f.headers);expect(response.status).toBe(202);
+  await vi.waitFor(()=>expect(up).toHaveBeenCalledOnce());
+  const html=await readFile(join(assets,'index.html'),'utf8');await writeFile(join(assets,'index.html'),html.replace('</head>','<!-- new build --></head>'));
+  const update=()=>startWebCommand({port:Number(new URL(f.server.origin).port),open:false},{stateDirectory:f.stateDirectory,assetsDirectory:assets,io:{stdout:()=>{},stderr:()=>{}}});
+  await expect(update()).rejects.toThrow(/chưa kết thúc/);expect((await fetch(f.server.origin)).status).toBe(200);
+  release();await Promise.allSettled(f.server.pendingLifecycle?.()??[]);
+  const next=await update();servers.push(next);expect(next.reused).toBe(false);expect(next.origin).toBe(f.server.origin);
+ }finally{release();}
+},30000);

@@ -811,3 +811,25 @@ Giới hạn đã biết sau B2:
 - Hàng đợi `parked` (B2b) và trang Web cho hàng đợi lỗi thuộc các lát sau; B3 mới xoá mã Conversation/Coordinator cũ.
 
 Bậc bằng chứng: nguồn + test cục bộ (fake runner). Chưa có live Herdr hay provider cho chế độ Director; chưa chạy live end-to-end.
+
+## Cập nhật Bflow Web đang chạy
+
+Sau khi cập nhật source, chạy `pnpm run build` rồi `bflow web` từ checkout đã cập nhật.
+Lệnh Web so sánh mã build theo nội dung CLI, Local Server, các package và bundle Web:
+
+- Cùng bản build: ghép nối lại server đã xác thực.
+- Khác bản build: chuẩn bị giao diện mới, xác thực và đóng riêng server Web cũ rồi mở bản mới tại cùng origin. Runtime và các run tiếp tục giữ trạng thái của chúng.
+- Còn thao tác khởi tạo/khởi động/dừng chưa kết thúc: từ chối thay server; đợi thao tác ghi biên nhận rồi chạy lại lệnh. Không force-stop Runtime.
+- Server từ bản cũ chưa hỗ trợ thay thế: lệnh báo rõ cần Ctrl-C cửa sổ Web cũ một lần rồi chạy lại `bflow web`; không âm thầm nối vào bản cũ.
+
+Mỗi server giữ một snapshot giao diện riêng để việc build lại trên đĩa không trộn frontend mới với backend cũ. Mã `Bản Web` hiện trong terminal và trang Cài đặt dự án để đối chiếu. Đây là nhận diện bản build, không phải bằng chứng về chất lượng workflow hay trạng thái task.
+
+### Profile ai-isolator cho Director
+
+Trong Web, mở **Khởi động phiên**, chọn nhà cung cấp rồi chọn **Profile ai-isolator**.
+CLI tương đương: `bflow open --provider codex --profile personal`.
+Danh sách chỉ đọc những profile đã có trên máy; tên profile được kiểm tra bằng contract và profile được Runtime resolver xác thực lại trước khi mở terminal. Không tìm thấy profile hoặc backend chưa sẵn sàng thì từ chối; không chuyển ngầm sang native.
+
+Director chạy qua `ai-isolator run <provider> --name <profile> -- ...` để dùng đúng HOME/XDG, đăng nhập và backend của profile. Bflow giữ riêng các selector máy để lệnh khởi động Runtime vẫn đọc đúng setup/Gateway; không đưa thông tin xác thực vào argv hay biên nhận Web. `profileName` tham gia fingerprint của thao tác, nên dùng lại một operation ID cho profile khác bị từ chối.
+
+Adapter này hỗ trợ Codex và Claude Code theo giao diện của ai-isolator 0.4.4 đã kiểm tra trên máy; Agy vẫn dùng lựa chọn native. Kiểm tra thực tế với wrapper 0.4.4, profile dùng thử và CLI giả xác nhận HOME/XDG cùng ngữ cảnh máy; đó không phải bằng chứng chạy Director/provider hay workflow SDLC thật.

@@ -1,9 +1,10 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { realpath as fsRealpath, stat } from "node:fs/promises";
-import { delimiter } from "node:path";
-import { WebDirectorLaunchOptionsSchema, type WebDirectorLaunchOption, type WebDirectorLaunchOptions } from "@bflow/contracts";
+import { delimiter, dirname } from "node:path";
+import { WebDirectorProfileNameSchema, WebDirectorLaunchOptionsSchema, type WebDirectorLaunchOption, type WebDirectorLaunchOptions } from "@bflow/contracts";
 import { createProviderProcessRunner, type ProviderCommandRunner } from "@bflow/agent-providers";
 import { findExecutable as machineFindExecutable } from "@bflow/machine-setup";
+import { createDirectorProfileAccess, DirectorProfileError, type DirectorProfileAccess, type DirectorProfileSelection } from './director-profiles.js';
 import { CLI_EXIT_CODES } from "./types.js";
 import {
   DIRECTOR_LAUNCH_PROVIDERS,
@@ -30,7 +31,7 @@ const LIVE_MEASURED: ReadonlySet<DirectorLaunchProvider> = new Set(["claude"]);
 
 export type DirectorLaunchErrorCode =
   | "director_active" | "launch_in_progress" | "launch_cancelled" | "launch_uncertain"
-  | "provider_unavailable" | "skill_missing" | "repository_invalid" | "command_too_long";
+  | "provider_unavailable" | "profile_unavailable" | "skill_missing" | "repository_invalid" | "command_too_long";
 
 export class DirectorLaunchError extends Error {
   constructor(readonly code: DirectorLaunchErrorCode, message: string, readonly manualCommand?: string) {
@@ -46,6 +47,8 @@ export type DirectorSkillState = "current" | "missing" | "modified" | "unknown";
 export interface DirectorVersionCacheEntry { readonly key: string; readonly at: number }
 
 export interface DirectorLaunchDeps {
+  readonly profileName?: string | undefined;
+  readonly profiles?: DirectorProfileAccess | undefined;
   readonly platform?: NodeJS.Platform | undefined;
   readonly env?: Readonly<Record<string, string | undefined>> | undefined;
   readonly pathEntries?: readonly string[] | undefined;
@@ -64,6 +67,7 @@ export interface DirectorLaunchDeps {
 
 /** Private launch plan; the browser never supplies argv, cwd or environment. */
 export interface DirectorLaunchPlan {
+  readonly profile?: DirectorProfileSelection | undefined;
   readonly provider: DirectorLaunchProvider;
   readonly cwd: string;
   /** Provider argv with an absolute executable, run without a shell. */
@@ -95,7 +99,7 @@ function resolved(deps: DirectorLaunchDeps) {
   const findExe = deps.findExecutable ?? machineFindExecutable;
   const find = (name: string) => findExe(name, pathEntries, platform).catch(() => null);
   return {
-    platform, env, find,
+    platform, env, find, profiles: deps.profiles ?? createDirectorProfileAccess(env,find),
     runner: deps.runner ?? createProviderProcessRunner({ maxOutputBytes: VERSION_MAX_BYTES, defaultTimeoutMs: VERSION_TIMEOUT_MS }),
     findTerminal: deps.findTerminal ?? (() => selectDirectorTerminal({ platform, env, isWsl: deps.isWsl ?? (() => defaultIsWsl(env)), find })),
     checkSkill: deps.checkSkill ?? defaultCheckSkill,
@@ -155,14 +159,16 @@ async function probeVersion(executable: string, cwd: string, provider: DirectorL
 
 async function inspectProvider(root: string, provider: DirectorLaunchProvider, r: ReturnType<typeof resolved>): Promise<WebDirectorLaunchOption> {
   const manualCommand = manualCommandFor(root, provider);
+  const profiles=await r.profiles.list(provider);
+  const profileChoices=profiles.length?{profiles}:{};
   const executable = await r.find(provider);
-  if (!executable) return { provider, state: "unavailable", reason: `Không tìm thấy lệnh \`${provider}\` trên PATH.`, manualCommand };
+  if (!executable) return { provider, ...profileChoices, state: "unavailable", reason: `Không tìm thấy lệnh \`${provider}\` trên PATH.`, manualCommand };
   const [skill, versionProblem] = await Promise.all([r.checkSkill(root, provider), probeVersion(executable, root, provider, r)]);
-  if (skill === "missing") return { provider, state: "unavailable", reason: skillReason(skill)!, manualCommand };
+  if (skill === "missing") return { provider, ...profileChoices, state: "unavailable", reason: skillReason(skill)!, manualCommand };
   const reason = skillReason(skill) ?? versionProblem
     ?? (LIVE_MEASURED.has(provider) ? undefined : `Cách mở phiên Director bằng ${provider} chưa kiểm trực tiếp (chỉ có kiểm thử cục bộ).`);
   // Installed is never "ready": available only says binary, version and skill checks passed.
-  return reason === undefined ? { provider, state: "available", manualCommand } : { provider, state: "unverified", reason, manualCommand };
+  return reason === undefined ? { provider, ...profileChoices, state: "available", manualCommand } : { provider, ...profileChoices, state: "unverified", reason, manualCommand };
 }
 
 /** Bounded discovery: PATH lookup, cached `--version` and the repository skill file. No model or login probe. */
@@ -182,19 +188,26 @@ export async function buildDirectorLaunchPlan(repository: DirectorLaunchReposito
   if (!DIRECTOR_LAUNCH_PROVIDERS.includes(provider)) throw new DirectorLaunchError("provider_unavailable", "Nhà cung cấp không hợp lệ.");
   const r = resolved(deps);
   const cwd = await canonicalRoot(repository, r.realpath);
-  const manualCommand = manualCommandFor(cwd, provider);
+  let manualCommand = manualCommandFor(cwd, provider);
   const executable = await r.find(provider);
   if (!executable) throw new DirectorLaunchError("provider_unavailable", `Không tìm thấy lệnh \`${provider}\` trên PATH.`, manualCommand);
   const skill = await r.checkSkill(cwd, provider);
   if (skill === "missing") throw new DirectorLaunchError("skill_missing", skillReason(skill)!, manualCommand);
-  const argv = [executable, ...DIRECTOR_START_ARGS[provider]];
-  const env = sanitizeDirectorLaunchEnvironment(r.env, provider);
+  let profile:DirectorProfileSelection|undefined;
+  if(deps.profileName!==undefined){
+    try{const selected=await r.profiles.select(provider,deps.profileName);profile={...selected,selectors:{...selected.selectors,PATH:[dirname(executable),r.env.PATH??''].filter(Boolean).join(delimiter)}};}
+    catch(error){throw new DirectorLaunchError("profile_unavailable",error instanceof DirectorProfileError?error.message:"Không kiểm tra được profile đã chọn.");}
+  }
+  const argv = profile?[profile.executable,'run',provider,'--name',profile.name,'--',...DIRECTOR_START_ARGS[provider]]:[executable, ...DIRECTOR_START_ARGS[provider]];
+  const env = {...sanitizeDirectorLaunchEnvironment(r.env, provider),...profile?.selectors};
+  if(profile)manualCommand=directorCommandLine(cwd,provider,['ai-isolator','run',provider,'--name',profile.name,'--',...DIRECTOR_START_ARGS[provider]],{AI_ISOLATOR_HOME:profile.identity.stateRoot});
+  if(manualCommand.length>MANUAL_COMMAND_MAX)throw new DirectorLaunchError("command_too_long","Lệnh mở profile quá dài.");
   const selection = await r.findTerminal();
-  if (!selection.available) return { provider, cwd, argv, manualCommand, env, terminalUnavailableReason: selection.reason };
+  if (!selection.available) return { provider, ...(profile?{profile}:{}), cwd, argv, manualCommand, env, terminalUnavailableReason: selection.reason };
   const envExecutable = (await r.find("env")) ?? "/usr/bin/env";
-  const invocation = directorTerminalInvocation({ selection, cwd, provider, argv, envExecutable, env: r.env });
-  if (!invocation.ok) return { provider, cwd, argv, manualCommand, env, terminalUnavailableReason: invocation.reason };
-  return { provider, cwd, argv, manualCommand, env, terminal: { kind: invocation.kind, executable: invocation.executable, args: invocation.args } };
+  const invocation = directorTerminalInvocation({ selection, cwd, provider, argv, envExecutable, env: r.env, ...(profile?{environmentAssignments:profile.selectors}:{}) });
+  if (!invocation.ok) return { provider, ...(profile?{profile}:{}), cwd, argv, manualCommand, env, terminalUnavailableReason: invocation.reason };
+  return { provider, ...(profile?{profile}:{}), cwd, argv, manualCommand, env, terminal: { kind: invocation.kind, executable: invocation.executable, args: invocation.args } };
 }
 
 /**
@@ -222,6 +235,12 @@ export async function launchDirectorPlan(plan: DirectorLaunchPlan, options: {
   const now = deps.now ?? (() => new Date());
   assertDirectorLaunchAllowed(options.presence, options.replaceActive ?? false);
   if (options.signal?.aborted) throw new DirectorLaunchError("launch_cancelled", "Đã hủy trước khi mở terminal.");
+  if(plan.profile){
+    try{
+      const current=await resolved(deps).profiles.select(plan.provider,plan.profile.name);
+      if(JSON.stringify(current.identity)!==JSON.stringify(plan.profile.identity)||current.executable!==plan.profile.executable)throw new DirectorProfileError('Profile đã đổi sau khi kiểm tra; mở lại lựa chọn trước khi chạy.');
+    }catch(error){throw new DirectorLaunchError('profile_unavailable',error instanceof DirectorProfileError?error.message:'Không kiểm tra lại được profile đã chọn.');}
+  }
   const terminal = plan.terminal;
   if (!terminal) return { mode: "manual_command", manualCommand: plan.manualCommand, launchedAt: now().toISOString(), reason: plan.terminalUnavailableReason };
   if (inFlight.has(plan.cwd)) throw new DirectorLaunchError("launch_in_progress", "Đang mở một phiên Director cho kho này.");
@@ -262,9 +281,9 @@ function spawnTerminal(terminal: NonNullable<DirectorLaunchPlan["terminal"]>, pl
 
 // ---------- bflow open ----------
 
-export interface OpenArgs { readonly provider: DirectorLaunchProvider | undefined; readonly replaceActive: boolean; readonly json: boolean; readonly help: boolean }
+export interface OpenArgs { readonly provider: DirectorLaunchProvider | undefined; readonly profileName?: string | undefined; readonly replaceActive: boolean; readonly json: boolean; readonly help: boolean }
 
-export const OPEN_HELP = `Cách dùng: bflow open [--provider claude|codex|agy] [--replace-active] [--json]
+export const OPEN_HELP = `Cách dùng: bflow open [--provider claude|codex|agy] [--profile NAME] [--replace-active] [--json]
 
 Mở một cửa sổ terminal chạy CLI nhà cung cấp trong kho này với skill /bflow-start (giống nút "Khởi động phiên" trên Web).
 Không mở được terminal (SSH, không có màn hình) thì in lệnh để bạn tự chạy. Phiên chỉ sẵn sàng khi Director đăng ký với host;
@@ -272,23 +291,28 @@ cửa sổ đã mở chưa chứng minh Director đã chạy. Director Codex/Cla
 Codex dùng --no-daemon để tách khỏi daemon chung. Quyền specialist và phê duyệt của Runtime vẫn theo chính sách Bflow.
 Lệnh này không cấp token, không cài đặt, không đăng nhập và không sửa cấu hình provider toàn cục.
   --provider        Chọn CLI; mặc định là CLI sẵn sàng đầu tiên (claude, codex, agy)
+  --profile NAME    Dùng profile ai-isolator đã có (cần --provider; hỗ trợ Codex/Claude)
   --replace-active  Xác nhận mở phiên mới khi Director hiện tại đang hoạt động/chờ (không dừng tiến trình cũ)
   --json            In một đối tượng JSON`;
 
 export function parseOpenArgs(args: readonly string[]): { ok: true; value: OpenArgs } | { ok: false; message: string } {
-  let provider: DirectorLaunchProvider | undefined; let replaceActive = false; let json = false; let help = false;
+  let provider: DirectorLaunchProvider | undefined; let profileName:string|undefined; let replaceActive = false; let json = false; let help = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === "--json" || a === "-j") json = true;
     else if (a === "--help" || a === "-h") help = true;
     else if (a === "--replace-active") replaceActive = true;
+    else if(a==="--profile"){
+      const name=args[++i];if(!name||!WebDirectorProfileNameSchema.safeParse(name).success)return {ok:false,message:"--profile phải là tên profile ai-isolator hợp lệ."};profileName=name;
+    }
     else if (a === "--provider") {
       const v = args[++i];
       if (!DIRECTOR_LAUNCH_PROVIDERS.includes(v as DirectorLaunchProvider)) return { ok: false, message: "--provider phải là claude, codex hoặc agy." };
       provider = v as DirectorLaunchProvider;
     } else return { ok: false, message: `Tham số không hợp lệ cho 'bflow open': ${a}` };
   }
-  return { ok: true, value: { provider, replaceActive, json, help } };
+  if(profileName!==undefined&&provider===undefined)return {ok:false,message:"--profile cần --provider để chọn đúng loại profile."};
+  return { ok: true, value: { provider, ...(profileName?{profileName}:{}), replaceActive, json, help } };
 }
 
 export interface DirectorOpenDeps {
@@ -351,10 +375,11 @@ export async function runOpenCommand(args: OpenArgs, deps: DirectorOpenDeps): Pr
         deps.stderr.write(`Chọn ${pick.provider} dù chưa xác minh được${pick.reason ? `: ${pick.reason.replace(/\.$/, "")}` : ""}. Dùng --provider để chọn rõ.\n`);
       }
     }
-    const plan = await buildDirectorLaunchPlan(project, provider, deps.launch);
+    const launchDeps={...deps.launch,...(args.profileName?{profileName:args.profileName}:{})};
+    const plan = await buildDirectorLaunchPlan(project, provider, launchDeps);
     const presence = await deps.readPresence(repository);
-    const result = await launchDirectorPlan(plan, { presence, replaceActive: args.replaceActive, deps: deps.launch });
-    if (args.json) deps.stdout.write(`${JSON.stringify({ ok: true, provider, ...result })}\n`);
+    const result = await launchDirectorPlan(plan, { presence, replaceActive: args.replaceActive, deps: launchDeps });
+    if (args.json) deps.stdout.write(`${JSON.stringify({ ok: true, provider, ...(plan.profile?{profileName:plan.profile.name}:{}), ...result })}\n`);
     else if (result.mode === "terminal_opened") {
       deps.stdout.write(`Đã mở cửa sổ terminal chạy ${provider} với /bflow-start. Phiên chỉ sẵn sàng khi Director đăng ký; xem \`bflow progress\`.\n`);
     } else {

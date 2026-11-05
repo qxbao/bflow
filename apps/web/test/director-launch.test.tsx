@@ -171,3 +171,23 @@ it('after the wait window an applied launch without a registered Director stops 
   fireEvent.click(await startButton());await screen.findByRole('radiogroup');
   expect(screen.queryByLabelText(/Mở phiên thay thế/)).toBeNull();
 });
+
+it('submits and remembers the selected ai-isolator profile without showing a native command preview',async()=>{
+ const {calls}=launchServer({opts:()=>({...options,providers:options.providers.map(p=>p.provider==='claude'?{...p,profiles:[{name:'personal',state:'available'},{name:'blocked',state:'unavailable',reason:'Backend chưa sẵn sàng'}]}:p)}),
+  launch:()=>({state:'applied',result:{kind:'director_launch',provider:'claude',profileName:'personal',mode:'terminal_opened',manualCommand:'ai-isolator run claude --name personal -- /bflow-start',launchedAt:at}})});
+ render(open());fireEvent.click(await startButton());
+ const profile=await screen.findByRole('combobox',{name:'Profile ai-isolator'});
+ fireEvent.change(profile,{target:{value:'personal'}});
+ expect(screen.queryByText('Lệnh tự chạy cho Claude Code')).toBeNull();
+ fireEvent.click(screen.getByRole('button',{name:'Mở terminal Director'}));
+ await waitFor(()=>expect(calls.launches).toHaveLength(1));
+ expect(calls.launches[0]).toMatchObject({provider:'claude',profileName:'personal'});
+ expect(localStorage.getItem('bflow:web:director-profile:claude')).toBe('personal');
+ expect(await screen.findByText(/Profile Director: personal/)).toBeTruthy();
+});
+it('does not silently fall back to native when a remembered profile is no longer offered',async()=>{
+ localStorage.setItem('bflow:web:director-profile:claude','removed');launchServer();render(open());fireEvent.click(await startButton());
+ await screen.findByRole('combobox',{name:'Profile ai-isolator'});
+ expect(screen.getByRole<HTMLButtonElement>('button',{name:'Mở terminal Director'}).disabled).toBe(true);
+ expect(screen.getByText(/Profile đã chọn không còn sẵn sàng/)).toBeTruthy();
+});

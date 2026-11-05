@@ -203,8 +203,8 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
         return WebProjectInspectionResultSchema.parse({ ok: true, value: {
           apiVersion: 1, projectId, ready: report.healthy,
           checks: report.checks.slice(0, 100).map(check => ({ id: check.checkId,
-            state: check.status === 'passed' ? 'passed' : 'failed',
-            message: check.message })), observedAt: new Date().toISOString(),
+            state: check.status === 'passed' ? 'passed' : check.status === 'warn' ? 'warning' : 'failed',
+            message: [check.message, check.remediation].filter(Boolean).join('\n') })), observedAt: new Date().toISOString(),
         }});
       } catch { return error('validation', remediation); }
     },

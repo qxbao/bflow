@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { Settings } from '../src/features/settings';
@@ -66,4 +66,18 @@ it('pins the loaded configuration revision for an explicitly selected config com
  render(<MemoryRouter><Settings api={api} project={p}/></MemoryRouter>);await screen.findByLabelText('Model (conversation)');
  await userEvent.click(screen.getByLabelText(/Tôi chấp nhận/));await userEvent.click(screen.getByLabelText(/Commit cấu hình đã xem vào Git/));await userEvent.click(screen.getByRole('button',{name:'Khởi tạo / sửa GitNexus'}));
  expect(init).toHaveBeenCalledWith('p',expect.objectContaining({commitConfiguration:true,expectedConfigurationRevision:config.revision,update:false}));
+});
+
+it.each([true,false])('renders warnings separately from blocking failures (ready=%s)',async(ready)=>{
+ const checks=[{id:'deepwiki-degraded',state:'warning',message:'Optional DeepWiki unavailable'},
+  {id:'tool-policy-rtk-repository-installed',state:'warning',message:'RTK visible on PATH, identity unverified'},
+  ...(!ready?[{id:'runtime-active-runs',state:'failed',message:'Stopped host has unfinished runs'}]:[])];
+ installApi({'/api/v1/projects/p/configuration':config,'/api/v1/projects/p/session/inspect':{
+  apiVersion:1,projectId:'p',ready,checks,observedAt:new Date().toISOString()}});
+ render(<MemoryRouter><Settings api={new ApiClient()} project={p}/></MemoryRouter>);
+ await userEvent.click(screen.getByRole('button',{name:'Kiểm tra điều kiện sẵn sàng'}));
+ const summary=await screen.findByText('Xem 2 lưu ý tham khảo (không chặn khởi động)');await userEvent.click(summary);
+ const warningRow=screen.getByText('Optional DeepWiki unavailable').closest('li')!;
+ expect(within(warningRow).getByText('Lưu ý')).toBeTruthy();expect(within(warningRow).queryByText('Thất bại')).toBeNull();
+ if(!ready){const failureRow=screen.getByText('Stopped host has unfinished runs').closest('li')!;expect(within(failureRow).getByText('Thất bại')).toBeTruthy();}
 });

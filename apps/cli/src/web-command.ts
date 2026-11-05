@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual, createHmac } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, realpath, rename, unlink, rm } from 'node:fs/promises';
 import { createServer, request } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
@@ -9,12 +9,13 @@ import { WebSessionBootstrapRequestSchema } from '@bflow/contracts/web';
 import { defaultHostEnvironment, detectPlatform, isolatedPlatformProfile } from '@bflow/machine-setup';
 import type { LocalWebServer, LocalWebServices } from '@bflow/local-server';
 import { readPreviewFile } from './preview-files.js';
+import { webBuildId, snapshotWebAssets } from './web-build.js';
 import { withLifecycleLock } from './lifecycle-lock.js';
 import { createWebWorkspaceServices, type WebWorkspaceOptions, type WebWorkspaceServices } from './web-workspace-services.js';
 import { createWebInteractionServices } from './web-interaction.js';
 import type { CliIo } from './types.js';
 
-export const WEB_HELP = 'Cách dùng: bflow web [--port N] [--no-open]\nWeb localhost (mặc định 127.0.0.1:4317). Ctrl-C chỉ đóng web; phiên dự án tiếp tục chạy. Không tự setup/init/index. Không hỗ trợ --json vì URL ghép nối chỉ dành cho terminal khởi chạy.';
+export const WEB_HELP = 'Cách dùng: bflow web [--port N] [--no-open]\nWeb localhost (mặc định 127.0.0.1:4317). Ctrl-C chỉ đóng web; phiên dự án tiếp tục chạy. Tự thay server Web đã cũ sau khi xác thực và khi không có thao tác đang chờ; không dừng Runtime. Không tự setup/init/index. Không hỗ trợ --json vì URL ghép nối chỉ dành cho terminal khởi chạy.';
 export interface WebArgs { port: number; open: boolean; help?: boolean }
 export function parseWebArgs(args: readonly string[]): WebArgs {
   let port = 4317, openBrowser = true, seenPort = false, seenOpen = false;
@@ -40,11 +41,11 @@ export interface WebCommandOptions extends Partial<WebWorkspaceOptions> {
   isTerminal?: boolean;
   openBrowser?: (url: string) => Promise<void>;
 }
-export interface WebCommandHandle { origin: string; reused: boolean; close(): Promise<void>; pendingLifecycle?(): Promise<void>[] }
+export interface WebCommandHandle { origin: string; reused: boolean; closed?: Promise<void>; close(): Promise<void>; pendingLifecycle?(): Promise<void>[] }
 
 // Private locator is local state, never a browser or host credential. The bootstrap itself is not saved.
 const LocatorSchema = z.object({ origin: z.string().regex(/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/),
-  controlPort: z.number().int().min(1).max(65535), controlSecret: WebSessionBootstrapRequestSchema.shape.secret }).strict();
+  controlPort: z.number().int().min(1).max(65535), controlSecret: WebSessionBootstrapRequestSchema.shape.secret, buildId: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
 async function privateDirectory(directory: string) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const info = await lstat(directory);
@@ -101,6 +102,7 @@ async function controlRequest(port: number, path: string, secret: string): Promi
       res.on('data', (chunk: Buffer) => { body += chunk.toString(); if (body.length > 4096) res.destroy(new Error('Invalid web control response')); });
       res.on('error', reject);
       res.on('end', () => { try {
+        if (res.statusCode === 409) throw new Error('Web đang có thao tác chưa kết thúc; chờ thao tác hoàn tất rồi chạy lại bflow web.');
         if (res.statusCode !== 200) throw new Error('Web instance did not authenticate control request');
         accept(WebSessionBootstrapRequestSchema.parse(JSON.parse(body)).secret);
       } catch (error) { reject(error); } });
@@ -122,6 +124,21 @@ async function bootstrapFromOwner(locator: z.infer<typeof LocatorSchema>): Promi
       !equalSecret(parts[1], mac(locator.controlSecret, 'paired', locator.origin, nonce, parts[0]))) throw new Error('Unverified pairing receipt');
   return parts[0];
 }
+async function retireWebOwner(locator: z.infer<typeof LocatorSchema>,locatorPath:string):Promise<void>{
+  const nonce=randomBytes(32).toString('base64url');
+  const proof=await controlRequest(locator.controlPort,'/verify',nonce);
+  if(!equalSecret(proof,mac(locator.controlSecret,'verify',locator.origin,nonce)))throw Error('Unverified web owner');
+  let receipt:string;
+  try{receipt=await controlRequest(locator.controlPort,'/retire',mac(locator.controlSecret,'retire',locator.origin,nonce));}
+  catch(error){throw Error(`Không thể cập nhật Web tự động. Dừng cửa sổ bflow web cũ bằng Ctrl-C rồi chạy lại bflow web. ${error instanceof Error?error.message:String(error)}`);}
+  if(!equalSecret(receipt,mac(locator.controlSecret,'retired',locator.origin,nonce)))throw Error('Unverified web retirement receipt');
+  const deadline=Date.now()+15000;
+  while(Date.now()<deadline){
+    try{await lstat(locatorPath);}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return;throw error;}
+    await new Promise(resolve=>setTimeout(resolve,25));
+  }
+  throw Error('Web cũ đang chờ lưu kết quả thao tác. Chờ hoàn tất rồi chạy lại bflow web; không tự khởi động trùng.');
+}
 export async function openWebBrowser(url: string): Promise<void> {
   const executable = process.platform === 'darwin' ? 'open' : process.platform === 'linux' ? 'xdg-open' : undefined;
   if (!executable) throw new Error('Unsupported browser opener');
@@ -142,8 +159,24 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
   const ownerDirectory = join(stateDirectory, 'owner');
   await privateDirectory(stateDirectory); await privateDirectory(ownerDirectory);
   const locatorPath = join(stateDirectory, 'instance.json');
+    let assetsDirectory: string;
+    try {
+      assetsDirectory = options.assetsDirectory ?? (await import('@bflow/web/assets')).getWebAssetDirectory();
+      const html = await readPreviewFile(join(assetsDirectory, 'index.html'), 1024 * 1024);
+      const assets = [...html.matchAll(/(?:src|href)=["'](\/assets\/[^"']+)["']/g)].map(match => match[1]!);
+      if (!assets.some(asset => asset.endsWith('.js'))) throw new Error('Missing entry bundle');
+      for (const asset of assets) {
+        const path = resolve(assetsDirectory, '.' + asset);
+        if (!path.startsWith(resolve(assetsDirectory) + '/') || await realpath(path) !== path) throw new Error('Invalid built asset');
+        const info = await lstat(path);
+        if (!info.isFile() || info.size === 0) throw new Error('Missing built asset');
+      }
+    }
+    catch { throw new Error('Thiếu production web assets. Chạy pnpm run build từ source checkout đã cài dependencies, rồi chạy lại bflow web.'); }
+  const buildId=await webBuildId(assetsDirectory);
   let bootstrap: string;
   let handle: WebCommandHandle;
+  let preparedSnapshot:string|undefined;
   ({ handle, bootstrap } = await withLifecycleLock(ownerDirectory, async () => {
     let existing: z.infer<typeof LocatorSchema> | undefined;
     try { existing = await readLocator(locatorPath); }
@@ -174,29 +207,20 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
       }
       if (existing && secret !== undefined) {
         if (args.port !== Number(new URL(existing.origin).port)) throw new Error(`Web đã chạy tại ${existing.origin}; dùng đúng --port để mở lại. Không đổi origin tự động.`);
-        return { bootstrap: secret, handle: { origin: existing.origin, reused: true, async close() {} } };
+        if(existing.buildId===buildId)return { bootstrap: secret, handle: { origin: existing.origin, reused: true, async close() {} } };
+        io.stderr('Phát hiện bản build Web mới; đang thay thế server Web cũ. Các phiên Runtime tiếp tục hoạt động.');
+        preparedSnapshot=await snapshotWebAssets(assetsDirectory,stateDirectory,buildId);
+        try{await retireWebOwner(existing,locatorPath);}catch(error){await rm(preparedSnapshot,{recursive:true,force:true});throw error;}
+        existing=undefined;
       }
     }
-    let assetsDirectory: string;
-    try {
-      assetsDirectory = options.assetsDirectory ?? (await import('@bflow/web/assets')).getWebAssetDirectory();
-      const html = await readPreviewFile(join(assetsDirectory, 'index.html'), 1024 * 1024);
-      const assets = [...html.matchAll(/(?:src|href)=["'](\/assets\/[^"']+)["']/g)].map(match => match[1]!);
-      if (!assets.some(asset => asset.endsWith('.js'))) throw new Error('Missing entry bundle');
-      for (const asset of assets) {
-        const path = resolve(assetsDirectory, '.' + asset);
-        if (!path.startsWith(resolve(assetsDirectory) + '/') || await realpath(path) !== path) throw new Error('Invalid built asset');
-        const info = await lstat(path);
-        if (!info.isFile() || info.size === 0) throw new Error('Missing built asset');
-      }
-    }
-    catch { throw new Error('Thiếu production web assets. Chạy pnpm run build từ source checkout đã cài dependencies, rồi chạy lại bflow web.'); }
+    const assetSnapshot=preparedSnapshot??await snapshotWebAssets(assetsDirectory,stateDirectory,buildId);
     let server: LocalWebServer;
     let workspace: WebWorkspaceServices | undefined;
     try {
       const { createLocalWebServer } = await import('@bflow/local-server');
       server = await createLocalWebServer({ host: '127.0.0.1', port: args.port,
-      stateDirectory: join(stateDirectory, 'server'), assetsDirectory, compose(context){
+      stateDirectory: join(stateDirectory, 'server'), assetsDirectory:assetSnapshot, compose(context){
         const resolveProject=options.resolveProject??context.resolveProject;
         const signed=createWebInteractionServices({principalId:context.principalId,resolveProject});
         workspace=createWebWorkspaceServices({...options,resolveProject,
@@ -208,10 +232,14 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
           director:signed.director};
       }}); }
     catch (error) {
+      await rm(assetSnapshot,{recursive:true,force:true});
       if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') throw new Error(`Port ${args.port} đang bận (EADDRINUSE); dừng instance đúng chủ sở hữu hoặc chọn --port khác.`);
       throw error;
     }
     const controlSecret = randomBytes(32).toString('base64url');
+    let closeOwner:()=>Promise<void>;
+    let didClose!:()=>void;
+    const closed=new Promise<void>(resolve=>{didClose=resolve;});
     const challenges = new Map<string, { nonce: string; expires: number }>();
     const control = createServer({ requestTimeout: 3000, headersTimeout: 3000, maxHeaderSize: 2048 }, (req, res) => {
       let body = ''; req.setTimeout(3000, () => req.destroy());
@@ -219,23 +247,32 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
       req.on('error', () => { res.destroy(); });
       req.on('end', () => { void (async () => {
         try {
-          if (req.method !== 'POST' || !['/pair', '/verify'].includes(req.url ?? '') || req.headers.origin !== undefined) throw new Error();
+          if (req.method !== 'POST' || !['/pair', '/verify', '/retire'].includes(req.url ?? '') || req.headers.origin !== undefined) throw new Error();
           const input = WebSessionBootstrapRequestSchema.parse(JSON.parse(body));
           for (const [key, challenge] of challenges) if (challenge.expires <= Date.now()) challenges.delete(key);
           let responseSecret: string;
+          let retiring=false;
           if (req.url === '/verify') {
             if (!/^[A-Za-z0-9_-]{43}$/.test(input.secret) || challenges.size >= 100) throw new Error();
-            challenges.set(mac(controlSecret, 'pair', server.origin, input.secret), { nonce: input.secret, expires: Date.now() + 5000 });
+            for(const purpose of ['pair','retire'])challenges.set(mac(controlSecret, purpose, server.origin, input.secret), { nonce: input.secret, expires: Date.now() + 5000 });
             responseSecret = mac(controlSecret, 'verify', server.origin, input.secret);
           } else {
             const challenge = challenges.get(input.secret);
             if (!challenge) throw new Error();
             challenges.delete(input.secret);
-            const bootstrap = await server.issueBootstrap();
-            responseSecret = bootstrap + '.' + mac(controlSecret, 'paired', server.origin, challenge.nonce, bootstrap);
+            if(req.url==='/retire'){
+              if(!equalSecret(input.secret,mac(controlSecret,'retire',server.origin,challenge.nonce)))throw Error();
+              if(workspace?.pendingLifecycle().length){res.writeHead(409);res.end();return;}
+              responseSecret=mac(controlSecret,'retired',server.origin,challenge.nonce);retiring=true;
+            }else{
+              if(!equalSecret(input.secret,mac(controlSecret,'pair',server.origin,challenge.nonce)))throw Error();
+              const bootstrap = await server.issueBootstrap();
+              responseSecret = bootstrap + '.' + mac(controlSecret, 'paired', server.origin, challenge.nonce, bootstrap);
+            }
           }
           const response = WebSessionBootstrapRequestSchema.parse({ apiVersion: 1, secret: responseSecret });
           res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(response));
+          if(retiring)void closeOwner().catch(()=>{});
         } catch { res.writeHead(403); res.end(); }
       })(); });
     });
@@ -244,18 +281,20 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
       await new Promise<void>((accept, reject) => { control.once('error', reject); control.listen(0, '127.0.0.1', () => { control.off('error', reject); accept(); }); });
       const controlAddress = control.address();
       if (!controlAddress || typeof controlAddress === 'string') throw new Error('Missing control address');
-      await writeLocator(locatorPath, { origin: server.origin, controlPort: controlAddress.port, controlSecret }); published = true;
+      await writeLocator(locatorPath, { origin: server.origin, controlPort: controlAddress.port, controlSecret, buildId }); published = true;
       const secret = await server.issueBootstrap();
       let closing: Promise<void> | undefined;
-      return { bootstrap: secret, handle: { origin: server.origin, reused: false, pendingLifecycle: () => workspace?.pendingLifecycle() ?? [], close() {
-        return closing ??= (async () => {
-          await new Promise<void>(r => { control.close(() => r()); control.closeAllConnections(); });
-          await server.close();
-          await unlink(locatorPath); // only the published owner removes this locator
-        })();
-      } } };
+      closeOwner=()=>closing??=(async()=>{
+        // Stop HTTP admission synchronously before waiting on existing requests and their durable effects.
+        const stopped=server.close();
+        await new Promise<void>(r=>{control.close(()=>r());control.closeAllConnections();});
+        await stopped;await Promise.allSettled(workspace?.pendingLifecycle()??[]);
+        await unlink(locatorPath);await rm(assetSnapshot,{recursive:true,force:true});didClose();
+      })();
+      return {bootstrap:secret,handle:{origin:server.origin,reused:false,closed,pendingLifecycle:()=>workspace?.pendingLifecycle()??[],close:closeOwner}};
     } catch (error) {
       await new Promise<void>(r => control.close(() => r())); await server.close();
+      await rm(assetSnapshot,{recursive:true,force:true});
       if (published) await unlink(locatorPath); throw error;
     }
   }));
@@ -269,6 +308,7 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
     try { await (options.openBrowser ?? openWebBrowser)(pairingUrl); io.stdout(`Bflow web: ${handle.origin} — Ctrl-C chỉ đóng web.`); }
     catch { io.stderr('Không mở được trình duyệt. Mở URL ghép nối bên dưới trong 60 giây, chỉ trên máy này:'); printPairing(pairingUrl); }
   } else printPairing(pairingUrl);
+  io.stderr(`Bản Web: ${buildId.slice(0,12)}${handle.reused?' (đang chạy)':''}`);
   return handle;
 }
 /** Only a newly-created owner waits for signals; a reuse invocation returns immediately.
@@ -292,7 +332,7 @@ export async function runWebCommand(args: WebArgs, options: WebCommandOptions & 
   try {
     const handle = await startWebCommand(args, options);
     if (handle.reused) return;
-    if (!signalled) await new Promise<void>(accept => { notify = accept; });
+    if (!signalled) await Promise.race([new Promise<void>(accept => { notify = accept; }),...(handle.closed?[handle.closed]:[])]);
     await handle.close();
     const pending = handle.pendingLifecycle?.() ?? [];
     if (pending.length) {

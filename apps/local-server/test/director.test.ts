@@ -283,3 +283,22 @@ it('an uncertain launch does not block unregister; after re-registering, its rep
   expect((await f.send(`/api/v1/projects/${projectId}/operations/${body.operationId}`, 'GET', undefined, headers)).json.state).toBe('reconciliation_required');
   expect(port.launch).toHaveBeenCalledTimes(1);
 });
+
+it('binds a profile to the durable launch intent and refuses reusing its ID for another account',async()=>{
+ const port=director({launch:async(_id,request)=>({ok:true,value:{kind:'director_launch',provider:request.provider,profileName:request.profileName,
+  mode:'manual_command',manualCommand:'ai-isolator run codex --name work -- $bflow-start',launchedAt:now()}})});
+ const {headers,projectId,base}=await setup(port);const body={...launchBody(randomUUID(),'codex',false),profileName:'work'};
+ const first=await f.send(`${base}/launch`,'POST',body,headers);expect(first.status).toBe(202);
+ expect(first.json).toMatchObject({state:'applied',result:{provider:'codex',profileName:'work'}});
+ expect(port.launch.mock.calls[0]![1]).toEqual({provider:'codex',profileName:'work',replaceActive:false});
+ expect((await f.send(`${base}/launch`,'POST',body,headers)).json).toEqual(first.json);
+ expect((await f.send(`${base}/launch`,'POST',{...body,profileName:'personal'},headers)).status).toBe(409);
+ const {profileName:_,...native}=body;expect((await f.send(`${base}/launch`,'POST',native,headers)).status).toBe(409);
+ expect(port.launch).toHaveBeenCalledOnce();
+ expect((await f.send(`${base}/launch`,'POST',{...body,operationId:randomUUID(),profileName:'../secret'},headers)).status).toBe(400);
+});
+it('never settles a launch as applied when the returned profile differs from the requested one',async()=>{
+ const port=director({launch:async()=>({ok:true,value:{kind:'director_launch',provider:'codex',profileName:'other',mode:'terminal_opened',manualCommand:'codex',launchedAt:now()}})});
+ const {headers,base}=await setup(port);expect((await f.send(`${base}/launch`,'POST',{...launchBody(randomUUID(),'codex',false),profileName:'work'},headers)).json)
+  .toMatchObject({state:'reconciliation_required'});
+});

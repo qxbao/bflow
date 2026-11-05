@@ -295,3 +295,12 @@ describe('app: the queue board opens the shared Classic panel, read-only until t
     await waitFor(() => expect(main.querySelector('[data-component="DirectorChat"]')).not.toBeNull());
   });
 });
+
+test('unconfirmed initial topology uses neutral signs and no old permanent-role placeholders',()=>{
+ const m=deriveOffice(degraded({director:director({layout:'unknown',directorLayout:false,presence:'unknown',issues:undefined})}));
+ expect(m).toMatchObject({layout:'unknown'});expect(m.director).toBeUndefined();
+ expect(m.agents.some(a=>a.role==='conversation'||a.role==='coordinator')).toBe(false);
+ expect(zoneTitles(undefined).some(z=>/conversation|coordinator/i.test(z.text))).toBe(false);
+ expect(zoneTitles(true).find(z=>z.id==='conversation')?.text).toBe('Director');
+ expect(zoneTitles(false).find(z=>z.id==='conversation')?.text).toBe('Conversation');
+});

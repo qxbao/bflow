@@ -147,3 +147,16 @@ it('a confirmed stop after a crash settles the original running receipt on its f
  expect(await restarted.stopSession(p.projectId,randomUUID())).toMatchObject({ok:true});
  expect(await restarted.reconcileSessionOperation(running)).toMatchObject({ok:true,value:{state:'failed',operationId:id}});
 });
+
+it.each([true,false])('preserves doctor warnings independently of overall readiness (%s)',async(healthy)=>{
+ const p=await project();
+ const checks=[{checkId:'runtime-shutdown',name:'Shutdown',status:'warn',message:'Checkpoint responsibility'},
+  {checkId:'deepwiki-degraded',name:'DeepWiki',status:'warn',message:'Optional documentation unavailable'},
+  {checkId:'tool-policy-rtk-repository-installed',name:'RTK',status:'warn',message:'PATH identity unverified'},
+  {checkId:'config',name:'Configuration',status:healthy?'passed':'failed',message:'Configuration check'}];
+ const doctor=vi.fn(async()=>({schemaVersion:2,workspaceRoot:p.canonicalPath,healthy,checks,checkedAt:new Date().toISOString()}));
+ const services=createWebWorkspaceServices({resolveProject:async()=>p,createLifecycle:()=>({up:vi.fn(),down:vi.fn(),doctor})});
+ expect(await services.inspectProject(p.projectId)).toMatchObject({ok:true,value:{ready:healthy,checks:[
+  {id:'runtime-shutdown',state:'warning'},{id:'deepwiki-degraded',state:'warning'},
+  {id:'tool-policy-rtk-repository-installed',state:'warning'},{id:'config',state:healthy?'passed':'failed'}]}});
+});

@@ -34,6 +34,7 @@ const nonblank = (max: number) => z.string().min(1).max(max).refine(value => val
 const text = nonblank(16000);
 const token = nonblank(2048);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
+export const WebDirectorProfileNameSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/);
 export const WebCursorSchema = token;
 export const WebEventCursorSchema = z.string().regex(/^[A-Za-z0-9_-]{1,200}:(0|[1-9][0-9]{0,19})$/);
 export const WebRequestKindSchema = z.enum(["feature", "bugfix", "refactor", "spike"]);
@@ -104,8 +105,10 @@ export const WebProjectSchema = z.object({ apiVersion: version, projectId: id, d
 export const WebProjectSessionSchema = z.object({ apiVersion: version, projectId: id, sessionId: id.optional(),
   state: z.enum(["stopped", "starting", "ready", "stopping", "unavailable"]), conversationStatus: ConversationSessionStatusSchema.optional(),
   pendingIntakes: z.array(WebIntakeViewSchema).max(100), blockers: z.array(WebBlockerSchema).max(100), updatedAt: time }).strict();
+// D-WEB-READINESS-01 (project owner approved, 2026-11-05): preserve doctor warnings across CLI -> Web.
+// Existing values remain valid. Deploy contracts, CLI/local-server and Web together; older Web clients must reload.
 export const WebProjectInspectionSchema = z.object({ apiVersion: version, projectId: id, ready: z.boolean(),
-  checks: z.array(z.object({ id, state: z.enum(["passed", "failed", "unsupported"]), message: text }).strict()).max(100), observedAt: time }).strict();
+  checks: z.array(z.object({ id, state: z.enum(["passed", "failed", "warning", "unsupported"]), message: text }).strict()).max(100), observedAt: time }).strict();
 export const WebProjectPreviewSchema = z.object({ apiVersion: version, projectId: id, available: z.boolean(), summary: text,
   blockers: z.array(WebBlockerSchema).max(100), observedAt: time }).strict();
 export const WebPageQuerySchema = z.object({ cursor: token.optional(), limit: z.number().int().min(1).max(100).default(25) }).strict();
@@ -127,7 +130,7 @@ export const WebOperationResultSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("intake"), intakeId: id }).strict(),
   z.object({ kind: z.literal("lifecycle"), session: WebProjectSessionSchema }).strict(),
   z.object({ kind: z.literal("issue"), issueId: id, status: ParkedIssueStatusSchema }).strict(),
-  z.object({ kind: z.literal("director_launch"), provider: AgentProviderIdSchema, mode: z.enum(["terminal_opened", "manual_command"]),
+  z.object({ kind: z.literal("director_launch"), provider: AgentProviderIdSchema, profileName: WebDirectorProfileNameSchema.optional(), mode: z.enum(["terminal_opened", "manual_command"]),
     manualCommand: nonblank(4096), launchedAt: time }).strict()
 ]);
 export const WebOperationKindSchema = z.enum([...WebCommandKindSchema.options, ...WebIssueCommandKindSchema.options,
@@ -332,16 +335,20 @@ export const WebDirectorViewSchema = z.object({ apiVersion: version, projectId: 
 export const WebDirectorTranscriptPageSchema = WebPageSchema(DirectorMessageSchema);
 export const WebIssueQueueViewSchema = WebPageSchema(ParkedIssueSchema);
 /** Installed is not ready: `available` requires the server's own readiness checks. */
+// D-WEB-DIRECTOR-PROFILE-01 (owner approved, 2026-11-05): optional profile selection; old payloads remain valid.
+// Deploy contracts, CLI, Local Server and Web together; credentials and profile environments stay owner-side.
+export const WebDirectorProfileOptionSchema = z.object({ name: WebDirectorProfileNameSchema,
+  state: z.enum(["available", "unavailable"]), reason: nonblank(2000).optional() }).strict();
 export const WebDirectorLaunchOptionSchema = z.object({ provider: AgentProviderIdSchema,
-  state: z.enum(["available", "unavailable", "unverified"]), reason: nonblank(2000).optional(), manualCommand: nonblank(4096) }).strict();
+  state: z.enum(["available", "unavailable", "unverified"]), reason: nonblank(2000).optional(), manualCommand: nonblank(4096), profiles: z.array(WebDirectorProfileOptionSchema).max(100).optional() }).strict();
 export const WebDirectorLaunchOptionsSchema = z.object({ apiVersion: version, projectId: id,
   terminal: z.object({ available: z.boolean(), reason: nonblank(2000).optional() }).strict(),
   providers: z.array(WebDirectorLaunchOptionSchema).max(3)
     .refine(items => new Set(items.map(item => item.provider)).size === items.length, "providers must be unique"),
   observedAt: time }).strict();
-/** The server derives argv/cwd/env; the browser only selects a provider. */
+/** The server derives argv/cwd/env; the browser selects a provider and an optional existing profile name. */
 export const WebDirectorLaunchRequestSchema = z.object({ apiVersion: version, operationId: uuid, provider: AgentProviderIdSchema,
-  replaceActive: z.boolean().default(false) }).strict();
+  profileName: WebDirectorProfileNameSchema.optional(), replaceActive: z.boolean().default(false) }).strict();
 export type WebDirectorView = z.infer<typeof WebDirectorViewSchema>;
 export type WebDirectorTranscriptPage = z.infer<typeof WebDirectorTranscriptPageSchema>;
 export type WebIssueQueueView = z.infer<typeof WebIssueQueueViewSchema>;

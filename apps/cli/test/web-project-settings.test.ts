@@ -138,3 +138,20 @@ it('pins local Git ignore rules together with the configuration revision',async(
  expect(initial.value.gitIgnore).toContain('state/');await writeFile(join(f.root,'.bflow/.gitignore'),'# changed after review\n');
  expect(await f.service.saveConfiguration(f.p.projectId,{apiVersion:1,expectedRevision:initial.value.revision,yaml:initial.value.yaml})).toMatchObject({ok:false,error:{code:'conflict'}});
 });
+
+it.each([false,true])('installs repository Director skills during Web init (skipGitNexus=%s)',async(skipGitNexus)=>{
+ const f=await fixture(false),operationId=randomUUID();
+ await f.service.initializeProject(f.p.projectId,{apiVersion:1,operationId,acceptGitNexusLicense:!skipGitNexus,skipGitNexus,update:false});
+ await Promise.all(f.service.pending());
+ expect(await f.service.readInitialization(f.p.projectId,operationId)).toMatchObject({ok:true,value:{state:'succeeded'}});
+ for(const base of ['.claude/skills','.agents/skills'])for(const skill of ['bflow-start','bflow-status','bflow-queue'])
+  expect(await readFile(join(f.root,base,skill,'SKILL.md'),'utf8')).toContain(skill);
+ expect(JSON.parse(await readFile(join(f.root,'.bflow/director-files.json'),'utf8'))).toBeTruthy();
+});
+it('reports a Director install failure instead of claiming Web init succeeded',async()=>{
+ const f=await fixture(false),operationId=randomUUID();
+ await writeFile(join(f.root,'.git/info/exclude'),'# >>> bflow director >>>\nmalformed\n');
+ await f.service.initializeProject(f.p.projectId,{apiVersion:1,operationId,acceptGitNexusLicense:false,skipGitNexus:true,update:false});
+ await Promise.all(f.service.pending());
+ expect(await f.service.readInitialization(f.p.projectId,operationId)).toMatchObject({ok:true,value:{state:'failed',message:expect.stringContaining('Không thể cài tệp Director')}});
+});

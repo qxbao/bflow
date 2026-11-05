@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { createOfficeRenderer } from '../src/features/office/scene/renderer';
 import type { OfficeModel } from '../src/features/office/model/types';
-const f = vi.hoisted(() => ({ gl: undefined as any, release: vi.fn(), warm: undefined as Promise<void> | undefined, resize: undefined as (() => void) | undefined }));
+const f = vi.hoisted(() => ({ gl: undefined as any, release: vi.fn(), setZoneTitles: vi.fn(), warm: undefined as Promise<void> | undefined, resize: undefined as (() => void) | undefined }));
 vi.mock('three', async () => {
   const real = await vi.importActual<typeof import('three')>('three');
   return { ...real, WebGLRenderer: class {
@@ -18,11 +18,11 @@ vi.mock('../src/features/office/scene/stage', async importOriginal => {
   const { Group } = await import('three');
   const real = await importOriginal<typeof import('../src/features/office/scene/stage')>();
   return { ...real, BACKGROUND: '#000000', setShadowCasting: vi.fn(), Stage: class {
-    group = new Group(); objects = []; lights = { key: {}, hemi: {}, accents: [] }; layout = vi.fn(); dispose = vi.fn();
+    setZoneTitles = f.setZoneTitles; group = new Group(); objects = []; lights = { key: {}, hemi: {}, accents: [] }; layout = vi.fn(); dispose = vi.fn();
   } };
 });
 beforeEach(() => {
-  vi.useFakeTimers(); f.release.mockClear(); f.warm = undefined;
+  vi.useFakeTimers(); f.release.mockClear(); f.setZoneTitles.mockClear(); f.warm = undefined;
   vi.stubGlobal('ResizeObserver', class { constructor(callback: () => void) { f.resize = callback; } observe() {} disconnect() {} });
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
@@ -33,6 +33,7 @@ const model: OfficeModel = { tier: 'full', certainty: 'confirmed', statusText: '
 test('does not render or announce ready until warm and the initial model have arrived, including resize', async () => {
   let resolve!: () => void; f.warm = new Promise(r => { resolve = r; });
   const el = host(), pending = createOfficeRenderer(el, vi.fn()); await settleBuild();
+  expect(f.setZoneTitles).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({id:'conversation',text:'Điều hành'}),expect.objectContaining({id:'coordination',text:'Chuyên môn'})]));
   f.resize?.(); await vi.advanceTimersByTimeAsync(50);
   expect(f.gl.render).not.toHaveBeenCalled(); expect(el.dataset.officeRenderer).toBeUndefined();
   resolve(); const renderer = await pending;

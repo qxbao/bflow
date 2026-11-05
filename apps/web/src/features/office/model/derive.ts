@@ -78,13 +78,14 @@ export function deriveOffice(input: OfficeInput): OfficeModel {
   const tasks = runs.flatMap(r => r.tasks.map(t => ({ ...t, runId: r.runId })));
   const pending = decisions.filter(d => d.status === 'pending');
   const desk = deriveDirector(input.director);
-  const common = { tasks, pendingDecisions: pending.length, connection, ...(desk ?? {}) };
+  const layout = desk ? 'director' as const : input.director && input.director.layout !== 'legacy_v2' && input.director.layout !== 'unsupported' ? 'unknown' as const : 'legacy_v2' as const;
+  const common = { layout, tasks, pendingDecisions: pending.length, connection, ...(desk ?? {}) };
 
   if (session.state !== 'ready') {
     return { ...common, tier: 'closed', certainty: 'confirmed', statusText: 'Phiên đang dừng', agents: [], handoffs: [] };
   }
   if (!workforce) {
-    const agents: OfficeAgent[] = (desk ? DIRECTOR_PLACEHOLDER_ROLES : PLACEHOLDER_ROLES).map(role => ({ instanceId: `placeholder-${role}`, label: roleLabel(role), role, ...v('ghost', 'unknown', UNKNOWN) }));
+    const agents: OfficeAgent[] = (layout !== 'legacy_v2' ? DIRECTOR_PLACEHOLDER_ROLES : PLACEHOLDER_ROLES).map(role => ({ instanceId: `placeholder-${role}`, label: roleLabel(role), role, ...v('ghost', 'unknown', UNKNOWN) }));
     return { ...common, tier: 'degraded', certainty: 'unknown', statusText: UNKNOWN, agents, handoffs: [] };
   }
 

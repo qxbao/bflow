@@ -88,6 +88,8 @@ export interface OfficeHandoff {
 }
 
 export interface OfficeModel {
+  /** Display topology only; unknown does not establish a live Director or legacy session. */
+  layout?: 'director' | 'legacy_v2' | 'unknown';
   tier: OfficeTier;
   /** Office-level certainty and label; meaningful for the closed tier ("Phiên đang dừng"). */
   certainty: Certainty;

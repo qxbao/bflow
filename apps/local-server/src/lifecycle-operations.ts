@@ -30,11 +30,11 @@ export class Operations {
    * project) is persisted before the launch effect. The launch plan (argv/env) never reaches this ledger. A replay with the same
    * fingerprint only observes; a conflicting fingerprint is refused; an intent left in flight or uncertain is never relaunched.
    */
-  directorLaunch(projectId:string,request:{operationId:string;provider:DirectorLaunchOutcome['provider'];replaceActive:boolean},canonicalPath:string,
+  directorLaunch(projectId:string,request:{operationId:string;provider:DirectorLaunchOutcome['provider'];profileName?:string;replaceActive:boolean},canonicalPath:string,
     authorize:()=>void,launch:()=>Promise<OperationResult<DirectorLaunchOutcome>>):Promise<WebOperation>{
     return this.serial(projectId,request.operationId,async()=>{
       authorize();
-      const id=request.operationId,fingerprint=directorLaunchFingerprint({projectId,provider:request.provider,replaceActive:request.replaceActive,canonicalPath});
+      const id=request.operationId,fingerprint=directorLaunchFingerprint({projectId,provider:request.provider,...(request.profileName!==undefined?{profileName:request.profileName}:{}),replaceActive:request.replaceActive,canonicalPath});
       const old=await this.index.read(projectId,id);
       if(old){if(old.index.fingerprint!==fingerprint || old.index.operationKind!=='director_launch' || old.index.owner!=='local_lifecycle')throw new HttpError('operation_conflict');return this.observe(old);}
       const record=await this.reserve(projectId,id,'director_launch',fingerprint,authorize);
@@ -42,7 +42,7 @@ export class Operations {
       try{result=DirectorLaunchOutcomeResultSchema.parse(await observeWithinDeadline(launch,30000));}
       catch{return this.launchUncertain(record,LAUNCH_UNCERTAIN_MESSAGE);}
       if(result.ok){
-        if(result.value.provider!==request.provider)return this.launchUncertain(record,LAUNCH_UNCERTAIN_MESSAGE);
+        if(result.value.provider!==request.provider||result.value.profileName!==request.profileName)return this.launchUncertain(record,LAUNCH_UNCERTAIN_MESSAGE);
         return this.update(record,{...record.operation,state:'applied',result:result.value,updatedAt:now()});
       }
       const reason=(result.error.details as {reason?:unknown}|undefined)?.reason;

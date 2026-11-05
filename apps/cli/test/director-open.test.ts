@@ -392,3 +392,38 @@ describe("bflow open", () => {
     expect(JSON.parse(out.join(""))).toMatchObject({ ok: false, code: "provider_unavailable" });
   });
 });
+
+describe('explicit ai-isolator Director selection',()=>{
+ it('launches the requested existing profile through ai-isolator instead of the native provider',async()=>{
+  const state=join(base,'isolator'),profile=join(state,'profiles','codex--work');
+  for(const name of ['home','config','cache','data','state','tmp'])await mkdir(join(profile,name),{recursive:true,mode:0o700});
+  await chmod(profile,0o700);await writeFile(join(profile,'profile.env'),'AI_ISOLATOR_TOOL=codex\nAI_ISOLATOR_PROFILE=work\n',{mode:0o600});
+  const helper=await exe('ai-isolator');
+  const selected=deps({env:{PATH:bin,DISPLAY:':0',HOME:base,AI_ISOLATOR_HOME:state},...{profileName:'work'}} as Partial<DirectorLaunchDeps>);
+  const plan=await buildDirectorLaunchPlan(project(),'codex',selected);
+  expect(plan.argv).toEqual([helper,'run','codex','--name','work','--',...DIRECTOR_START_ARGS.codex]);
+  expect(plan.manualCommand).toContain("'--name' 'work'");
+  expect(plan.terminal?.args).toContain('AI_ISOLATOR_HOME='+state);
+  expect(plan.env.AI_ISOLATOR_HOME).toBe(state);
+ });
+ it('refuses a missing selected profile without silently launching native',async()=>{
+  const selected=deps({env:{PATH:bin,DISPLAY:':0',HOME:base,AI_ISOLATOR_HOME:join(base,'isolator')},...{profileName:'missing'}} as Partial<DirectorLaunchDeps>);
+  await expect(buildDirectorLaunchPlan(project(),'codex',selected)).rejects.toMatchObject({code:'profile_unavailable'});
+ });
+});
+
+it('revalidates a profile immediately before terminal dispatch and refuses drift',async()=>{
+ const state=join(base,'isolator-drift'),profile=join(state,'profiles','codex--work');
+ for(const name of ['home','config','cache','data','state','tmp'])await mkdir(join(profile,name),{recursive:true,mode:0o700});
+ await chmod(profile,0o700);const metadata=join(profile,'profile.env');await writeFile(metadata,'AI_ISOLATOR_TOOL=codex\nAI_ISOLATOR_PROFILE=work\n',{mode:0o600});
+ const selected=deps({env:{PATH:bin,DISPLAY:':0',HOME:base,AI_ISOLATOR_HOME:state},profileName:'work'});
+ const plan=await buildDirectorLaunchPlan(project(),'codex',selected);const spawn=vi.fn();
+ await writeFile(metadata,'AI_ISOLATOR_TOOL=claude\nAI_ISOLATOR_PROFILE=work\n');
+ await expect(launchDirectorPlan(plan,{presence:'absent',deps:{...selected,spawn:spawn as never}})).rejects.toMatchObject({code:'profile_unavailable'});
+ expect(spawn).not.toHaveBeenCalled();
+});
+it('parses an explicit profile only with a provider and refuses path injection',()=>{
+ expect(parseOpenArgs(['--provider','codex','--profile','personal'])).toMatchObject({ok:true,value:{provider:'codex',profileName:'personal'}});
+ expect(parseOpenArgs(['--profile','personal'])).toMatchObject({ok:false});
+ expect(parseOpenArgs(['--provider','codex','--profile','../personal'])).toMatchObject({ok:false});
+});

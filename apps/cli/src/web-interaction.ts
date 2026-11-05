@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { z } from 'zod';
 import { IdentifierSchema, SessionManifestSchema, type OperationResult } from '@bflow/contracts';
 import { WebChatMessageResultSchema, WebChatPageResultSchema, WebChatSendSchema, WebCommandSchema, WebNoticeDisplayedResultSchema,
-  WebOperationResponseSchema, WebProjectSchema, WebProjectSessionResultSchema, WebDirectorViewSchema,
+  WebDirectorLaunchRequestSchema, WebOperationResponseSchema, WebProjectSchema, WebProjectSessionResultSchema, WebDirectorViewSchema,
   type UserInteractionClient, type WebOperation, type WebProject } from '@bflow/contracts/web';
 import { canonicalWebJson, webCommandFingerprint, WebPrincipalSchema, WebAuthenticatedContextSchema,
   WebOperationIndexRecordSchema, WebIssuerRegistrationSchema, WebIssuerCredentialSchema,
@@ -207,15 +207,14 @@ export function createWebInteractionServices(context: InteractionComposition, de
     if(await readPresence(project,hostSessionId)!=='host_stopped')return directorUnavailable();
     const repository=await identifyRepository(project.canonicalPath);
     await readEnvironmentConfig(repository);
-    let legacy=false;
     try{
       const manifest=SessionManifestSchema.parse(JSON.parse(await readPreviewFile(join(project.canonicalPath,'.bflow/state/session.json'),4*1024*1024)));
       if(manifest.sessionId!==hostSessionId || manifest.workspaceRoot!==project.canonicalPath)return directorUnavailable();
-      legacy=manifest.schemaVersion===2 && manifest.status!=='down';
     }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
     const at=new Date().toISOString();
     return {ok:true as const,value:WebDirectorViewSchema.parse({apiVersion:1,projectId:project.projectId,
-      layout:legacy?'legacy_v2':'not_started',snapshot:{schemaVersion:1,generatedAt:at,director:{presence:'absent'},
+      // The stopped host cannot have a live v2 topology, even if its last manifest still says up.
+      layout:'not_started',snapshot:{schemaVersion:1,generatedAt:at,director:{presence:'absent'},
         runs:[],pendingApprovals:0,pendingQuestions:0,issues:[]},transcriptSeq:0,cliCaptureMayBeIncomplete:true,observedAt:at})};
   };
   const director:LocalWebDirectorServices={
@@ -271,6 +270,9 @@ export function createWebInteractionServices(context: InteractionComposition, de
       try{
         const scope=await directorScope(projectId,input);
         canonicalPath=await realpath(scope.project.canonicalPath);deps=await launchDeps();
+        const selection=WebDirectorLaunchRequestSchema.omit({apiVersion:true,operationId:true}).parse(request);
+        request={provider:selection.provider,replaceActive:selection.replaceActive,...(selection.profileName===undefined?{}:{profileName:selection.profileName})};
+        deps={...deps,profileName:selection.profileName};
         plan=await (directorDeps.build??buildDirectorLaunchPlan)({projectId,canonicalPath},request.provider,deps);
         // Bounded so a slow presence read cannot push the spawn past the operation deadline (into the "uncertain" window).
         let timer:ReturnType<typeof setTimeout>|undefined;
@@ -280,7 +282,7 @@ export function createWebInteractionServices(context: InteractionComposition, de
       }catch(error){return refused(error instanceof DirectorLaunchError?error.code:'not_started');}
       try{
         const result=await (directorDeps.launch??launchDirectorPlan)(plan,{presence,replaceActive:request.replaceActive,deps});
-        return {ok:true,value:{kind:'director_launch',provider:request.provider,mode:result.mode,
+        return {ok:true,value:{kind:'director_launch',provider:request.provider,...(request.profileName!==undefined?{profileName:request.profileName}:{}),mode:result.mode,
           manualCommand:redactDirectorWebText(result.manualCommand,sensitive(),canonicalPath),launchedAt:result.launchedAt}};
       }catch(error){
         if(error instanceof DirectorLaunchError && error.code!=='launch_uncertain')return refused(error.code);

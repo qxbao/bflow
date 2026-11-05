@@ -123,7 +123,7 @@ describe('Web UX stabilization & functional regression guards', () => {
     expect((screen.getByLabelText('Model (developer)') as HTMLInputElement).value).toBe('');
   });
 
-  it('shows advisory notes collapsed when inspection.ready is true and expanded warnings when ready is false', async () => {
+  it('keeps warnings advisory and expands blocking failures independently of readiness', async () => {
     let ready = true;
     vi.stubGlobal(
       'fetch',
@@ -150,7 +150,8 @@ describe('Web UX stabilization & functional regression guards', () => {
             projectId: 'p',
             ready,
             checks: [
-              { id: 'p13-manifest', state: 'failed', message: 'No topology manifest yet. Run bflow up.' },
+              { id: 'p13-manifest', state: 'warning', message: 'No topology manifest yet. Run bflow up.' },
+              ...(!ready ? [{id:'provider-auth',state:'failed',message:'Required provider authentication failed'}] : []),
               { id: 'git-repo', state: 'passed', message: 'Git repository clean' },
             ],
             observedAt: now,
@@ -173,6 +174,8 @@ describe('Web UX stabilization & functional regression guards', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Kiểm tra điều kiện sẵn sàng' }));
     expect(await screen.findByText(/Một số điều kiện cần xử lý trước khi khởi động phiên/)).toBeTruthy();
     expect(screen.getByText('Phiên làm việc chưa khởi động')).toBeTruthy();
+    expect(screen.getByText(/Xem 1 lưu ý tham khảo/).closest('details')?.open).toBe(false);
+    expect(screen.getByText('Required provider authentication failed').closest('details')).toBeNull();
   });
 
   it('suppresses benign disabledReason notices while displaying actionable ones and plain-Vietnamese phase summaries', async () => {

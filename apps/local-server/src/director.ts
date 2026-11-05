@@ -19,7 +19,7 @@ export interface LocalWebDirectorServices {
   send(input: WebChatSend, context: WebAuthenticatedContext): Promise<OperationResult<DirectorMessage>>;
   issues(projectId: string, cursor: string | undefined, context: WebAuthenticatedContext): Promise<OperationResult<WebIssueQueueView>>;
   launchOptions(projectId: string, context: WebAuthenticatedContext): Promise<OperationResult<WebDirectorLaunchOptions>>;
-  launch(projectId: string, request: { provider: DirectorLaunchOutcome['provider']; replaceActive: boolean }, context: WebAuthenticatedContext): Promise<OperationResult<DirectorLaunchOutcome>>;
+  launch(projectId: string, request: { provider: DirectorLaunchOutcome['provider']; profileName?:string; replaceActive: boolean }, context: WebAuthenticatedContext): Promise<OperationResult<DirectorLaunchOutcome>>;
 }
 export const DIRECTOR_PORT_METHODS = ['readView', 'messages', 'send', 'issues', 'launchOptions', 'launch'] as const;
 
@@ -32,7 +32,7 @@ const LaunchOutcomeSchema = WebOperationResultSchema.refine((outcome): outcome i
 export const DirectorLaunchOutcomeResultSchema = OperationResultSchema(LaunchOutcomeSchema);
 
 /** Fingerprint of a launch intent: provider, replaceActive and the canonical project. Never the plan or environment. */
-export function directorLaunchFingerprint(input: { projectId: string; provider: string; replaceActive: boolean; canonicalPath: string }): string {
+export function directorLaunchFingerprint(input: { projectId: string; provider: string; profileName?:string; replaceActive: boolean; canonicalPath: string }): string {
   return createHash('sha256').update(canonicalWebJson({ kind: 'director_launch', ...input })).digest('hex');
 }
 
@@ -52,6 +52,7 @@ export const LAUNCH_INTERRUPTED_MESSAGE = 'Thao tác mở Director bị gián đ
 const LAUNCH_REFUSALS: Record<string, string> = {
   director_active: 'Director có thể đang chạy (đang hoạt động, đang chờ hoặc không đọc được trạng thái). Xác nhận mở phiên thay thế để mở thêm; phiên cũ không bị dừng.',
   provider_unavailable: 'Không tìm thấy CLI của nhà cung cấp đã chọn trên PATH. Cài đặt hoặc chọn nhà cung cấp khác rồi thử lại.',
+  profile_unavailable: 'Profile ai-isolator đã chọn không còn sẵn sàng. Kiểm tra ai-isolator status rồi chọn lại profile; chưa có cửa sổ nào được mở.',
   skill_missing: 'Kho mã chưa có skill /bflow-start. Chạy `bflow init --update` trong kho mã rồi thử lại.',
   repository_invalid: 'Không đọc được thư mục kho mã hoặc đường dẫn không còn là đường dẫn chuẩn. Kiểm tra kho rồi đăng ký lại dự án.',
   launch_in_progress: 'Đang mở một phiên Director khác cho kho này. Đợi thao tác đó xong rồi thử lại.',
@@ -90,7 +91,7 @@ export interface DirectorRouteContext {
   /** Global critical section and per-key interaction queue of the route module. */
   critical<T>(fn: () => Promise<T>): Promise<T>;
   queue<T>(key: string, fn: () => Promise<T>): Promise<T>;
-  launch(project: WebProject, request: { operationId: string; provider: DirectorLaunchOutcome['provider']; replaceActive: boolean }, port: LocalWebDirectorServices): Promise<unknown>;
+  launch(project: WebProject, request: { operationId: string; provider: DirectorLaunchOutcome['provider']; profileName?:string; replaceActive: boolean }, port: LocalWebDirectorServices): Promise<unknown>;
   respond(value: unknown, status?: number): void;
 }
 
@@ -137,7 +138,7 @@ export async function directorRoute(ctx: DirectorRouteContext): Promise<void> {
   if (name === 'launchDirector') {
     res.setTimeout(45000);
     const body = WebHttpContracts.launchDirector.body.parse(ctx.input);
-    ctx.respond(await ctx.launch(project, { operationId: body.operationId, provider: body.provider, replaceActive: body.replaceActive }, port), 202); return;
+    ctx.respond(await ctx.launch(project, { operationId: body.operationId, provider: body.provider, ...(body.profileName!==undefined?{profileName:body.profileName}:{}), replaceActive: body.replaceActive }, port), 202); return;
   }
   throw new HttpError('operation_not_allowed');
 }
