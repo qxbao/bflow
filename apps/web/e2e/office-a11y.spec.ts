@@ -18,6 +18,38 @@ async function open(page: Page, developers = 3): Promise<void> {
 }
 const stageShot = async (page: Page): Promise<string> => (await page.getByLabel('Cảnh văn phòng').locator('canvas').screenshot()).toString('base64');
 const immersiveEnabled = process.env.VITE_BFLOW_IMMERSIVE_OFFICE === 'true';
+
+test('default-off 3D overview panel has an opaque surface and readable text contrast', async ({ page }) => {
+  test.skip(immersiveEnabled, 'Regression is for the default-off 3D panel style');
+  await open(page);
+  await rail(page, /^Tổng quan/).click();
+  await expect(page.locator('#main h1')).toBeVisible();
+  await expect(page.locator('#main p.text-muted').first()).toBeVisible();
+  const colors = await page.locator('#main').evaluate(element => {
+    const panel = getComputedStyle(element);
+    const heading = element.querySelector('h1');
+    const muted = element.querySelector('p.text-muted');
+    const rgb = (value: string): [number, number, number, number] => {
+      const parts = value.match(/[\d.]+/g)?.map(Number) ?? [];
+      return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0, parts[3] ?? 1];
+    };
+    const luminance = ([r, g, b]: number[]) => {
+      const linear = (v: number) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+      return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+    };
+    const ratio = (foreground: string, background: string) => {
+      const fg = luminance(rgb(foreground)), bg = luminance(rgb(background));
+      return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
+    };
+    const background = rgb(panel.backgroundColor);
+    return { background: panel.backgroundColor, alpha: background[3], ink: getComputedStyle(heading!).color, muted: getComputedStyle(muted!).color,
+      inkRatio: ratio(getComputedStyle(heading!).color, panel.backgroundColor), mutedRatio: ratio(getComputedStyle(muted!).color, panel.backgroundColor) };
+  });
+  expect(colors.alpha).toBe(1);
+  expect(colors.inkRatio).toBeGreaterThanOrEqual(4.5);
+  expect(colors.mutedRatio).toBeGreaterThanOrEqual(4.5);
+});
+
 /** What is focused, as a stable description. */
 const focused = (page: Page) => page.evaluate(() => {
   const el = document.activeElement as HTMLElement | null;
