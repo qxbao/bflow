@@ -2,7 +2,7 @@
 // V8.6 repeatable measurement of the 3D office in real Chrome. Not part of any default test run.
 //
 //   pnpm --filter @bflow/web build
-//   node apps/web/scripts/measure-office.mjs [--gl=auto|hardware|swiftshader] [--agents=30] [--toggles=20] [--out=file.json]
+//   node apps/web/scripts/measure-office.mjs [--gl=auto|hardware|swiftshader] [--agents=30] [--toggles=20] [--assets=/abs/web/dist/client] [--cli=/abs/cli] [--out=file.json]
 //
 // It reports numbers only; it asserts nothing and loosens nothing. The budget comparison is printed beside each number.
 // `--gl=auto` tries hardware GL first (headed when a display exists) and falls back to SwiftShader; the report says which one ran.
@@ -18,12 +18,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const web = resolve(here, '..');
 const arg = (name, fallback) => process.argv.find(a => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 const GL = arg('gl', 'auto'), AGENTS = Number(arg('agents', '30')), TOGGLES = Number(arg('toggles', '20')), OUT = arg('out', '');
+const ASSETS = resolve(arg('assets', join(web, 'dist/client'))), CLI = resolve(arg('cli', resolve(web, '../cli')));
 const BROWSER = process.env.BFLOW_WEB_TEST_BROWSER;
 const BUDGET = { chunkGzipKiB: 250, assetsMiB: 4, movingFps: 30, idleFps: 8, hiddenFrames: 0, longTaskMs: 50 };
 
 // ---- static: chunk and asset sizes ----
 async function sizes() {
-  const dist = join(web, 'dist/client');
+  const dist = ASSETS;
   const files = await readdir(join(dist, 'assets'));
   const out = { chunks: [], assets: [] };
   for (const f of files.filter(f => f.endsWith('.js'))) {
@@ -41,7 +42,7 @@ async function sizes() {
 
 // ---- the acceptance host (same stdin/IPC pattern as e2e/acceptance-fixture.ts) ----
 async function startHost() {
-  const child = spawn(process.execPath, ['--input-type=module'], { cwd: resolve(web, '../cli'), env: { ...process.env, W09_ASSETS: join(web, 'dist/client') }, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
+  const child = spawn(process.execPath, ['--input-type=module'], { cwd: CLI, env: { ...process.env, W09_ASSETS: ASSETS }, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
   child.stdin.end(await readFile(join(web, 'e2e/acceptance-host.mjs'), 'utf8'));
   const ready = await new Promise((accept, reject) => {
     const timer = setTimeout(() => reject(new Error('host did not start')), 15000);
@@ -129,8 +130,8 @@ async function measure(browser, host) {
   await page.getByRole('button', { name: 'Đăng ký dự án' }).click();
   await page.getByRole('link', { name: /Xem dự án/ }).click();
   const stage = page.getByLabel('Cảnh văn phòng');
-  const enter = async () => { await page.getByRole('button', { name: 'Trực quan', exact: true }).click(); await stage.waitFor(); await page.waitForFunction(() => document.querySelector('[aria-label="Cảnh văn phòng"]')?.getAttribute('data-office-renderer') === 'ready', null, { timeout: 60000 }); };
-  const leave = async () => { await page.getByRole('button', { name: 'Classic', exact: true }).click(); await stage.waitFor({ state: 'detached' }); };
+  const enter = async () => { await page.getByRole('button', { name: '3D', exact: true }).click(); await stage.waitFor(); await page.waitForFunction(() => document.querySelector('[aria-label="Cảnh văn phòng"]')?.getAttribute('data-office-renderer') === 'ready', null, { timeout: 60000 }); };
+  const leave = async () => { await page.getByRole('button', { name: 'Web', exact: true }).click(); await stage.waitFor({ state: 'detached' }); };
   const t = () => page.evaluate(() => performance.now());
   const data = async () => page.evaluate(() => ({ frames: window.__m.frames.slice(), long: window.__m.long.slice() }));
   const result = { agentsRequested: AGENTS };
@@ -138,6 +139,8 @@ async function measure(browser, host) {
   // Scene load.
   const t0 = await t();
   await enter();
+  const tutorial = page.getByRole('region', { name: 'Hướng dẫn lần đầu' });
+  if (await tutorial.count()) await tutorial.getByRole('button', { name: 'Bỏ qua' }).click();
   await page.waitForTimeout(1500);
   const t1 = await t();
   result.seatedMirrorAgents = await page.getByLabel('Bản văn bản của văn phòng').getByRole('button', { name: /Mức tin cậy/ }).count();
@@ -201,7 +204,8 @@ async function measure(browser, host) {
 
 const host = await startHost();
 try {
-  const report = { when: new Date().toISOString(), node: process.version, budgets: BUDGET, sizes: await sizes() };
+  const os = await (await import('node:os')).default;
+  const report = { when: new Date().toISOString(), environment: { cpu: os.cpus()[0]?.model ?? 'unknown', logicalCpus: os.cpus().length, totalRamGiB: +(os.totalmem() / 1073741824).toFixed(1), platform: `${os.platform()} ${os.release()} (${os.arch()})`, node: process.version, viewport: '1280x800', assetsPath: ASSETS, cliPath: CLI }, budgets: BUDGET, sizes: await sizes() };
   let mode = GL === 'swiftshader' ? 'swiftshader' : 'hardware';
   let launched = await launch(mode);
   let name = await rendererName(launched.browser);
