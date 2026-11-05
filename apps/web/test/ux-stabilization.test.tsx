@@ -68,6 +68,7 @@ describe('Web UX stabilization & functional regression guards', () => {
 
   it.each([
     ['codex', 'GPT-6.1-Sol', 'gpt-6.1-sol'],
+    ['codex', 'GPT-6.1-Terra', 'gpt-6.1-terra'],
     ['codex', 'GPT-5.6-Terra', 'gpt-5.6-terra'],
     ['agy', 'Gemini 4 Argon (High)', 'gemini-4-argon-high'],
     ['agy', 'Claude Sonnet 5.5 (Medium)', 'claude-sonnet-5-5-medium'],
