@@ -36,11 +36,22 @@ describe('separate web command', () => {
   expect(await readFile(join(stateDirectory,'instance.json'),'utf8')).not.toContain(output[0]!.split('#')[1]!);
   expect((await stat(join(stateDirectory,'instance.json'))).mode & 0o777).toBe(0o600);
  });
- it('reuses only a verified existing instance and issues a fresh one-time bootstrap', async () => {
+ it('replaces a verified existing owner even for the same build and invalidates its browser session', async () => {
   const {server,stateDirectory,output} = await start(); const secondOutput:string[]=[];
+  const firstLocator=JSON.parse(await readFile(join(stateDirectory,'instance.json'),'utf8'));
+  const secret=new URL(output[0]!).hash.slice('#bootstrap='.length);
+  const paired=await fetch(server.origin+'/api/v1/session/bootstrap',{method:'POST',headers:{Origin:server.origin,'content-type':'application/json'},body:JSON.stringify({apiVersion:1,secret})});
+  expect(paired.status).toBe(200);const cookie=paired.headers.get('set-cookie')!.split(';')[0]!;
   const second = await startWebCommand({port:Number(new URL(server.origin).port),open:false}, {stateDirectory,isTerminal:true,assetsDirectory:getWebAssetDirectory(),resolveProject:unavailable,io:{stdout:s=>secondOutput.push(s),stderr:()=>{}}});
-  running.push(second);expect(second.origin).toBe(server.origin);expect(second.reused).toBe(true);
-  expect(secondOutput[0]).not.toBe(output[0]);await second.close();expect((await fetch(server.origin)).status).toBe(200);
+  running.push(second);expect(second.origin).toBe(server.origin);expect(second.reused).toBe(false);
+  await server.closed;
+  const latestLocator=JSON.parse(await readFile(join(stateDirectory,'instance.json'),'utf8'));
+  expect(latestLocator.buildId).toBe(firstLocator.buildId);
+  expect(latestLocator.controlSecret).not.toBe(firstLocator.controlSecret);
+  expect(secondOutput[0]).not.toBe(output[0]);
+  expect((await fetch(second.origin+'/api/v1/session',{headers:{Origin:second.origin,Cookie:cookie}})).status).toBe(401);
+  await server.close();expect((await fetch(second.origin)).status).toBe(200);
+  await second.close();await expect(fetch(second.origin)).rejects.toThrow();
  });
  it('reports an exact port conflict without selecting another origin', async () => {
   const occupied=createServer(); await new Promise<void>(r=>occupied.listen(0,'127.0.0.1',r));
@@ -157,4 +168,24 @@ it('pins served assets and replaces an authenticated owner after the build chang
  // Closing a retired handle cannot remove or stop the replacement owner.
  await first.server.close();expect((await fetch(next.server.origin)).status).toBe(200);
  expect(JSON.parse(await readFile(join(first.stateDirectory,'instance.json'),'utf8')).buildId).toMatch(/^[a-f0-9]{64}$/);
+});
+
+
+it('a new invocation can move the authenticated Web owner to a different available port',async()=>{
+ const first=await start();const reserve=createServer();await new Promise<void>(r=>reserve.listen(0,'127.0.0.1',r));
+ const port=(reserve.address() as {port:number}).port;await new Promise<void>(r=>reserve.close(()=>r()));
+ const next=await start({stateDirectory:first.stateDirectory,port});
+ expect(next.server.origin).toBe('http://127.0.0.1:'+port);expect(next.server.reused).toBe(false);
+ await first.server.closed;await expect(fetch(first.server.origin)).rejects.toThrow();
+ expect((await fetch(next.server.origin)).status).toBe(200);
+});
+
+it('a busy replacement port leaves the current authenticated owner serving',async()=>{
+ const first=await start();const occupied=createServer();await new Promise<void>(r=>occupied.listen(0,'127.0.0.1',r));
+ const port=(occupied.address() as {port:number}).port;
+ try{
+  await expect(start({stateDirectory:first.stateDirectory,port})).rejects.toThrow(/EADDRINUSE/);
+  expect((await fetch(first.server.origin)).status).toBe(200);
+  expect(JSON.parse(await readFile(join(first.stateDirectory,'instance.json'),'utf8')).origin).toBe(first.server.origin);
+ }finally{await new Promise<void>(r=>occupied.close(()=>r()));}
 });

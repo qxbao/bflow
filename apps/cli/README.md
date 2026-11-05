@@ -33,8 +33,9 @@ thay vì chỉ báo socket thiếu (`ENOENT`) và yêu cầu chạy `doctor`.
 `bflow web [--port N] [--no-open]` là command riêng, mặc định phục vụ UI/API
 ở `127.0.0.1:4317`, dùng machine state theo `BFLOW_HOME`. Build từ root trước;
 thiếu assets thì lệnh báo cách build, không tự cài đặt/init/index/duyệt license.
-Instance đang chạy chỉ được reuse sau khi xác minh owner; URL ghép nối chứa secret
-trong fragment và chỉ in ra terminal. Chạy lại lệnh để lấy URL mới sau 60 giây.
+Mỗi lần chạy mới thay Web owner cũ sau khi xác thực, kể cả cùng bản build,
+trong cùng machine state. Owner cũ đóng listener rồi thoát; các BFLOW_HOME riêng vẫn độc lập.
+URL ghép nối chứa secret trong fragment và chỉ in ra terminal. Chạy lại lệnh để lấy URL mới sau 60 giây.
 Ctrl-C đóng web, không dừng host dự án. Start/stop qua API dùng EnvironmentLifecycle
 và receipt gắn operation ID; mất ACK được đối soát, không tự gọi lại effect.
 Web bundle cung cấp màn hình dự án, cấu hình, workflow, SSE, artifact và chat.
@@ -815,10 +816,11 @@ Bậc bằng chứng: nguồn + test cục bộ (fake runner). Chưa có live He
 ## Cập nhật Bflow Web đang chạy
 
 Sau khi cập nhật source, chạy `pnpm run build` rồi `bflow web` từ checkout đã cập nhật.
-Lệnh Web so sánh mã build theo nội dung CLI, Local Server, các package và bundle Web:
+Lệnh Web ghi nhận mã build theo nội dung CLI, Local Server, các package và bundle Web:
 
-- Cùng bản build: ghép nối lại server đã xác thực.
-- Khác bản build: chuẩn bị giao diện mới, xác thực và đóng riêng server Web cũ rồi mở bản mới tại cùng origin. Runtime và các run tiếp tục giữ trạng thái của chúng.
+- Mọi lần chạy: chuẩn bị snapshot giao diện, xác thực và đóng riêng Web owner cũ rồi mở owner mới, kể cả khi cùng bản build. Runtime và các run tiếp tục giữ trạng thái của chúng.
+- Đổi `--port`: kiểm tra cổng mới trước khi đóng owner cũ. Cổng bị ứng dụng khác chiếm thì báo lỗi và giữ owner cũ; không kill tiến trình theo tên hoặc PID.
+- Cookie trình duyệt cũ hết hiệu lực; cửa sổ mới dùng liên kết ghép nối mới. Danh sách dự án và lịch sử vẫn được giữ trên đĩa.
 - Còn thao tác khởi tạo/khởi động/dừng chưa kết thúc: từ chối thay server; đợi thao tác ghi biên nhận rồi chạy lại lệnh. Không force-stop Runtime.
 - Server từ bản cũ chưa hỗ trợ thay thế: lệnh báo rõ cần Ctrl-C cửa sổ Web cũ một lần rồi chạy lại `bflow web`; không âm thầm nối vào bản cũ.
 
