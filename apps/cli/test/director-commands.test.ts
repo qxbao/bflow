@@ -1,6 +1,6 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { parseDirectorArgs, runDirectorCommand, runDirectorHookSafely, detectProvider, type DirectorCommandDeps } from "../src/director-commands.js";
+import { parseDirectorArgs, runDirectorCommand, runDirectorHookSafely, detectProvider, defaultDirectorDeps, type DirectorCommandDeps } from "../src/director-commands.js";
 
 function make(over: Partial<DirectorCommandDeps> & { stdinText?: string } = {}) {
   const out: string[] = []; const err: string[] = [];
@@ -43,6 +43,19 @@ describe("director parser", () => {
 });
 
 describe("director start", () => {
+  it("resolves startup before an observational read can resurrect the stopped legacy host", async () => {
+    const { EnvironmentLifecycle } = await import("../src/environment.js");
+    const status = vi.spyOn(EnvironmentLifecycle.prototype, "status").mockImplementation(async () => {
+      throw new Error("The status query resurrected a host with stale startup authority");
+    });
+    const up = vi.spyOn(EnvironmentLifecycle.prototype, "up").mockResolvedValue({} as never);
+    try {
+      const deps = await defaultDirectorDeps("/repo");
+      await expect(deps.ensureUp("/repo")).resolves.toBeUndefined();
+      expect(up).toHaveBeenCalledOnce();
+      expect(status).not.toHaveBeenCalled();
+    } finally { status.mockRestore(); up.mockRestore(); }
+  });
   it("prints one JSON object with the token", async () => {
     const { deps, out, ownerCall } = make({ env: { CODEX_HOME: "/h" } });
     expect(await runDirectorCommand(parse(["start", "--json"]), deps)).toBe(0);
@@ -56,6 +69,18 @@ describe("director start", () => {
     const body = JSON.parse(out[0]!);
     expect(body.ok).toBe(false);
     expect(body.fix).toContain("bflow");
+  });
+  it.each([
+    "Host Bflow đang chạy với bố cục hoặc cấu hình cũ. Chạy `bflow down` rồi `bflow up` để chuyển sang phiên Director. (Persisted host platform differs; run bflow down before changing providers/roles)",
+    "Persisted host execution sources differ; quiesce the existing host before re-resolution",
+    "Persisted host layout differs; run bflow down before changing the session layout"
+  ])("gives a checked restart instead of init for host startup drift: %s", async message => {
+    const { deps, out } = make({ ensureUp: async () => { throw new Error(message); } });
+    expect(await runDirectorCommand(parse(["start", "--json"]), deps)).toBe(1);
+    const body = JSON.parse(out[0]!);
+    expect(body.fix).toContain("bflow down");
+    expect(body.fix).toContain("bflow director start");
+    expect(body.fix).not.toContain("bflow init");
   });
   it.each(["EPERM", "EACCES"])("gives a usable Director launch command for a denied Unix socket (%s)", async code => {
     const { deps, out, ownerCall } = make({ env: { BFLOW_DIRECTOR_PROVIDER: "codex" }, ensureUp: async () => {
