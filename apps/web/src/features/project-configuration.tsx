@@ -34,13 +34,14 @@ const roleLabels:Record<string,string>={
  reviewer:'Kiểm duyệt mã',qa:'Kiểm thử QA',sos:'Cứu hộ sự cố (SOS)',
 };
 const choices:Record<string,string[]>={permissionMode:['restricted','workspace_auto','unattended_isolated'],cli:['claude','codex','agy'],effort:['minimal','low','medium','high','xhigh','max'],mode:['restricted','workspace_auto','unattended_isolated'],isolation:['provider_policy','os_sandbox','container'],minimumLevel:['lightweight','full'],regressionScope:['affected','full','mapped_only']};
-// Suggestions checked against Codex's visible catalog and `agy models` on 2026-11-05.
+// Suggestions from native catalogs and owner-provided model IDs (2026-11-05).
 // Native catalogs vary by account/version;
 // keep display names separate from the exact IDs passed to the provider, and allow custom IDs.
 const presetModels:Record<string,{id:string;label:string}[]>={
  claude:['haiku','sonnet','opus'].map(id=>({id,label:id})),
  codex:[
   {id:'gpt-6.1-sol',label:'GPT-6.1-Sol'},
+  {id:'gpt-6.1-terra',label:'GPT-6.1-Terra'},
   {id:'gpt-6-astra',label:'GPT-6-Astra'},
   {id:'gpt-6-sol',label:'GPT-6-Sol'},
   {id:'gpt-6-luna',label:'GPT-6-Luna'},
