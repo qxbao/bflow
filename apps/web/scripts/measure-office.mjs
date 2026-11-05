@@ -20,7 +20,7 @@ const arg = (name, fallback) => process.argv.find(a => a.startsWith(`--${name}=`
 const GL = arg('gl', 'auto'), AGENTS = Number(arg('agents', '30')), TOGGLES = Number(arg('toggles', '20')), OUT = arg('out', '');
 const ASSETS = resolve(arg('assets', join(web, 'dist/client'))), CLI = resolve(arg('cli', resolve(web, '../cli')));
 const BROWSER = process.env.BFLOW_WEB_TEST_BROWSER;
-const BUDGET = { chunkGzipKiB: 250, assetsMiB: 4, movingFps: 30, idleFps: 8, hiddenFrames: 0, longTaskMs: 50 };
+const BUDGET = { chunkGzipKiB: 250, assetsMiB: 4, movingFps: 30, inputResponseMs: 100, idleFps: 8, hiddenFrames: 0, longTaskMs: 50, liveGlContexts: 1 };
 
 // ---- static: chunk and asset sizes ----
 async function sizes() {
@@ -65,6 +65,16 @@ function workforce(projectId, total) {
 const INIT = () => {
   const w = window;
   w.__m = { frames: [], long: [], gl: [] };
+  w.__m.taskBoardResponse = [];
+  w.addEventListener('click', event => {
+    const button = event.target.closest('button');
+    if (!button || button.textContent.trim() !== 'Công việc') return;
+    const started = event.timeStamp;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const board = document.querySelector('[data-component="TaskBoard"]');
+      if (board && board.getClientRects().length) w.__m.taskBoardResponse.push(performance.now() - started);
+    }));
+  }, true);
   // A frame is a clear of the default framebuffer: shadow maps and other targets are bound to a render target and do not count.
   const proto = w.WebGL2RenderingContext?.prototype;
   if (proto) {
@@ -139,6 +149,7 @@ async function measure(browser, host) {
   // Scene load.
   const t0 = await t();
   await enter();
+  const sceneOpenLiveGlContexts = await page.evaluate(() => window.__m.gl.filter(g => !g.isContextLost()).length);
   const tutorial = page.getByRole('region', { name: 'Hướng dẫn lần đầu' });
   if (await tutorial.count()) await tutorial.getByRole('button', { name: 'Bỏ qua' }).click();
   await page.waitForTimeout(1500);
@@ -148,12 +159,15 @@ async function measure(browser, host) {
   result.sceneLoad = { ...summarize(loadData.frames, t0, t1, loadData.long), note: 'click on 3D until 1.5 s after ready; includes GLB parse and shader compile' };
 
   // Moving: the camera presets ease for a fixed time; cycle them back to back.
-  const cams = ['Developer', 'Coordinator', 'QA', 'Conversation', 'Toàn cảnh'];
+  const cams = [/^Lập trình$/, /^Điều phối$/, /^Kiểm tra$/, /^(Trợ lý|Director)$/, /^Toàn cảnh$/];
+  const cameraButtons = page.getByRole('group', { name: 'Góc nhìn camera' });
   const m0 = await t();
-  for (let i = 0; i < 10; i++) { await page.getByRole('group', { name: 'Góc nhìn camera' }).getByRole('button', { name: cams[i % cams.length], exact: true }).click(); await page.waitForTimeout(750); }
+  for (let i = 0; i < 10; i++) { await cameraButtons.getByRole('button', { name: cams[i % cams.length] }).click(); await page.waitForTimeout(750); }
   const m1 = await t();
   const moveData = await data();
   result.moving = summarize(moveData.frames, m0, m1, moveData.long);
+  result.moving.note = 'fpsOverWindow is the sustained wall-window rate across all frames and gaps; fpsWhileRunning/fpsFastBursts exclude gaps and are diagnostics only.';
+  result.sceneOpenLiveGlContexts = sceneOpenLiveGlContexts;
 
   // Idle: agents with a running clip, nothing else changes.
   await page.waitForTimeout(1500);
@@ -177,7 +191,15 @@ async function measure(browser, host) {
   const all = await data();
   result.longTasksAfterLoad = { count: all.long.filter(l => l.start >= t1).length, durationsMs: all.long.filter(l => l.start >= t1).map(l => +l.duration.toFixed(1)) };
 
-  // Click-to-response: pick an agent through the mirror and time until the inspector shows.
+  // TaskBoard input response: event timestamp through two animation frames to visible board (excludes Playwright/IPC round-trip).
+  const boardResponse = await page.evaluate(() => window.__m.taskBoardResponse.length);
+  await page.getByRole('button', { name: 'Công việc', exact: true }).click();
+  await page.locator('[data-component="TaskBoard"]').waitFor({ state: 'visible' });
+  await page.waitForFunction(n => window.__m.taskBoardResponse.length > n, boardResponse);
+  result.taskBoardInputResponseMs = +(await page.evaluate(() => window.__m.taskBoardResponse.at(-1))).toFixed(1);
+  await enter();
+
+  // Click-to-response: pick an agent through the mirror and time until the inspector shows (end-to-end Playwright timing).
   const clickTimes = [];
   for (let i = 0; i < 5; i++) {
     const s = await t();
@@ -188,14 +210,16 @@ async function measure(browser, host) {
     await page.keyboard.press('Escape');
     await page.locator('#main').waitFor({ state: 'hidden' });
   }
-  result.inspectorOpenMs = clickTimes;
+  result.inspectorOpenEndToEndMs = clickTimes;
 
   // Mode toggles and heap.
   await leave();
   const series = [{ toggles: 0, heapMiB: await heap(), liveGlContexts: await page.evaluate(() => window.__m.gl.filter(g => !g.isContextLost()).length) }];
   for (let n = 1; n <= TOGGLES; n++) {
-    await enter(); await page.waitForTimeout(400); await leave();
-    if (n % 5 === 0) series.push({ toggles: n, heapMiB: await heap(), liveGlContexts: await page.evaluate(() => window.__m.gl.filter(g => !g.isContextLost()).length) });
+    await enter(); await page.waitForTimeout(400);
+    const liveGlContextsOpen = await page.evaluate(() => window.__m.gl.filter(g => !g.isContextLost()).length);
+    await leave();
+    if (n % 5 === 0) series.push({ toggles: n, heapMiB: await heap(), liveGlContextsOpen, liveGlContexts: await page.evaluate(() => window.__m.gl.filter(g => !g.isContextLost()).length) });
   }
   result.toggleHeap = { series, note: 'used JS heap after forced GC, scene closed; the first sample already includes one full visit' };
   await context.close();
@@ -223,15 +247,20 @@ try {
   await launched.browser.close();
   const verdict = (ok) => ok ? 'within' : 'OVER';
   const r = report.run;
+  const activeContexts = [...r.toggleHeap.series.map(x => x.liveGlContextsOpen ?? 0), r.sceneOpenLiveGlContexts];
+  r.toggleHeap.maxLiveGlContexts = Math.max(...activeContexts);
   report.vsBudget = {
     graphicsChunkGzipKiB: `${report.sizes.graphicsChunkGzipKiB} of ${BUDGET.chunkGzipKiB}: ${verdict(report.sizes.graphicsChunkGzipKiB < BUDGET.chunkGzipKiB)}`,
     assetsTotalMiB: `${report.sizes.assetsTotalMiB} of ${BUDGET.assetsMiB}: ${verdict(report.sizes.assetsTotalMiB < BUDGET.assetsMiB)}`,
-    movingFps: `${r.moving.fpsOverWindow} over the whole window (target ${BUDGET.movingFps}, cap ${BUDGET.movingFps}): ${verdict(r.moving.fpsOverWindow >= BUDGET.movingFps && r.moving.fpsOverWindow <= BUDGET.movingFps)}`,
-    movingFpsBurstAdvisory: `advisory only, not a verdict: ${r.moving.fpsFastBursts} fps over consecutive moving frames (${Math.round(r.moving.fastFrameShare * 100)}% of frame gaps), median gap ${r.moving.medianGapMs} ms`,
+    movingFps: `${r.moving.fpsOverWindow} sustained fps over the whole window (target >=${BUDGET.movingFps}): ${verdict(r.moving.fpsOverWindow >= BUDGET.movingFps)}`,
+    inputResponseMs: `${r.taskBoardInputResponseMs} ms (target <=${BUDGET.inputResponseMs}; click event to visible TaskBoard after two animation frames)`,
+    movingFpsBurstAdvisory: `diagnostic only, not a verdict: ${r.moving.fpsFastBursts} fps over consecutive active frames (${Math.round(r.moving.fastFrameShare * 100)}% of frame gaps); filtered bursts do not establish sustained target`,
     idleFpsOverWindow: `${r.idle.fpsOverWindow} (max ${BUDGET.idleFps}; the 8 fps timer is the cap, so this is the same on any GPU): ${verdict(r.idle.fpsOverWindow <= BUDGET.idleFps)}`,
     hiddenFrames: `${r.hidden.frames} (max ${BUDGET.hiddenFrames}): ${verdict(r.hidden.frames === 0)}`,
     sceneLoadLongTask: `longest ${r.sceneLoad.longestMs} ms in ${r.sceneLoad.longTasks} long task(s) while entering 3D (max ${BUDGET.longTaskMs} ms): ${verdict(r.sceneLoad.longestMs <= BUDGET.longTaskMs)}`,
     longTasks: `after load ${r.longTasksAfterLoad.count}; moving ${r.moving.longTasks}; idle ${r.idle.longTasks} (each over ${BUDGET.longTaskMs} ms by definition): ${verdict(r.longTasksAfterLoad.count === 0)}`,
+    sceneOpenLiveGlContexts: `${r.sceneOpenLiveGlContexts} (target <=${BUDGET.liveGlContexts})`,
+    maxLiveGlContexts: `${r.toggleHeap.maxLiveGlContexts} across initial scene and sampled open scenes during toggles (target <=${BUDGET.liveGlContexts})`,
   };
   const text = JSON.stringify(report, null, 2);
   if (OUT) await writeFile(OUT, text + '\n');
