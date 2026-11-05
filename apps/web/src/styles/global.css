@@ -149,7 +149,9 @@
 .chat-toolbar h1 { margin: 0; }
 .chat-history { max-height: 16rem; overflow-y: auto; border-bottom: 1px solid var(--color-line); }
 .chat-thread { display: flex; flex-direction: column; height: max(32rem, calc(100dvh - 17rem)); min-height: 0; }
-.chat-thread > header { padding: 1.25rem; gap: .75rem; }
+.chat-layout .chat-thread { overflow-y: auto; }
+.chat-thread > header { padding: 1.25rem; gap: .75rem; flex-shrink: 0; }
+.chat-layout .chat-thread > [role="log"] { min-height: min(8rem, 25dvh); }
 .chat-thread > [role="log"] { padding: 1.5rem clamp(1rem, 4cqi, 3rem); }
 .chat-thread > [role="log"] > ol { gap: 1.5rem; max-width: 52rem; margin-inline: auto; }
 .chat-thread > form { padding: 1.25rem; flex-shrink: 0; }

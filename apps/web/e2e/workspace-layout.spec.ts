@@ -90,3 +90,53 @@ test('a selected employee stays in the visible scene when the panel and viewport
   }
   await page.screenshot({path:'dist/test-results/workspace-selected-employee.png'});
 });
+
+
+test('chat controls remain reachable with history open on a short viewport', async ({ page }) => {
+  const base = await openProject(page, host.pairing, host.repository, /thư viện.*Xem dự án/);
+  await page.goto(host.origin + base + '/chat/run');
+  const draft = page.getByLabel('Tin nhắn cho trợ lý');
+  const send = page.getByRole('button', { name: 'Gửi tin nhắn' });
+  await draft.fill('Giữ bản nháp khi mở lịch sử');
+  for (const width of [375, 768]) {
+    await page.setViewportSize({ width, height: 650 });
+    const history = page.getByRole('button', { name: 'Lịch sử trò chuyện' });
+    if (await history.getAttribute('aria-expanded') === 'false') await history.click();
+    await send.scrollIntoViewIfNeeded();
+    await expect.poll(async () => {
+      const bounds = await page.locator('.chat-layout').boundingBox(), button = await send.boundingBox();
+      return Boolean(bounds && button && button.y >= bounds.y && button.y + button.height <= bounds.y + bounds.height + 1);
+    }, { message: 'composer must be fully visible or scrollable into view' }).toBe(true);
+    await expect(draft).toHaveValue('Giữ bản nháp khi mở lịch sử');
+  }
+});
+
+test('uncertain-message recovery stays reachable in Web and 3D with short screens and expanded history', async ({ page }) => {
+  test.setTimeout(60000);
+  const base = await openProject(page, host.pairing, host.repository, /thư viện.*Xem dự án/);
+  const projectId = decodeURIComponent(base.split('/').at(-1)!);
+  await page.evaluate(id => localStorage.setItem(JSON.stringify(['bflow-chat', id, 'fixture-host']), 'corrupt'), projectId);
+  let sends = 0;
+  page.on('request', r => { if (r.method() === 'POST' && new URL(r.url()).pathname.endsWith('/messages')) sends++; });
+  for (const mode of ['classic', 'visual'] as const) {
+    if (mode === 'visual') { await page.setViewportSize({ width: 1440, height: 900 }); await enterVisual(page); }
+    for (const [height, openHistory] of [[650, false], [812, true]] as const) {
+      await page.setViewportSize({ width: 375, height });
+      await page.goto(host.origin + base + '/chat/run');
+      const recovery = page.getByRole('button', { name: 'Đối chiếu tin nhắn' });
+      await expect(recovery).toBeEnabled();
+      if (openHistory) await page.getByRole('button', { name: 'Lịch sử trò chuyện' }).click();
+      await recovery.focus();
+      await expect.poll(async () => {
+        const layout = await page.locator('.chat-layout').boundingBox(), button = await recovery.boundingBox();
+        return Boolean(layout && button && button.y >= layout.y && button.y + button.height <= Math.min(height, layout.y + layout.height) + 1);
+      }).toBe(true);
+      expect(await recovery.evaluate(e => {
+        const r = e.getBoundingClientRect();
+        return e.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+      })).toBe(true);
+      await expect(recovery).toBeInViewport();
+      expect(sends).toBe(0);
+    }
+  }
+});
