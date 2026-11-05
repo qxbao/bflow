@@ -62,6 +62,9 @@
   button { @apply cursor-pointer touch-manipulation font-medium hover:bg-ink hover:text-surface disabled:cursor-not-allowed disabled:opacity-50; }
   button[aria-pressed="true"] { @apply border-ink bg-faint font-semibold; }
   input, select, textarea { @apply w-full; }
+  /* Native menus need an opaque theme surface; transparent options can mix OS and page colors. */
+  select, select option { @apply bg-surface text-ink; }
+  select option:checked { @apply bg-faint text-ink; }
   input[type="checkbox"], input[type="radio"] { @apply mt-0.5 size-5 min-h-0 shrink-0 accent-accent; }
   textarea { @apply min-h-20 max-h-[60dvh] resize-y font-prose leading-relaxed; }
   input::placeholder, textarea::placeholder { @apply text-muted opacity-100; }
