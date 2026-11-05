@@ -84,7 +84,10 @@ async function activateDirectorHost(repo: string, sessionId: string, herdrBinary
 function openStream(origin: string, path: string, headers: Record<string, string>) {
   const events: { id?: string; data: any }[] = [];
   let closed = false;
+  let markOpen!: () => void;
+  const opened = new Promise<void>(resolve => { markOpen = resolve; });
   const req = request(new URL(path, origin), { headers: { Origin: origin, Accept: 'text/event-stream', ...headers } }, res => {
+    markOpen();
     let buffer = '';
     res.on('data', chunk => {
       buffer += String(chunk);
@@ -97,9 +100,9 @@ function openStream(origin: string, path: string, headers: Record<string, string
     });
     res.on('close', () => { closed = true; });
   });
-  req.on('error', () => { closed = true; });
+  req.on('error', () => { closed = true; markOpen(); });
   req.end();
-  return { events, get closed() { return closed; }, close: () => req.destroy() };
+  return { events, opened, get closed() { return closed; }, close: () => req.destroy() };
 }
 
 describe.skipIf(process.platform === 'win32')('Director Web over the activated real host (production bflow web composition)', () => {
@@ -139,6 +142,8 @@ describe.skipIf(process.platform === 'win32')('Director Web over the activated r
 
     const stream = openStream(server.origin, `${base}/events`, { Cookie: headers.Cookie });
     cleanups.push(async () => stream.close());
+    // Local Server flushes headers only after its first upstream poll: publishing earlier would race the stream's baseline cursor.
+    await stream.opened;
 
     // Web message while the Director is absent: queued (written by the host), not refused.
     const first = { apiVersion: 1, messageId: randomUUID(), projectId: project.projectId, sessionId: CONVERSATION_SESSION, content: 'Thêm mục hướng dẫn cài đặt' };
