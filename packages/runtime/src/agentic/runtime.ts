@@ -547,15 +547,18 @@ export class AgenticWorkflowRuntime {
     return result;
   }
   /** R-B2-12: a run created by a v2 Conversation is read-only in a Director session (inspect, cancel and reconciliation only). */
-  private assertDirectorWritable(run: RunRecord): void {
-    if (this.ports.director && run.delegation.requestedBy !== "director")
-      throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+  private async assertDirectorWritable(run: RunRecord): Promise<void> {
+    if (!this.ports.director) return;
+    if (run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+    const manifest = SessionManifestSchema.parse(unwrap(await this.ports.panes.getManifest()));
+    if (manifest.schemaVersion !== 3 || manifest.conversationSessionId !== run.delegation.sessionId)
+      throw new AdmissionRejectedError("Cross-session Director mutation");
   }
   /** Tool-layer guard (Director principal): true when the run was created by a v2 Conversation. */
   async assertDirectorRunWritable(runId: string): Promise<void> {
     await this.journal.exclusive(async state => {
       const run = state.runs.find(item => item.runId === runId);
-      if (run) this.assertDirectorWritable(run);
+      if (run) await this.assertDirectorWritable(run);
     });
   }
   private run(state: JournalState, runId: string): RunRecord {
@@ -1773,7 +1776,7 @@ export class AgenticWorkflowRuntime {
     await this.initialize();
     return this.transaction(async (state, save, core, outbox) => {
       const run = this.run(state, args.runId);
-      this.assertDirectorWritable(run);
+      await this.assertDirectorWritable(run);
       if (args.source === "director" && run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
       if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) throw new Error(`Run đang ở trạng thái ${run.status}; không thể treo task`);
       if (args.taskId === FINAL_TASK) throw new Error("Không thể treo kiểm chứng toàn workflow");
@@ -1944,7 +1947,7 @@ export class AgenticWorkflowRuntime {
     await this.initialize();
     const result = await this.transaction(async (state, save, core) => {
       const run = this.run(state, args.runId);
-      this.assertDirectorWritable(run);
+      await this.assertDirectorWritable(run);
       if (args.source === "director" && run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
       if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) throw new Error(`Run đang ở trạng thái ${run.status}; không thể mở lại task`);
       const task = run.tasks.find(item => item.taskId === args.taskId);
@@ -2617,7 +2620,7 @@ export class AgenticWorkflowRuntime {
     const runId = textField(runIdInput), actionId = textField(actionIdInput);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId), action = run.pendingAction;
-      this.assertDirectorWritable(run);
+      await this.assertDirectorWritable(run);
       if (options.webCommand) {
         const command = WebCommandSchema.parse(options.webCommand);
         if (options.automatic || options.conversationUserMessageId || command.kind !== "resume" || command.runId !== runId || command.actionId !== actionId ||
@@ -3291,7 +3294,7 @@ export class AgenticWorkflowRuntime {
     const userMessageId = textField(conversationUserMessageId);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId);
-      this.assertDirectorWritable(run);
+      await this.assertDirectorWritable(run);
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
       if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status) || run.status === "completed_with_parked") throw new Error(`Run is ${run.status}; it cannot be resumed`);
       if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending"))

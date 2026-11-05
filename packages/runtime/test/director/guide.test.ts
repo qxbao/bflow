@@ -106,6 +106,20 @@ describe("Director guide instruction coverage", () => {
     expect(text).not.toMatch(/`park_task` and `unpark_task` act on a task/);
   });
 
+  it("distinguishes retained Director runs from legacy runs without bypassing recovery guards", async () => {
+    const text = await load();
+    expect(text).not.toContain("Runs created before this Director session are read-only");
+    expect(text).toContain("Director-origin");
+    expect(text).toContain("same repository and interaction session");
+    expect(text).toContain("pendingAction");
+    expect(text).toContain("actionId");
+    expect(text).toContain("resume_run");
+    expect(text).toContain("blocker is repaired");
+    expect(text).toContain("Conversation-origin");
+    expect(text).toContain("Foreign-session");
+    expect(text).toContain("mandatory human approvals");
+  });
+
   it("only names tools that exist in the Director tool list", async () => {
     const text = await load();
     const known = new Set(DIRECTOR_TOOLS.map(tool => tool.name));
