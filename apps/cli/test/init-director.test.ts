@@ -54,11 +54,11 @@ describe("bflow init Director files", () => {
     expect(JSON.parse(updated.stdout).data.director.status).toBe("installed");
     for (const path of skillPaths) {
       const installed = await readFile(join(repo, path), "utf8");
-      expect(installed).toContain("bflow-start 1.5.0");
+      expect(installed).toContain("bflow-start 1.6.0");
       expect(installed).toContain("resume_run");
       expect(installed).not.toContain("Runs created before this Director session are read-only");
     }
-    expect(JSON.parse(await readFile(receiptPath, "utf8")).skillVersion).toBe("1.5.0");
+    expect(JSON.parse(await readFile(receiptPath, "utf8")).skillVersion).toBe("1.6.0");
     expect(await exists(".bflow/director-backups")).toBe(false);
     const healthy = await runCli(["init", "--check", "--json"], ctx());
     expect(JSON.parse(healthy.stdout).data.director.status).toBe("ready");
