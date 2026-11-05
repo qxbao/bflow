@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  SessionManifestSchema,
+  SessionManifestSchema, pinRoleProfile, ROLE_PROFILE_FEATURE,
   type ContractError,
   type MCPClientRegistration,
   type MCPServiceObservation,
@@ -773,6 +773,134 @@ describe("P30 dynamic Developer launches end to end", () => {
       expect.objectContaining({ taskId: "run-1-t1", state: "intent" }),
       expect.objectContaining({ taskId: "run-1-t2", state: "released" })
     ]));
+  });
+
+  it.each(["conflict", "transport_unavailable"] as const)("retains an allocation refused after native start while %s cleanup is unconfirmed", async code => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"] });
+    const prepare = vi.spyOn(host.service, "prepareDeveloper");
+    const allocate = host.rolePanes.allocateDeveloper.bind(host.rolePanes);
+    vi.spyOn(host.rolePanes, "allocateDeveloper").mockImplementationOnce(async (...args) => {
+      const allocated = await allocate(...args);
+      expect(allocated.ok).toBe(true);
+      return { ok: false, error: { code: "transport_unavailable", retryable: true, message: "native startup acknowledgement lost" } };
+    });
+    const release = vi.spyOn(host.rolePanes, "releaseDeveloper").mockResolvedValueOnce({ ok: false,
+      error: { code, retryable: true, message: "pane closure not confirmed" } });
+    const blocked = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(blocked).toMatchObject({ ok: false, error: { code: "conflict", retryable: true, details: { stage: "developer_cleanup" } } });
+    const paneId = startedPane(host.herdr, 0), launchId = startedLaunch(host.herdr, 0);
+    expect(gatewayControl.registrations.size).toBe(1);
+    expect(host.herdr.panes.has(paneId)).toBe(true);
+    expect(await host.panes.getRoleBinding(paneId)).toMatchObject({ ok: true,
+      value: { paneId, metadata: { taskId: "run-1-t1", launchId } } });
+    expect(await host.panes.inspectRoleHealth(paneId)).toMatchObject({ ok: true, value: { readyForPrompt: false } });
+    expect(host.session.status().status.launches).toEqual([expect.objectContaining({ launchId, state: "intent" })]);
+    // Retry settles this exact launch; it cannot allocate or prompt a replacement during reconciliation.
+    expect(await host.panes.allocateDeveloper(allocation("run-1-t1"))).toMatchObject({ ok: false,
+      error: { code: "transport_unavailable", retryable: true, message: "native startup acknowledgement lost" } });
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(host.herdr.startCalls()).toHaveLength(1);
+    expect(host.herdr.panes.has(paneId)).toBe(false);
+    expect(gatewayControl.registrations.size).toBe(0);
+  });
+
+  it("settles the exact active launch when an older released binding has the same task", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"] });
+    const allocate = host.rolePanes.allocateDeveloper.bind(host.rolePanes);
+    vi.spyOn(host.rolePanes, "allocateDeveloper").mockImplementationOnce(async (...args) => {
+      const allocated = await allocate(...args);
+      if (!allocated.ok) return allocated;
+      const loaded = await host.store.load(SESSION);
+      if (!loaded.ok || !loaded.value) throw new Error("missing fixture manifest");
+      const old = { ...allocated.value, bindingId: "old-released-binding", paneId: "old-released-pane",
+        agentId: "old-released-agent", metadata: { ...allocated.value.metadata, launchId: "old-released-launch", allocationStatus: "released" } };
+      await host.store.save({ ...loaded.value, panes: [old, ...loaded.value.panes] });
+      return { ok: false, error: { code: "transport_unavailable", retryable: true, message: "new launch start uncertain" } };
+    });
+    expect(await host.panes.allocateDeveloper(allocation("run-1-t1"))).toMatchObject({ ok: false,
+      error: { code: "transport_unavailable", message: "new launch start uncertain" } });
+    const manifest = await host.rolePanes.getManifest();
+    expect(manifest.ok && manifest.value?.panes.some(pane => pane.bindingId === "old-released-binding")).toBe(true);
+    expect(host.herdr.panes.has(startedPane(host.herdr, 0))).toBe(false);
+    expect(gatewayControl.registrations.size).toBe(0);
+  });
+
+  it("retains an uncertain allocation without a manifest target instead of inferring the native process stopped", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"] });
+    const allocate = host.rolePanes.allocateDeveloper.bind(host.rolePanes);
+    vi.spyOn(host.rolePanes, "allocateDeveloper").mockImplementationOnce(async (...args) => {
+      const allocated = await allocate(...args);
+      if (!allocated.ok) return allocated;
+      const loaded = await host.store.load(SESSION);
+      if (!loaded.ok || !loaded.value) throw new Error("missing fixture manifest");
+      await host.store.save({ ...loaded.value, panes: loaded.value.panes.filter(pane => pane.bindingId !== allocated.value.bindingId) });
+      return { ok: false, error: { code: "transport_unavailable", retryable: true, message: "unrecorded native start uncertainty" } };
+    });
+    expect(await host.panes.allocateDeveloper(allocation("run-1-t1"))).toMatchObject({ ok: false,
+      error: { code: "conflict", retryable: true, details: { stage: "developer_cleanup" } } });
+    expect(gatewayControl.registrations.size).toBe(1);
+    expect(host.herdr.panes.has(startedPane(host.herdr, 0))).toBe(true);
+    expect(await host.panes.allocateDeveloper(allocation("run-1-t1"))).toMatchObject({ ok: false,
+      error: { code: "conflict", retryable: true, details: { stage: "developer_cleanup" } } });
+    expect(host.herdr.startCalls()).toHaveLength(1);
+  });
+
+  it("retains cleanup authority when a known pane loses its manifest binding", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"], reportReachability: false });
+    await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    const paneId = startedPane(host.herdr, 0), launchId = startedLaunch(host.herdr, 0);
+    await writeLaunchReachability(host.reachabilityDirectory, launchId, paneId, reportFor("unauthorized"));
+    vi.spyOn(host.rolePanes, "releaseDeveloper").mockResolvedValueOnce({ ok: false,
+      error: { code: "transport_unavailable", retryable: true, message: "close unknown" } });
+    expect((await host.panes.allocateDeveloper(allocation("run-1-t1"))).ok).toBe(false);
+    const loaded = await host.store.load(SESSION);
+    if (!loaded.ok || !loaded.value) throw new Error("missing fixture manifest");
+    await host.store.save({ ...loaded.value, panes: loaded.value.panes.filter(pane => pane.paneId !== paneId) });
+    expect(await host.panes.allocateDeveloper(allocation("run-1-t1"))).toMatchObject({ ok: false,
+      error: { code: "conflict", retryable: true, details: { stage: "developer_cleanup" } } });
+    expect(gatewayControl.registrations.size).toBe(1);
+    expect(host.herdr.panes.has(paneId)).toBe(true);
+    // Manifest absence cannot authorize closing a potentially reused pane id. Reconcile the exact binding first.
+    expect(await host.panes.allocateDeveloper(allocation("run-1-t1"))).toMatchObject({ ok: false,
+      error: { code: "conflict", retryable: true, details: { stage: "developer_cleanup" } } });
+    expect(gatewayControl.registrations.size).toBe(1);
+    await host.store.save(loaded.value);
+    expect(await host.panes.allocateDeveloper(allocation("run-1-t1"))).toMatchObject({ ok: false,
+      error: { code: "validation", retryable: false } });
+    expect(host.herdr.panes.has(paneId)).toBe(false);
+    expect(gatewayControl.registrations.size).toBe(0);
+  });
+
+  it("keeps a real profiled launchIntent after native agent-start timeout until its pane closes", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"] });
+    const definition = { schemaVersion: 3 as const, profileId: "retained-developer", version: "1.0.0", displayName: "Retained Developer",
+      baseRole: "developer" as const, additionalInstructions: "Keep exact launch authority.", skillPins: [], toolRequirements: [], restrictions: {} };
+    const roleProfile = { schemaVersion: 3 as const, pin: pinRoleProfile(definition), definition,
+      baseRolePolicyDigest: "b".repeat(64), resolutionPolicyVersion: "custom-specialist-profiles-v1" };
+    const prompt = await paneModule.readBuiltinRolePrompt("developer");
+    const panes = withDeveloperLaunches(host.rolePanes, {
+      allocate: async request => ({ ...await host.session.allocateDeveloper(request.taskId, request.worktreePath, request.runId),
+        argv: ["--append-system-prompt-file", prompt.source], roleProfile: roleProfile.pin, features: [ROLE_PROFILE_FEATURE] }),
+      release: taskId => host.session.releaseDeveloper(taskId),
+      reachability: (launchId, paneId) => host.session.developerReachability(launchId, paneId)
+    });
+    const run = host.herdr.run.bind(host.herdr);
+    vi.spyOn(host.herdr, "run").mockImplementation(async invocation => invocation.args[0] === "agent" && invocation.args[1] === "start"
+      ? { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: true, cause: "agent start acknowledgement lost" }
+      : run(invocation));
+    vi.spyOn(host.rolePanes, "releaseDeveloper").mockResolvedValueOnce({ ok: false,
+      error: { code: "transport_unavailable", retryable: true, message: "pane closure unknown" } });
+    expect(await panes.allocateDeveloper({ ...allocation("run-1-t1"), roleProfile })).toMatchObject({ ok: false,
+      error: { code: "conflict", retryable: true, details: { stage: "developer_cleanup" } } });
+    const manifest = await host.rolePanes.getManifest();
+    expect(manifest.ok).toBe(true);
+    const retained = manifest.ok && manifest.value?.panes.find(pane => pane.metadata?.taskId === "run-1-t1");
+    expect(retained).toMatchObject({ metadata: { launchIntent: true, allocationStatus: "active" } });
+    expect(gatewayControl.registrations.size).toBe(1);
+    expect(await panes.allocateDeveloper({ ...allocation("run-1-t1"), roleProfile })).toMatchObject({ ok: false });
+    expect(gatewayControl.registrations.size).toBe(0);
+    if (retained) expect(host.herdr.panes.has(retained.paneId)).toBe(false);
   });
 
   it("does not reuse a released Developer pane for a new launch, so no agent keeps a revoked token", async () => {

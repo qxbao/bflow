@@ -91,6 +91,24 @@ describe("Director endpoint Coordinator port (host composition)", () => {
     expect(await f.inspect()).toMatchObject({ status: "escalated", pendingAction: { state: "pending" } });
   }, 60000);
 
+  it("keeps foreign-session cancellation and message reconciliation outside Director authority", async () => {
+    const { f, endpoint, token } = await legacySession();
+    await new AgenticJournal(f.runtimeOptions.journalDirectory, f.repository).exclusive(async (state, save) => {
+      const run = state.runs[0]!;
+      run.delegation.requestedBy = "director";
+      run.delegation.sessionId = "session-other";
+      run.nativeDeliveries = [{ operationId: "foreign-native", message: RoleMessageSchema.parse({ schema_version: 2,
+        message_id: "foreign-message", correlation_id: "correlation-1", run_id: "run-1", sender: { role: "runtime" }, recipient: { role: "planner" },
+        type: "task.status", payload: { headline: "Foreign native intent" }, artifact_references: [], occurred_at: "2026-11-03T10:00:00.000Z",
+        idempotency_key: "foreign-message" }) }];
+      await save();
+    });
+    await expect(endpoint.call(token, "cancel", { runId: "run-1", reason: "Foreign cancellation" })).rejects.toThrow("Cross-session Director mutation");
+    await expect(endpoint.call(token, "reconcile_cancellation", { runId: "run-1" })).rejects.toThrow("Cross-session Director mutation");
+    await expect(endpoint.call(token, "reconcile_delivery", { messageId: "foreign-message" })).rejects.toThrow("Cross-session Director mutation");
+    expect(await endpoint.call(token, "inspect", { runId: "run-1" })).toMatchObject({ cancelled: false });
+  }, 60000);
+
   it("requires unknown delivery reconciliation before a retained Director run resumes", async () => {
     const { f, endpoint, token } = await legacySession();
     await new AgenticJournal(f.runtimeOptions.journalDirectory, f.repository).exclusive(async (state, save) => {
