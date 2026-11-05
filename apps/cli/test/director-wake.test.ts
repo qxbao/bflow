@@ -1,10 +1,10 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   armCodexDirectorWatch, cancelCodexDirectorWatch, isCodexDirectorWakePrompt,
-  queueCodexDirectorThread, readCodexDirectorWatchStatus, runCodexDirectorWatch
+  queueCodexDirectorThread, readCodexDirectorWatchStatus, runCodexDirectorWatch, withCodexDirectorWatchLock
 } from "../src/director-wake.js";
 
 const roots: string[] = [];
@@ -12,9 +12,9 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 async function root(): Promise<string> { const dir = await mkdtemp(join(tmpdir(), "bflow-director-wake-")); roots.push(dir); return dir; }
 const threadId = "123e4567-e89b-42d3-a456-426614174000";
 const token = "token-id.private-secret";
-const cursor = "m4.i0.b2.r";
+const cursor = "m4.i0.b2.rZmVlZDox";
 const empty = { cursor, timedOut: true, messages: [], issues: [], runtimeEvents: [], mailbox: [] };
-const event = { cursor: "m5.i0.b2.r", timedOut: false, messages: [{ schemaVersion: 1, seq: 5, messageId: "message-5", author: "user", channel: "web", text: "Làm tiếp", at: "2026-11-05T00:00:00.000Z" }], issues: [], runtimeEvents: [], mailbox: [] };
+const event = { cursor: "m5.i0.b2.rZmVlZDoy", timedOut: false, messages: [{ schemaVersion: 1, seq: 5, messageId: "message-5", author: "user", channel: "web", text: "Làm tiếp", at: "2026-11-05T00:00:00.000Z" }], issues: [], runtimeEvents: [], mailbox: [] };
 
 describe("Codex Director event wake", () => {
   it("keeps the model idle through empty waits and queues one wake without acknowledging the event", async () => {
@@ -35,7 +35,7 @@ describe("Codex Director event wake", () => {
     expect(queued[0]!.env.BFLOW_DIRECTOR_TOKEN).toBeUndefined();
     await expect(isCodexDirectorWakePrompt(dir, "session", queued[0]!.message)).resolves.toBe(true);
     expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("queued");
-    const next = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor: "m5.i0.b2.r", spawn: async () => {} });
+    const next = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor: "m5.i0.b2.rZmVlZDoy", spawn: async () => {} });
     expect(next.generation).not.toBe(state.generation);
     expect(JSON.stringify(await readFile(join(dir, ".bflow", "state", "director-watch", "session.json"), "utf8"))).not.toContain(token);
   });
@@ -47,6 +47,45 @@ describe("Codex Director event wake", () => {
       wait: async () => { await cancelCodexDirectorWatch(dir, "session"); return event; },
       queue: async () => { queued++; }, delay: async () => {} });
     expect(queued).toBe(0);
+  });
+
+  it("serializes prompt cancellation before queue admission", async () => {
+    const dir = await root(); const state = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} });
+    let release!: () => void; let held!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { held = resolve; });
+    const holder = withCodexDirectorWatchLock(dir, "session", async () => { held(); await gate; });
+    await entered;
+    const cancel = cancelCodexDirectorWatch(dir, "session");
+    let queued = 0;
+    const watch = runCodexDirectorWatch({ root: dir, sessionName: "session", generation: state.generation,
+      wait: async () => event, queue: async () => { queued++; }, delay: async () => {} });
+    release(); await Promise.all([holder, cancel, watch]);
+    expect(queued).toBe(0);
+    expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("cancelled");
+  });
+  it("does not lose a cancellation racing the first watcher arm", async () => {
+    const dir = await root(); let release!: () => void; let held!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { held = resolve; });
+    const holder = withCodexDirectorWatchLock(dir, "session", async () => { held(); await gate; });
+    await entered;
+    const arm = armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} });
+    const cancel = cancelCodexDirectorWatch(dir, "session");
+    release(); await Promise.all([holder, arm, cancel]);
+    expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("cancelled");
+  });
+  it("does not restore an armed marker after a prompt arrives during an admitted queue", async () => {
+    const dir = await root(); const state = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} });
+    let release!: () => void; let queued!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { queued = resolve; });
+    const watch = runCodexDirectorWatch({ root: dir, sessionName: "session", generation: state.generation,
+      wait: async () => event, queue: async () => { queued(); await gate; }, delay: async () => {} });
+    await entered;
+    await cancelCodexDirectorWatch(dir, "session");
+    release(); await watch;
+    expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("cancelled");
   });
 
   it("does not let an old watcher queue after it was cancelled and a new watcher armed", async () => {
@@ -72,6 +111,18 @@ describe("Codex Director event wake", () => {
   it("refuses an invalid cursor before starting a watcher", async () => {
     const dir = await root(); let spawned = false;
     await expect(armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor: "invalid", spawn: async () => { spawned = true; } })).rejects.toThrow();
+    expect(spawned).toBe(false);
+  });
+  it("does not replace a corrupt marker that might represent uncertain delivery", async () => {
+    const dir = await root(); const markerDir = join(dir, ".bflow", "state", "director-watch");
+    await mkdir(markerDir, { recursive: true });
+    await writeFile(join(markerDir, "session.json"), "{broken");
+    await expect(armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} })).rejects.toThrow("marker invalid");
+    expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("invalid");
+  });
+  it("refuses an uninitialized Runtime cursor before suspending", async () => {
+    const dir = await root(); let spawned = false;
+    await expect(armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor: "m4.i0.b2.r", spawn: async () => { spawned = true; } })).rejects.toThrow("Runtime cursor");
     expect(spawned).toBe(false);
   });
   it("fails closed when another watcher is already armed", async () => {
@@ -113,7 +164,7 @@ describe("Codex Director event wake", () => {
     expect(delays).toEqual([]);
     expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("wake_failed");
     await expect(armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} })).rejects.toThrow("reconcile");
-    const resumed = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor: "m5.i0.b2.r", spawn: async () => {} });
+    const resumed = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor: "m5.i0.b2.rZmVlZDoy", spawn: async () => {} });
     expect(resumed.status).toBe("armed");
   });
 
@@ -124,19 +175,20 @@ describe("Codex Director event wake", () => {
     await expect(queueCodexDirectorThread({ executable, cwd: dir, threadId, message: "wake", env: {} })).rejects.toThrow("resume");
   });
 
-  it("keeps the Director cursor across empty waits and gives event-only wakes an inspect hint", async () => {
+  it("keeps the Director cursor across empty waits and gives event-only wakes a summary inspect hint", async () => {
     const dir = await root(); const state = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} });
     const seen: string[] = []; let message = "";
     await runCodexDirectorWatch({ root: dir, sessionName: "session", generation: state.generation,
       wait: async value => {
         seen.push(value);
         return seen.length === 1 ? { ...empty, cursor: "m4.i0.b2.rZmVlZC0x" }
-          : { ...empty, cursor: "m4.i0.b2.rZmVlZC0y", timedOut: false, runtimeEvents: [{ type: "projection.run", runId: "run-1", summary: "changed" }] };
+          : { ...empty, cursor: "m4.i0.b2.rZmVlZC0y", timedOut: false, runtimeEvents: [{ type: "projection.run", summary: "changed" }] };
       },
       queue: async (_thread, wake) => { message = wake; }, delay: async () => {} });
     expect(seen).toEqual([cursor, cursor]);
     expect(message).toContain(cursor);
     expect(message).toContain("inspect");
-    expect(message).toContain("run-1");
+    expect(message).toContain("view summary");
+    expect(message).toContain("projection.run");
   });
 });

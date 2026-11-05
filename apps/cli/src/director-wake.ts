@@ -1,20 +1,22 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, readFile, rename, rmdir, stat, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { DirectorWaitResultSchema } from "@bflow/contracts";
 import { z } from "zod";
 
 const StateSchema = z.object({
   version: z.literal(1), generation: z.string().uuid(), threadId: z.string().uuid(),
-  cursor: z.string().min(1).max(512).regex(/^m\d+\.i\d+(?:\.b\d+)?\.r[A-Za-z0-9_-]*$/),
+  cursor: z.string().min(1).max(512).regex(/^m\d+\.i\d+(?:\.b\d+)?\.r[A-Za-z0-9_-]+$/),
   touchedAt: z.string().datetime(),
-  status: z.enum(["armed", "queued", "cancelled", "wake_failed"])
+  status: z.enum(["armed", "queueing", "queued", "cancelled", "wake_failed"])
 }).strict();
 export type DirectorWatchState = z.infer<typeof StateSchema>;
 const WAIT_MS = 45_000;
 const STALE_MS = 120_000;
+const LOCK_STALE_MS = 60_000;
+const LOCK_DEADLINE_MS = 2000;
 const execFileAsync = promisify(execFile);
 
 export async function queueCodexDirectorThread(input: {
@@ -38,6 +40,29 @@ function statePath(root: string, sessionName: string): string {
   return join(root, ".bflow", "state", "director-watch", `${sessionName}.json`);
 }
 
+/** Cross-process serialization for the short marker transitions; never held during a long wait or queue call. */
+export async function withCodexDirectorWatchLock<T>(root: string, sessionName: string, action: () => Promise<T>): Promise<T> {
+  const lock = `${statePath(root, sessionName)}.lock`;
+  await mkdir(dirname(lock), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + LOCK_DEADLINE_MS;
+  for (;;) {
+    try { await mkdir(lock, { mode: 0o700 }); break; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        const held = await stat(lock);
+        if (held.isDirectory() && Date.now() - held.mtimeMs > LOCK_STALE_MS) {
+          await rmdir(lock).catch(() => undefined);
+        }
+      } catch { /* another process released it */ }
+      if (Date.now() >= deadline) throw new Error("Director watcher state is busy; retry after the other command finishes");
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  }
+  try { return await action(); }
+  finally { await rmdir(lock); }
+}
+
 async function save(root: string, sessionName: string, state: DirectorWatchState): Promise<void> {
   const path = statePath(root, sessionName);
   await mkdir(join(root, ".bflow", "state", "director-watch"), { recursive: true, mode: 0o700 });
@@ -47,13 +72,17 @@ async function save(root: string, sessionName: string, state: DirectorWatchState
 }
 
 async function read(root: string, sessionName: string): Promise<DirectorWatchState | undefined> {
+  const path = statePath(root, sessionName);
+  let info;
+  try { info = await lstat(path); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  if (!info.isFile() || info.size > 4096) throw new Error("Director watcher marker invalid");
   try {
-    const path = statePath(root, sessionName);
-    const info = await lstat(path);
-    if (!info.isFile() || info.size > 4096) return undefined;
     const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-    return StateSchema.safeParse(parsed).data;
-  } catch { return undefined; }
+    const result = StateSchema.safeParse(parsed);
+    if (result.success) return result.data;
+  } catch { /* malformed marker is not an absent marker */ }
+  throw new Error("Director watcher marker invalid");
 }
 
 export async function armCodexDirectorWatch(input: {
@@ -61,25 +90,61 @@ export async function armCodexDirectorWatch(input: {
   spawn: (generation: string) => Promise<void>;
   now?: () => Date;
 }): Promise<DirectorWatchState> {
+  if (!/\.r[A-Za-z0-9_-]+$/.test(input.cursor)) throw new Error("Runtime cursor is not initialized; call director_wait before suspending");
   const now = input.now?.() ?? new Date();
-  const previous = await read(input.root, input.sessionName);
-  if (previous?.status === "armed" && now.getTime() - Date.parse(previous.touchedAt) < STALE_MS) throw new Error("Director watcher already armed");
-  if (previous?.status === "wake_failed" && previous.cursor === input.cursor)
-    throw new Error("Director wake delivery is uncertain; reconcile the event with director_wait before suspending again");
   const state = StateSchema.parse({ version: 1, generation: randomUUID(), threadId: input.threadId, cursor: input.cursor, touchedAt: now.toISOString(), status: "armed" });
-  await save(input.root, input.sessionName, state);
+  await withCodexDirectorWatchLock(input.root, input.sessionName, async () => {
+    const previous = await read(input.root, input.sessionName);
+    if ((previous?.status === "armed" || previous?.status === "queueing") && now.getTime() - Date.parse(previous.touchedAt) < STALE_MS)
+      throw new Error("Director watcher already armed");
+    if (previous?.status === "wake_failed" && previous.cursor === input.cursor)
+      throw new Error("Director wake delivery is uncertain; reconcile the event with director_wait before suspending again");
+    await save(input.root, input.sessionName, state);
+  });
   try { await input.spawn(state.generation); }
-  catch (error) { await cancelCodexDirectorWatch(input.root, input.sessionName); throw error; }
+  catch (error) {
+    await withCodexDirectorWatchLock(input.root, input.sessionName, async () => {
+      const current = await read(input.root, input.sessionName);
+      if (current?.generation === state.generation && current.status === "armed")
+        await save(input.root, input.sessionName, { ...current, status: "cancelled" });
+    });
+    throw error;
+  }
   return state;
 }
 
 export async function cancelCodexDirectorWatch(root: string, sessionName: string): Promise<void> {
-  const current = await read(root, sessionName);
-  if (current && current.status !== "cancelled") await save(root, sessionName, { ...current, status: "cancelled" });
+  try {
+    await withCodexDirectorWatchLock(root, sessionName, async () => {
+      const current = await read(root, sessionName);
+      if (current && current.status !== "cancelled") await save(root, sessionName, { ...current, status: "cancelled" });
+    });
+  } catch (error) {
+    // A fake or read-only repository with no watcher must not make the prompt hook fail before it records the user.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (["ENOENT", "EACCES", "EROFS"].includes(code ?? "")) {
+      try { if (!(await read(root, sessionName))) return; } catch { return; }
+    }
+    throw error;
+  }
 }
 
-export async function readCodexDirectorWatchStatus(root: string, sessionName: string): Promise<DirectorWatchState["status"] | "absent"> {
-  return (await read(root, sessionName))?.status ?? "absent";
+/** Fast path for a bound Codex hook: a different provider thread cannot cancel this Director's watcher. */
+export async function cancelCodexDirectorWatchIfThread(root: string, sessionName: string, threadId: string): Promise<boolean> {
+  let existing: DirectorWatchState | undefined;
+  try { existing = await read(root, sessionName); } catch { return false; }
+  if (!existing || existing.threadId !== threadId) return false;
+  return withCodexDirectorWatchLock(root, sessionName, async () => {
+    const current = await read(root, sessionName);
+    if (!current || current.threadId !== threadId) return false;
+    if (current.status !== "cancelled") await save(root, sessionName, { ...current, status: "cancelled" });
+    return true;
+  });
+}
+
+export async function readCodexDirectorWatchStatus(root: string, sessionName: string): Promise<DirectorWatchState["status"] | "absent" | "invalid"> {
+  try { return (await read(root, sessionName))?.status ?? "absent"; }
+  catch { return "invalid"; }
 }
 
 export async function isCodexDirectorWakePrompt(root: string, sessionName: string, prompt: string): Promise<boolean> {
@@ -111,31 +176,47 @@ export async function runCodexDirectorWatch(input: {
       continue;
     }
     if (result.timedOut || (result.messages.length + result.issues.length + result.runtimeEvents.length + (result.mailbox?.length ?? 0)) === 0) {
-      const latest = await read(input.root, input.sessionName);
-      if (!latest || latest.generation !== input.generation || latest.status !== "armed") return;
-      await save(input.root, input.sessionName, { ...latest, touchedAt: new Date().toISOString() });
+      const active = await withCodexDirectorWatchLock(input.root, input.sessionName, async () => {
+        const latest = await read(input.root, input.sessionName);
+        if (!latest || latest.generation !== input.generation || latest.status !== "armed") return false;
+        await save(input.root, input.sessionName, { ...latest, touchedAt: new Date().toISOString() });
+        return true;
+      });
+      if (!active) return;
       continue;
     }
-    const latest = await read(input.root, input.sessionName);
-    if (!latest || latest.generation !== input.generation || latest.status !== "armed") return;
     const env: Record<string, string | undefined> = { ...process.env };
     delete env.BFLOW_DIRECTOR_TOKEN;
     const runtimeHint = result.runtimeEvents.length > 0
-      ? ` Nếu director_wait không trả sự kiện Runtime, gọi inspect cho run liên quan: ${result.runtimeEvents.slice(0, 8).map(item => `${item.type}${item.runId ? ` ${item.runId}` : ""}`).join(", ")}.`
+      ? ` Nếu director_wait không trả sự kiện Runtime, gọi inspect view summary cho các run đang hoạt động; tín hiệu: ${result.runtimeEvents.slice(0, 8).map(item => item.type).join(", ")}.`
       : "";
-    const message = `BFLOW_DIRECTOR_WAKE ${state.generation} ${state.cursor}\nBflow có sự kiện mới. Gọi director_wait với cursor trên, xử lý mọi mục, rồi chạy bflow director suspend với cursor mới và kết thúc lượt.${runtimeHint}`;
-    try {
-      await input.queue(state.threadId, message, env);
+    const message = `BFLOW_DIRECTOR_WAKE ${state.generation} ${state.cursor}\nBflow có sự kiện mới. Gọi director_wait với cursor trên, xử lý mọi mục, rồi gọi director_suspend MCP với cursor mới và threadId ${state.threadId}; kết thúc lượt.${runtimeHint}`;
+    const admission = await withCodexDirectorWatchLock(input.root, input.sessionName, async () => {
       const current = await read(input.root, input.sessionName);
-      if (current?.generation === input.generation && current.status === "armed")
-        await save(input.root, input.sessionName, { ...current, status: "queued" });
+      if (!current || current.generation !== input.generation || current.status !== "armed") return undefined;
+      await save(input.root, input.sessionName, { ...current, status: "queueing" });
+      // Start the queue mutation before releasing the lock, so cancellation cannot slip between admission and send.
+      const pending = input.queue(state.threadId, message, env);
+      void pending.catch(() => undefined); // Keep the rejection handled until the lock is released and we can await it.
+      return { pending };
+    });
+    if (!admission) return;
+    try {
+      await admission.pending;
+      await withCodexDirectorWatchLock(input.root, input.sessionName, async () => {
+        const current = await read(input.root, input.sessionName);
+        if (current?.generation === input.generation && current.status === "queueing")
+          await save(input.root, input.sessionName, { ...current, status: "queued" });
+      });
       return;
     }
     catch {
       // A timeout or nonzero queue result may still have delivered the message. Never resend without reconciliation.
-      const current = await read(input.root, input.sessionName);
-      if (current?.generation === input.generation && current.status === "armed")
-        await save(input.root, input.sessionName, { ...current, status: "wake_failed" });
+      await withCodexDirectorWatchLock(input.root, input.sessionName, async () => {
+        const current = await read(input.root, input.sessionName);
+        if (current?.generation === input.generation && current.status === "queueing")
+          await save(input.root, input.sessionName, { ...current, status: "wake_failed" });
+      });
       return;
     }
   }

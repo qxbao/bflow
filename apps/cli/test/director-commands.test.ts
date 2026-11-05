@@ -34,7 +34,7 @@ describe("director parser", () => {
     expect(parse(["call", "inspect", "--json", "{}"])).toMatchObject({ sub: "call", tool: "inspect", argsJson: "{}" });
     expect(parse(["mcp"])).toEqual({ sub: "mcp" });
     expect(parse(["hook", "codex"])).toEqual({ sub: "hook", provider: "codex" });
-    expect(parse(["suspend", "m4.i0.b2.r"])).toEqual({ sub: "suspend", cursor: "m4.i0.b2.r" });
+    expect(parse(["suspend", "m4.i0.b2.rZmVlZDox"])).toEqual({ sub: "suspend", cursor: "m4.i0.b2.rZmVlZDox" });
     expect(parse(["watch", "123e4567-e89b-42d3-a456-426614174001"])).toMatchObject({ sub: "watch" });
     expect(parse(["watch-status"])).toEqual({ sub: "watch-status" });
     expect(parseDirectorArgs(["bogus"]).ok).toBe(false);
@@ -53,7 +53,7 @@ describe("director suspend", () => {
   it("reports a failed wake for diagnosis", async () => {
     const dir = await mkdtemp(join(tmpdir(), "director-status-"));
     try {
-      await armCodexDirectorWatch({ root: dir, sessionName: "bf-abc", threadId: "123e4567-e89b-42d3-a456-426614174000", cursor: "m4.i0.b2.r", spawn: async () => {} });
+      await armCodexDirectorWatch({ root: dir, sessionName: "bf-abc", threadId: "123e4567-e89b-42d3-a456-426614174000", cursor: "m4.i0.b2.rZmVlZDox", spawn: async () => {} });
       const { deps, out } = make({ identify: async () => ({ root: dir, sessionName: "bf-abc" }) });
       expect(await runDirectorCommand(parse(["watch-status"]), deps)).toBe(0);
       expect(out.join("")).toContain("armed");
@@ -62,15 +62,15 @@ describe("director suspend", () => {
   it("authenticates and arms a watcher for the current Codex thread", async () => {
     const suspendWatch = vi.fn(async () => undefined);
     const { deps, out } = make({ env: { BFLOW_DIRECTOR_TOKEN: "tid.secretsecretsecretsecret", CODEX_THREAD_ID: "123e4567-e89b-42d3-a456-426614174000" }, suspendWatch });
-    expect(await runDirectorCommand(parse(["suspend", "m4.i0.b2.r"]), deps)).toBe(0);
+    expect(await runDirectorCommand(parse(["suspend", "m4.i0.b2.rZmVlZDox"]), deps)).toBe(0);
     expect(deps.toolCall).toHaveBeenCalledWith({ repositoryPath: "/repo", sessionId: "bf-abc" }, "tid.secretsecretsecretsecret", "inspect", { view: "summary" });
-    expect(suspendWatch).toHaveBeenCalledWith({ root: "/repo", sessionName: "bf-abc", cursor: "m4.i0.b2.r", threadId: "123e4567-e89b-42d3-a456-426614174000", token: "tid.secretsecretsecretsecret" });
+    expect(suspendWatch).toHaveBeenCalledWith({ root: "/repo", sessionName: "bf-abc", cursor: "m4.i0.b2.rZmVlZDox", threadId: "123e4567-e89b-42d3-a456-426614174000", token: "tid.secretsecretsecretsecret" });
     expect(out.join("")).toContain("watching");
   });
   it("refuses to suspend without a Codex thread", async () => {
     const suspendWatch = vi.fn(async () => undefined);
     const { deps } = make({ env: { BFLOW_DIRECTOR_TOKEN: "tid.secretsecretsecretsecret" }, suspendWatch });
-    expect(await runDirectorCommand(parse(["suspend", "m4.i0.b2.r"]), deps)).toBe(1);
+    expect(await runDirectorCommand(parse(["suspend", "m4.i0.b2.rZmVlZDox"]), deps)).toBe(1);
     expect(suspendWatch).not.toHaveBeenCalled();
   });
 });
@@ -96,10 +96,15 @@ describe("director start", () => {
     expect(JSON.parse(out[0]!)).toMatchObject({ ok: true, token: "tid.secretsecretsecretsecret", cursor: "m4.i0.r", sessionId: "bf-abc", repositoryRoot: "/repo", provider: "codex", presence: "present" });
     expect(ownerCall).toHaveBeenCalledWith({ repositoryPath: "/repo", sessionId: "bf-abc" }, "director_register", { provider: "codex" });
   });
+  it("returns the current Codex thread id so the MCP suspend tool needs no shell token", async () => {
+    const { deps, out } = make({ env: { CODEX_HOME: "/h", CODEX_THREAD_ID: "123e4567-e89b-42d3-a456-426614174000" } });
+    expect(await runDirectorCommand(parse(["start", "--json"]), deps)).toBe(0);
+    expect(JSON.parse(out[0]!).threadId).toBe("123e4567-e89b-42d3-a456-426614174000");
+  });
   it("does not cancel a watcher when a start command cannot register", async () => {
     const dir = await mkdtemp(join(tmpdir(), "director-start-"));
     try {
-      await armCodexDirectorWatch({ root: dir, sessionName: "bf-abc", threadId: "123e4567-e89b-42d3-a456-426614174000", cursor: "m4.i0.b2.r", spawn: async () => {} });
+      await armCodexDirectorWatch({ root: dir, sessionName: "bf-abc", threadId: "123e4567-e89b-42d3-a456-426614174000", cursor: "m4.i0.b2.rZmVlZDox", spawn: async () => {} });
       const { deps } = make({ identify: async () => ({ root: dir, sessionName: "bf-abc" }), env: { CODEX_HOME: "/h" },
         ownerCall: (async () => { throw new Error("Host unavailable"); }) as never });
       expect(await runDirectorCommand(parse(["start", "--json"]), deps)).toBe(1);
@@ -188,18 +193,30 @@ describe("director hook", () => {
   it("cancels a suspended watcher on a real terminal prompt", async () => {
     const dir = await mkdtemp(join(tmpdir(), "director-hook-"));
     try {
-      const state = await armCodexDirectorWatch({ root: dir, sessionName: "bf-abc", threadId: "123e4567-e89b-42d3-a456-426614174000", cursor: "m4.i0.b2.r", spawn: async () => {} });
-      const { deps } = make({ cwd: dir, identify: async () => ({ root: dir, sessionName: "bf-abc" }), stdinText: '{"prompt":"hello"}' });
+      const state = await armCodexDirectorWatch({ root: dir, sessionName: "bf-abc", threadId: "123e4567-e89b-42d3-a456-426614174000", cursor: "m4.i0.b2.rZmVlZDox", spawn: async () => {} });
+      const { deps } = make({ cwd: dir, identify: async () => ({ root: dir, sessionName: "bf-abc" }), stdinText: '{"prompt":"hello","session_id":"123e4567-e89b-42d3-a456-426614174000"}' });
       expect(await runDirectorCommand(parse(["hook", "codex"]), deps)).toBe(0);
       const { isCodexDirectorWakePrompt } = await import("../src/director-wake.js");
-      expect(await isCodexDirectorWakePrompt(dir, "bf-abc", `BFLOW_DIRECTOR_WAKE ${state.generation} m4.i0.b2.r`)).toBe(true);
+      expect(await isCodexDirectorWakePrompt(dir, "bf-abc", `BFLOW_DIRECTOR_WAKE ${state.generation} m4.i0.b2.rZmVlZDox`)).toBe(true);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+  it("keeps the Director watcher armed for a prompt from a foreign Codex session", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "director-hook-"));
+    try {
+      await armCodexDirectorWatch({ root: dir, sessionName: "bf-abc", threadId: "123e4567-e89b-42d3-a456-426614174000", cursor: "m4.i0.b2.rZmVlZDox", spawn: async () => {} });
+      const { deps } = make({ cwd: dir, identify: async () => ({ root: dir, sessionName: "bf-abc" }),
+        stdinText: '{"prompt":"hello","session_id":"123e4567-e89b-42d3-a456-426614174999"}',
+        ownerCall: (async () => ({ recorded: false })) as never });
+      expect(await runDirectorCommand(parse(["hook", "codex"]), deps)).toBe(0);
+      const { readCodexDirectorWatchStatus } = await import("../src/director-wake.js");
+      expect(await readCodexDirectorWatchStatus(dir, "bf-abc")).toBe("armed");
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
   it("does not record the generated wake as a user message", async () => {
     const dir = await mkdtemp(join(tmpdir(), "director-hook-"));
     try {
-      const state = await armCodexDirectorWatch({ root: dir, sessionName: "bf-abc", threadId: "123e4567-e89b-42d3-a456-426614174000", cursor: "m4.i0.b2.r", spawn: async () => {} });
-      const prompt = `BFLOW_DIRECTOR_WAKE ${state.generation} m4.i0.b2.r\nBflow có sự kiện mới.`;
+      const state = await armCodexDirectorWatch({ root: dir, sessionName: "bf-abc", threadId: "123e4567-e89b-42d3-a456-426614174000", cursor: "m4.i0.b2.rZmVlZDox", spawn: async () => {} });
+      const prompt = `BFLOW_DIRECTOR_WAKE ${state.generation} m4.i0.b2.rZmVlZDox\nBflow có sự kiện mới.`;
       const { deps, ownerCall } = make({ cwd: dir, identify: async () => ({ root: dir, sessionName: "bf-abc" }), stdinText: JSON.stringify({ prompt }) });
       expect(await runDirectorCommand(parse(["hook", "codex"]), deps)).toBe(0);
       expect(ownerCall).not.toHaveBeenCalled();
@@ -208,9 +225,9 @@ describe("director hook", () => {
   it("does not record a wake that was queued just before manual input cancelled the watcher", async () => {
     const dir = await mkdtemp(join(tmpdir(), "director-hook-"));
     try {
-      const state = await armCodexDirectorWatch({ root: dir, sessionName: "bf-abc", threadId: "123e4567-e89b-42d3-a456-426614174000", cursor: "m4.i0.b2.r", spawn: async () => {} });
+      const state = await armCodexDirectorWatch({ root: dir, sessionName: "bf-abc", threadId: "123e4567-e89b-42d3-a456-426614174000", cursor: "m4.i0.b2.rZmVlZDox", spawn: async () => {} });
       await cancelCodexDirectorWatch(dir, "bf-abc");
-      const prompt = `BFLOW_DIRECTOR_WAKE ${state.generation} m4.i0.b2.r\nBflow có sự kiện mới.`;
+      const prompt = `BFLOW_DIRECTOR_WAKE ${state.generation} m4.i0.b2.rZmVlZDox\nBflow có sự kiện mới.`;
       const { deps, ownerCall } = make({ cwd: dir, identify: async () => ({ root: dir, sessionName: "bf-abc" }), stdinText: JSON.stringify({ prompt }) });
       expect(await runDirectorCommand(parse(["hook", "codex"]), deps)).toBe(0);
       expect(ownerCall).not.toHaveBeenCalled();
@@ -256,6 +273,15 @@ describe("director hook", () => {
 });
 
 describe("director mcp", () => {
+  it("handles director_suspend locally with MCP token and thread id", async () => {
+    const suspendWatch = vi.fn(async () => undefined);
+    const { deps } = make({ suspendWatch, runMcp: (async options => {
+      const result = await options.call("director_suspend", "tid.secretsecretsecretsecret", { cursor: "m4.i0.b2.rZmVlZA", threadId: "123e4567-e89b-42d3-a456-426614174000" });
+      expect(result).toMatchObject({ status: "watching" });
+    }) as never });
+    expect(await runDirectorCommand(parse(["mcp"]), deps)).toBe(0);
+    expect(suspendWatch).toHaveBeenCalledOnce();
+  });
   it("delegates to runMcp without writing to stdout", async () => {
     const { deps, out } = make();
     expect(await runDirectorCommand(parse(["mcp"]), deps)).toBe(0);

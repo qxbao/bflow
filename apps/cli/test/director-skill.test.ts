@@ -34,19 +34,20 @@ describe("bflow-start director skill", () => {
   });
 
   it("embeds the skill version", () => {
-    expect(BFLOW_START_SKILL_VERSION).toBe("1.6.0");
+    expect(BFLOW_START_SKILL_VERSION).toBe("1.7.0");
     const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
-    expect(text).toContain("1.6.0");
+    expect(text).toContain("1.7.0");
     expect(text).toContain("BFLOW_DIRECTOR_TOKEN=<token> '/usr/bin/node' director call <tool> --json");
     expect(text).not.toContain("--token");
   });
 
   it("tells an idle Codex Director to suspend and end its turn until a queued event wakes it", () => {
     const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
-    expect(text).toContain("director suspend");
-    expect(text).toContain("CODEX_THREAD_ID");
+    expect(text).toContain("director_suspend");
+    expect(text).toContain("threadId");
     expect(text).toContain("end your turn");
     expect(text).toContain("BFLOW_DIRECTOR_WAKE");
+    expect(text).not.toMatch(/BFLOW_DIRECTOR_TOKEN=<token>[^\n]*director suspend/);
   });
 
   it("quotes each argv element with POSIX single quoting joined by spaces", () => {
@@ -178,7 +179,7 @@ describe("generated Director skills", () => {
   it("tells the Director to delegate a quick one-line edit, wait when idle and handle errors", () => {
     const text = renderBflowStartSkill({ bflowCommand: argv });
     expect(text).toMatch(/even for a one-line change: tell the user a Developer will make it and call `start_work`/);
-    expect(text).toMatch(/Codex only: when no item needs action/);
+    expect(text).toMatch(/Codex only: when idle/);
     expect(text).toMatch(/Bflow Web messages still reach you through `director_wait`/);
     expect(text).toMatch(/A tool error is information/);
     expect(text).toMatch(/no token streaming/);
@@ -205,8 +206,8 @@ describe("generated Director skills", () => {
   });
 
   it("uses only Director tool names that the Runtime exposes", { timeout: 60_000 }, async () => {
-    const { DIRECTOR_TOOLS } = await import("@bflow/runtime");
-    const known = new Set(DIRECTOR_TOOLS.map((tool: { name: string }) => tool.name));
+    const { DIRECTOR_TOOLS, DIRECTOR_LOCAL_MCP_TOOLS } = await import("@bflow/runtime");
+    const known = new Set([...DIRECTOR_TOOLS, ...DIRECTOR_LOCAL_MCP_TOOLS].map((tool: { name: string }) => tool.name));
     for (const [, render] of renderers) {
       const names = [...render({ bflowCommand: argv }).matchAll(/`([a-z]+(?:_[a-z]+)+)`/g)].map(match => match[1]!);
       expect(names.filter(name => !known.has(name) && name !== "user_decision_pending")).toEqual([]);

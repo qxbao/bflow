@@ -1,9 +1,10 @@
 import type { JsonValue } from "@bflow/contracts";
 import { fileURLToPath } from 'node:url';
 import { spawn } from "node:child_process";
+import { z } from "zod";
 import { restoreDirectorMachineEnvironment } from './director-machine-environment.js';
 import { environmentProcessRunner } from './environment-process.js';
-import { armCodexDirectorWatch, cancelCodexDirectorWatch, isCodexDirectorWakeMarker, queueCodexDirectorThread, readCodexDirectorWatchStatus, runCodexDirectorWatch } from "./director-wake.js";
+import { armCodexDirectorWatch, cancelCodexDirectorWatch, cancelCodexDirectorWatchIfThread, isCodexDirectorWakeMarker, queueCodexDirectorThread, readCodexDirectorWatchStatus, runCodexDirectorWatch } from "./director-wake.js";
 import { CLI_EXIT_CODES } from "./types.js";
 
 export type DirectorProvider = "claude" | "codex" | "agy";
@@ -11,6 +12,7 @@ const PROVIDERS: readonly DirectorProvider[] = ["claude", "codex", "agy"];
 const MAX_HOOK_STDIN_BYTES = 1024 * 1024;
 const HOOK_NOTE_TIMEOUT_MS = 3000;
 const HOOK_STDIN_DEADLINE_MS = 2000;
+const SuspendMcpArgs = z.object({ cursor: z.string().min(1).max(512), threadId: z.string().uuid() }).strict();
 
 export type DirectorArgs =
   | { readonly sub: "start"; readonly provider?: DirectorProvider | undefined; readonly json: boolean }
@@ -214,7 +216,9 @@ async function runStart(args: Extract<DirectorArgs, { sub: "start" }>, deps: Dir
     if (!isRecord(registered) || typeof registered.token !== "string") throw new Error("Host trả về phản hồi đăng ký không hợp lệ.");
     if (provider === "codex") await cancelCodexDirectorWatch(repository.root, repository.sessionName);
     const presence = isRecord(registered.session) ? registered.session.presence : undefined;
-    const out = { ok: true, token: registered.token, cursor: typeof registered.cursor === "string" ? registered.cursor : "", sessionId: repository.sessionName, repositoryRoot: repository.root, provider, presence };
+    const threadId = provider === "codex" ? z.string().uuid().safeParse(deps.env.CODEX_THREAD_ID) : undefined;
+    const out = { ok: true, token: registered.token, cursor: typeof registered.cursor === "string" ? registered.cursor : "", sessionId: repository.sessionName, repositoryRoot: repository.root, provider, presence,
+      ...(threadId?.success ? { threadId: threadId.data } : {}) };
     deps.stdout.write(args.json ? `${JSON.stringify(out)}\n` : `Director đã sẵn sàng (nhà cung cấp ${provider}, phiên ${repository.sessionName}).\n`);
     return 0;
   } catch (error) {
@@ -287,7 +291,15 @@ async function runMcp(deps: DirectorCommandDeps): Promise<number> {
     const repository = await deps.identify(deps.cwd);
     const opts = { repositoryPath: repository.root, sessionId: repository.sessionName };
     await deps.runMcp({
-      call: (name, token, a) => deps.toolCall(opts, token, name, a),
+      call: async (name, token, a) => {
+        if (name !== "director_suspend") return deps.toolCall(opts, token, name, a);
+        if (!deps.suspendWatch) throw new Error("Codex Director watcher unavailable");
+        const input = SuspendMcpArgs.parse(a);
+        await deps.toolCall(opts, token, "inspect", { view: "summary" });
+        await deps.suspendWatch({ root: repository.root, sessionName: repository.sessionName,
+          cursor: input.cursor, threadId: input.threadId, token });
+        return { status: "watching" };
+      },
       input: deps.stdin,
       output: deps.stdout as unknown as NodeJS.WritableStream
     });
@@ -308,12 +320,13 @@ async function runHook(provider: "claude" | "codex", deps: DirectorCommandDeps):
     const providerSession = isRecord(payload) ? payload.session_id : undefined;
     const sessionId = typeof providerSession === "string" && providerSession.length > 0 && providerSession.length <= 200 ? providerSession : undefined;
     const repository = await deps.identify(deps.cwd);
-    if (provider === "codex") {
-      if (isCodexDirectorWakeMarker(prompt)) return 0;
-      await cancelCodexDirectorWatch(repository.root, repository.sessionName);
-    }
-    await deps.ownerCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, "director_hook_note",
+    if (provider === "codex" && isCodexDirectorWakeMarker(prompt)) return 0;
+    const cancelledEarly = provider === "codex" && sessionId !== undefined
+      ? await cancelCodexDirectorWatchIfThread(repository.root, repository.sessionName, sessionId) : false;
+    const noted = await deps.ownerCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, "director_hook_note",
       { provider, prompt, ...(sessionId !== undefined ? { sessionId } : {}) }, HOOK_NOTE_TIMEOUT_MS);
+    if (provider === "codex" && !cancelledEarly && isRecord(noted) && noted.recorded === true)
+      await cancelCodexDirectorWatch(repository.root, repository.sessionName);
   } catch (error) {
     if (deps.env.BFLOW_DEBUG) { try { deps.stderr.write(`director hook: ${scrub(error instanceof Error ? error.message : String(error))}\n`); } catch {} }
   }
