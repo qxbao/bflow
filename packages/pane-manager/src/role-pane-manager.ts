@@ -1316,14 +1316,17 @@ export class RolePaneManager {
           cwd: this.#config.workspaceRoot, permanent: true,
           metadata: { launchIntent: true, launchQueued: true, ...(launch !== undefined ? { launchId: launch.launchId, launchFingerprint: launch.launchFingerprint } : {}) } } });
       if (!pending.ok) return pending;
-      if (restoredAgent && savedBinding && savedManifest) {
+      if (staleBinding && savedBinding && savedManifest) {
+        // Retain every replacement before closing the old pane, including an unchanged terminal with a stale launch.
         savedManifest = { ...savedManifest, panes: savedManifest.panes.map(binding => binding.bindingId === savedBinding.bindingId
           ? { ...binding, metadata: { ...binding.metadata, replacementLaunchIntent: JSON.parse(canonicalReceiptJson(pending.value)) } }
           : binding) };
         const reserved = await persistProgress();
         if (!reserved.ok) return reserved;
-        const checked = await this.#checkRestoredRole(restoredAgent, role, options);
-        if (!checked.ok) return checked;
+        if (restoredAgent) {
+          const checked = await this.#checkRestoredRole(restoredAgent, role, options);
+          if (!checked.ok) return checked;
+        }
       }
 
       // A restored shell without a native occupant cannot prove ownership. Leave

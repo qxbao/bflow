@@ -380,6 +380,44 @@ describe("launch env is applied at pane creation through the Herdr socket", () =
     assertNoTokens(runner);
   });
 
+  it.each([false, true])("retains the replacement for an original terminal when closure is uncertain (closed=%s)", async closed => {
+    const { runner, store, manager } = setup({ planner: plannerLaunch() });
+    const initial = await manager.initializeTopology();
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const planner = initial.value.panes.find(pane => pane.role === "planner")!;
+    const updatedLaunch = { ...plannerLaunch(), launchId: "launch-planner-2", launchFingerprint: "launch-planner-2-fingerprint" };
+    const fresh = createRolePaneManager({ config: config({}, { planner: updatedLaunch }), runner, store,
+      socket: runner.socket, worktreeInspector: inspector });
+    const run = runner.run.bind(runner);
+    let failClose = true;
+    runner.run = async invocation => {
+      if (failClose && invocation.args[0] === "pane" && invocation.args[1] === "close" && invocation.args[2] === planner.paneId) {
+        if (closed) await run(invocation);
+        return { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: true };
+      }
+      return run(invocation);
+    };
+    const paneCount = runner.panes.size;
+    expect(await fresh.reconcileTopology()).toMatchObject({ ok: false });
+    const retained = await store.load("bflow-env-test");
+    const receipt = retained.ok && retained.value?.panes.find(pane => pane.role === "planner")?.metadata?.replacementLaunchIntent;
+    expect(receipt).toBeDefined();
+    const replacement = PaneBindingSchema.parse(receipt);
+    if (!closed) {
+      expect(await fresh.reconcileTopology()).toMatchObject({ ok: false });
+      expect(runner.panes.size).toBe(paneCount + 1);
+    }
+    failClose = false;
+    const result = await fresh.reconcileTopology();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.panes.find(pane => pane.role === "planner")?.paneId).toBe(replacement.paneId);
+    expect(runner.panes.size).toBe(paneCount);
+    expect(runner.panes.has(planner.paneId)).toBe(false);
+    assertNoTokens(runner);
+  });
+
   it.each([
     { withEnv: true, retainedManifest: false },
     { withEnv: true, retainedManifest: true },
