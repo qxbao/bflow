@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
+import { PaneBindingSchema } from "@bflow/contracts";
 import { createRolePaneManager } from "../src/role-pane-manager.js";
 import { InMemorySessionManifestStore } from "../src/manifest-store.js";
 import type { AgentLaunchProfile, CommandInvocation, CommandOutcome, HerdrCommandRunner } from "../src/types.js";
@@ -33,6 +34,8 @@ class ShellHerdr implements HerdrCommandRunner {
   bootstrapSent = false;
   changedIdentity: "terminal" | "pid" | "busy" | undefined;
   unsupportedShell = false;
+  uncertainStart = false;
+  closeFails = true;
   constructor(readonly child: ChildProcessWithoutNullStreams, readonly proof: string) {}
   async run(invocation: CommandInvocation): Promise<CommandOutcome> {
     this.calls.push(invocation);
@@ -55,7 +58,12 @@ class ShellHerdr implements HerdrCommandRunner {
       if (this.unknownBootstrap) return { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: true };
       return this.nonemptyBootstrap ? reply({ type: "ok" }) : { exitCode: 0, stdout: "", stderr: "", started: true };
     }
+    if (domain === "pane" && action === "close") {
+      return this.closeFails ? { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: true } : reply({ type: "ok" });
+    }
+    if (domain === "agent" && action === "get") return { exitCode: 1, stdout: "", stderr: JSON.stringify({ id: "1", error: { code: "agent_not_found", message: "not found" } }) };
     if (domain === "agent" && action === "start") {
+      if (this.uncertainStart) return { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: true };
       this.child.stdin.write("codex\n");
       await eventuallyFile(this.proof);
       return reply({ type: "agent_started", agent: { ...pane, name: "dev-test", agent: "codex", interactive_ready: true,
@@ -89,8 +97,16 @@ async function fixture(shell: "bash" | "zsh", shadow = "all") {
   const runner = new ShellHerdr(child, proof), store = new InMemorySessionManifestStore();
   const manager = () => createRolePaneManager({ config: { sessionId: "test-session", projectName: "test", workspaceRoot: root }, runner, store,
     worktreeInspector: { inspect: async () => ({ ok: true, value: { exists: false, isClean: true, dirtyFiles: [] } }) } });
+    const conversation = PaneBindingSchema.parse({ schemaVersion: 2, bindingId: "binding-chat", sessionId: "test-session",
+      role: "conversation", paneGroup: "conversation", agentId: "chat", workspaceId: "ws-1", tabId: "tab-1", paneId: "pane-chat",
+      provider: "herdr", agentKind: "codex", cwd: root, isolationMode: "dedicated_pane", readOnlyWorkspace: true,
+      transportState: "idle", boundAt: new Date().toISOString() });
+    expect(await store.save({ schemaVersion: 2, sessionId: "test-session", projectName: "test", workspaceRoot: root,
+      herdrWorkspaceId: "ws-1", herdrTabId: "tab-1", attachTarget: { role: "conversation", paneId: "pane-chat" }, status: "down", conversationSessionId: "conv-1", activeRunIds: [], panes: [conversation],
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })).toMatchObject({ ok: true });
+
   const request = { role: "developer" as const, paneId: "pane-1", workspaceId: "ws-1", tabId: "tab-1", cwd: root, agentName: "dev-test", agentKind: "codex", launch };
-  return { root, scope, runner, manager, request, launch, proof, child };
+  return { root, scope, runner, manager, request, launch, proof, child, store, conversation };
 }
 
 describe.skipIf(process.platform !== "linux")("supervised provider shell startup", () => {
@@ -148,6 +164,24 @@ describe.skipIf(process.platform !== "linux")("supervised provider shell startup
     expect(await f.manager().startAgentInPane(f.request)).toMatchObject({ ok: false });
     expect(f.runner.calls.filter(call => call.args[0] === "pane" && call.args[1] === "run")).toHaveLength(0);
     expect(f.runner.calls.filter(call => call.args[0] === "agent" && call.args[1] === "start")).toHaveLength(0);
+  });
+  it("retains a scoped non-profile launch intent through uncertain start and failed closure", async () => {
+    const f = await fixture("bash"); f.runner.uncertainStart = true;
+    const request = { ...f.request, permanent: false, worktreePath: f.root,
+      metadata: { taskId: "task-1", runId: "run-1", allocationStatus: "active" } };
+    expect(await f.manager().startAgentInPane(request)).toMatchObject({ ok: false });
+    const retained = await f.store.load("test-session");
+    expect(retained.ok && retained.value?.panes.find(pane => pane.paneId === "pane-1")).toMatchObject({
+      paneId: "pane-1", terminalId: "term-1", metadata: { taskId: "task-1", runId: "run-1", launchId: "launch-1",
+        processScopeId: f.launch.env.BFLOW_PROCESS_SCOPE_ID, launchIntent: true } });
+    expect(await f.manager().releaseDeveloper({ taskId: "task-1", closePane: true })).toMatchObject({ ok: false });
+    expect(await f.store.load("test-session")).toEqual(retained);
+    expect(await f.manager().allocateDeveloper({ taskId: "task-1", worktreePath: f.root, launch: f.launch })).toMatchObject({ ok: false });
+    expect(await f.store.load("test-session")).toEqual(retained);
+    expect(f.runner.calls.filter(call => call.args[0] === "agent" && call.args[1] === "start")).toHaveLength(1);
+    f.runner.closeFails = false;
+    expect(await f.manager().releaseDeveloper({ taskId: "task-1", closePane: true })).toMatchObject({ ok: true, value: { paneClosed: true } });
+    expect(await f.store.load("test-session")).toMatchObject({ ok: true, value: { panes: [f.conversation] } });
   });
   it("rejects malformed scope fields before any Herdr side effect", async () => {
     const f = await fixture("bash");
