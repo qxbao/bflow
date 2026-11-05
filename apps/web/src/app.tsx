@@ -117,7 +117,7 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
   const id=project.projectId,base=`/projects/${encodeURIComponent(id)}`,navigate=useNavigate();
   // The Director desk and queue board read the shared Director state (Task 5) as a projection; the scene and model never call the API.
   const d=useDirector();
-  const directorInput=useMemo<OfficeDirectorInput|undefined>(()=>d.directorLayout?{layout:d.layout,directorLayout:true,presence:d.presence,provider:d.provider,heartbeatAt:d.heartbeatAt,waitingSince:d.waitingSince,issues:d.presence!=='unknown'?d.view?.snapshot.issues:undefined}:undefined,
+  const directorInput=useMemo<OfficeDirectorInput>(()=>({layout:d.layout,directorLayout:d.directorLayout,presence:d.presence,provider:d.provider,heartbeatAt:d.heartbeatAt,waitingSince:d.waitingSince,issues:d.presence!=='unknown'?d.view?.snapshot.issues:undefined}),
     [d.directorLayout,d.layout,d.presence,d.provider,d.heartbeatAt,d.waitingSince,d.view]);
   const state=useOfficeModel({api,id,session,connection,revision,director:directorInput});
   const {model,runs,stale,overflow,workforce,decisions,authRequired,error}=state;
@@ -195,7 +195,7 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
     {frame.hud && createPortal(<OfficeHud projectName={project.displayName} projects={projects} projectId={id} onProject={next=>navigate(next?`/projects/${encodeURIComponent(next)}`:'/')} session={session} model={model} runs={runs} connection={connection} stale={stale} failed={error!==undefined&&!authRequired&&!model} authRequired={authRequired} mode={frame.mode} onMode={frame.setMode} panelOpen={frame.panelOpen} overflow={overflow}
       onOverview={frame.openOverview} onNavigate={path=>{if(path==='')frame.openOverview();else go(`${base}/${path}`);}} onDocuments={()=>openInspector({kind:'cabinet'})} onRefresh={refresh}
       onFocusZone={focusZone} onAgentList={()=>openInspector({kind:'unseated'})}
-      director={directorInput?{canSend:d.chat.canSend,presenceLabel:presenceLabels[d.presence]}:undefined} onQueue={()=>openInspector({kind:'queue'})}
+      director={d.directorLayout?{canSend:d.chat.canSend,presenceLabel:presenceLabels[d.presence]}:undefined} onQueue={()=>openInspector({kind:'queue'})}
       onChatDraft={draft=>{openInspector(undefined);navigate(`${base}/chat`,{state:{draft}});}} dock={<OperationsDock/>} dockSummary={dockSummary} onDockHeight={frame.setDockPx}/>,frame.hud)}
   </>;
 }

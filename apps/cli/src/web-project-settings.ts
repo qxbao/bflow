@@ -6,6 +6,7 @@ import { ContractErrorSchema, type OperationResult } from '@bflow/contracts';
 import { WebProjectSchema, WebProjectConfigurationSchema, WebConfigurationSaveSchema, WebProjectInitRequestSchema,
   WebProjectInitializationSchema, WebProjectMutationStatusResultSchema, WebSessionStartRequestSchema, type WebProject, type WebProjectConfiguration, type WebConfigurationSave,
   type WebProjectInitRequest, type WebProjectInitialization } from '@bflow/contracts/web';
+import { installDirectorFiles } from './init-director.js';
 import { commitWebConfiguration } from './web-config-git.js';
 import { identifyRepository } from './repository.js';
 import { initializeEnvironmentConfig, readEnvironmentConfig } from './environment-config.js';
@@ -145,7 +146,7 @@ export function createWebProjectSettings(options:WebProjectSettingsOptions){
     const info=await lstat(options.receiptDirectory);
     if(!info.isDirectory() || await realpath(options.receiptDirectory)!==options.receiptDirectory || info.uid!==process.getuid?.() || (info.mode&0o077))throw Error('Unsafe initialization receipt directory');
     let file:Awaited<ReturnType<typeof open>>|undefined;try{file=await open(path,'wx',0o600);}catch(e){if((e as NodeJS.ErrnoException).code==='EEXIST'){const saved=ReceiptSchema.parse(JSON.parse(await readPreviewFile(path,MAX_RECEIPT_BYTES)));if(JSON.stringify(saved.request)!==JSON.stringify(request))return failure('Mã khởi tạo đã được dùng với lựa chọn khác.','conflict');return {ok:true,value:await readJob(id,request.operationId)};}throw e;}
-    const initial:WebProjectInitialization={apiVersion:1,projectId:id,operationId:request.operationId,state:'running',message:'Đang chuẩn bị cấu hình, chỉ mục GitNexus và đăng ký Gateway…',updatedAt:new Date().toISOString()};
+    const initial:WebProjectInitialization={apiVersion:1,projectId:id,operationId:request.operationId,state:'running',message:'Đang chuẩn bị cấu hình, cài kỹ năng Director, chỉ mục GitNexus và đăng ký Gateway…',updatedAt:new Date().toISOString()};
     try{await file.writeFile(JSON.stringify(ReceiptSchema.parse({request,result:initial})));await syncHandleSafe(file);await file.close();file=undefined;await syncDirectorySafe(options.receiptDirectory);}finally{await file?.close().catch(()=>{});}
     activeProjects.set(path,id);
     let configurationCommitMessage:string|undefined;
@@ -170,10 +171,13 @@ export function createWebProjectSettings(options:WebProjectSettingsOptions){
       if(!onlyGeneratedMissingIgnore && afterInit.revision!==request.expectedConfigurationRevision)
         throw Error('Cấu hình đã đổi trong khởi tạo. Đọc lại cấu hình trước khi commit.');
      }
+     const director=await installDirectorFiles(r.root);
+     if(director.report.status==='failed')throw Error(director.diagnostics.join('\n'));
+     const directorDiagnostics=['Đã cài kỹ năng Director trong kho: /bflow-start, /bflow-status, /bflow-queue.',...director.diagnostics];
      const gitMessage=request.commitConfiguration?await commitWebConfiguration(r.root):undefined;configurationCommitMessage=gitMessage;
-     if(config.environment.tools?.gitnexus?.enabled===false)return {status:'ready',diagnostics:[...(gitMessage?[gitMessage]:[]),'Cấu hình đã sẵn sàng. GitNexus đang tắt trong cấu hình.']};
+     if(config.environment.tools?.gitnexus?.enabled===false)return {status:'ready',diagnostics:[...directorDiagnostics,...(gitMessage?[gitMessage]:[]),'Cấu hình đã sẵn sàng. GitNexus đang tắt trong cấu hình.']};
      const result=await (options.prepareGitNexus??prepareRepositoryGitNexus)({repository:r,platform:resolveSetupPlatform()});
-     return {...result,diagnostics:[...(gitMessage?[gitMessage]:[]),...result.diagnostics]};
+     return {...result,diagnostics:[...directorDiagnostics,...(gitMessage?[gitMessage]:[]),...result.diagnostics]};
     }).then(result=>writeReceipt({...initial,state:result.status==='ready'?'succeeded':'failed',message:(result.diagnostics.join('\n') || 'Đã khởi tạo cấu hình, tạo chỉ mục và đăng ký GitNexus với Gateway.').slice(0,16000),updatedAt:new Date().toISOString()},request),e=>writeReceipt({...initial,state:'failed',message:[configurationCommitMessage,String(e instanceof Error?e.message:e)].filter(Boolean).join('\n').slice(0,16000),updatedAt:new Date().toISOString()},request)).finally(()=>{pending.delete(path);activeProjects.delete(path);});
     pending.set(path,task);void task.catch(()=>{});return {ok:true,value:initial};
    }catch(e){return failure(e);}

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, readFile, stat, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, stat, mkdir, writeFile, cp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
@@ -141,4 +141,20 @@ it('a custom logger requires terminal opt-in even when the surrounding process h
  const descriptor=Object.getOwnPropertyDescriptor(process.stdout,'isTTY');Object.defineProperty(process.stdout,'isTTY',{configurable:true,value:true});
  try {const {output}=await start({isTerminal:undefined});expect(output.join('')).not.toContain('#');}
  finally {if(descriptor)Object.defineProperty(process.stdout,'isTTY',descriptor);else Reflect.deleteProperty(process.stdout,'isTTY');}
+});
+
+it('pins served assets and replaces an authenticated owner after the build changes',async()=>{
+ const assets=join(await home(),'client');await cp(getWebAssetDirectory(),assets,{recursive:true});
+ const first=await start({assetsDirectory:assets});
+ const before=await (await fetch(first.server.origin)).text();
+ const entry=before.match(/src="([^"]+\.js)"/)![1]!;
+ const old=await (await fetch(new URL(entry,first.server.origin))).text();
+ await writeFile(join(assets,entry.slice(1)),old+'\n// replacement build\n');
+ expect(await (await fetch(new URL(entry,first.server.origin))).text()).toBe(old);
+ const next=await start({stateDirectory:first.stateDirectory,port:Number(new URL(first.server.origin).port),assetsDirectory:assets});
+ expect(next.server.reused).toBe(false);expect(next.server.origin).toBe(first.server.origin);
+ expect(await (await fetch(new URL(entry,next.server.origin))).text()).toContain('// replacement build');
+ // Closing a retired handle cannot remove or stop the replacement owner.
+ await first.server.close();expect((await fetch(next.server.origin)).status).toBe(200);
+ expect(JSON.parse(await readFile(join(first.stateDirectory,'instance.json'),'utf8')).buildId).toMatch(/^[a-f0-9]{64}$/);
 });

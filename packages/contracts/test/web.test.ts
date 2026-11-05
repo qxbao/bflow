@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  WebCommandSchema, WebOperationSchema, WebApiErrorSchema, WebApiErrorStatus,
+  WebProjectInspectionSchema, WebCommandSchema, WebOperationSchema, WebApiErrorSchema, WebApiErrorStatus,
   WebRunViewSchema, WebSessionBootstrapRequestSchema, WebChatSendSchema,
   WebPageQuerySchema, WebArtifactChunkSchema, WebArtifactReadSchema, WebHttpContracts, WebRunHttpQuerySchema
 } from "../src/web.js";
@@ -147,4 +147,10 @@ describe("local web version-1 contracts", () => {
     } finally { rmSync(temporary, { recursive: true, force: true }); }
     expect(visited.size).toBeGreaterThan(1);
   });
+});
+
+it('roundtrips each readiness severity and rejects unknown check states',()=>{
+ const report={apiVersion:1,projectId:'project-test',ready:false,checks:['passed','failed','warning','unsupported'].map(state=>({id:state,state,message:state})),observedAt:now};
+ expect(WebProjectInspectionSchema.parse(report)).toEqual(report);
+ expect(WebProjectInspectionSchema.safeParse({...report,checks:[{id:'bad',state:'ready',message:'bad'}]}).success).toBe(false);
 });

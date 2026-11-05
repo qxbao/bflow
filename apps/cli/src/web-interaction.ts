@@ -207,15 +207,14 @@ export function createWebInteractionServices(context: InteractionComposition, de
     if(await readPresence(project,hostSessionId)!=='host_stopped')return directorUnavailable();
     const repository=await identifyRepository(project.canonicalPath);
     await readEnvironmentConfig(repository);
-    let legacy=false;
     try{
       const manifest=SessionManifestSchema.parse(JSON.parse(await readPreviewFile(join(project.canonicalPath,'.bflow/state/session.json'),4*1024*1024)));
       if(manifest.sessionId!==hostSessionId || manifest.workspaceRoot!==project.canonicalPath)return directorUnavailable();
-      legacy=manifest.schemaVersion===2 && manifest.status!=='down';
     }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
     const at=new Date().toISOString();
     return {ok:true as const,value:WebDirectorViewSchema.parse({apiVersion:1,projectId:project.projectId,
-      layout:legacy?'legacy_v2':'not_started',snapshot:{schemaVersion:1,generatedAt:at,director:{presence:'absent'},
+      // The stopped host cannot have a live v2 topology, even if its last manifest still says up.
+      layout:'not_started',snapshot:{schemaVersion:1,generatedAt:at,director:{presence:'absent'},
         runs:[],pendingApprovals:0,pendingQuestions:0,issues:[]},transcriptSeq:0,cliCaptureMayBeIncomplete:true,observedAt:at})};
   };
   const director:LocalWebDirectorServices={

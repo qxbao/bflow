@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { request } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import type { LocalWorkspaceServices, WebProject } from '@bflow/contracts/web';
+import { SessionManifestSchema } from '@bflow/contracts';
 import { createWebInteractionServices } from '../src/web-interaction.js';
 import { createWebWorkspaceServices } from '../src/web-workspace-services.js';
 import { initializeEnvironmentConfig } from '../src/environment-config.js';
@@ -269,4 +270,18 @@ it('refuses a Director view whose session differs from the host manifest Convers
     { openDirector: openDirector as never, sessionId: async () => 'host-1', director: { conversationSessionId: async () => undefined } });
   served = view('conv-foreign');
   expect(await unknown.director.readView(project.projectId, browser())).toMatchObject({ ok: true });
+});
+
+it('uses the Director cold-start layout when a stopped host has an old up v2 manifest',async()=>{
+ const {project}=await repository();await initializeEnvironmentConfig({cwd:project.canonicalPath});
+ const raw=JSON.parse(await readFile(new URL('../../../packages/contracts/test/fixtures/session-manifest-v2-real.json',import.meta.url),'utf8'));
+ const manifest=SessionManifestSchema.parse({...raw,sessionId:'host-1',workspaceRoot:project.canonicalPath,status:'up',
+  panes:raw.panes.map((p:Record<string,unknown>)=>({...p,sessionId:'host-1',cwd:project.canonicalPath}))});
+ await mkdir(join(project.canonicalPath,'.bflow/state'),{recursive:true});
+ const path=join(project.canonicalPath,'.bflow/state/session.json');await writeFile(path,JSON.stringify(manifest));
+ const before=await readFile(path,'utf8');
+ const services=createWebInteractionServices({principalId:'ledger',resolveProject:async()=>project},{sessionId:async()=> 'host-1',
+  openDirector:(async()=>{throw Error('Host stopped');}) as never,director:{readPresence:async()=> 'host_stopped'}});
+ expect(await services.director.readView(project.projectId,browser())).toMatchObject({ok:true,value:{layout:'not_started',snapshot:{director:{presence:'absent'}}}});
+ expect(await readFile(path,'utf8')).toBe(before);
 });

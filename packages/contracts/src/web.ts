@@ -104,8 +104,10 @@ export const WebProjectSchema = z.object({ apiVersion: version, projectId: id, d
 export const WebProjectSessionSchema = z.object({ apiVersion: version, projectId: id, sessionId: id.optional(),
   state: z.enum(["stopped", "starting", "ready", "stopping", "unavailable"]), conversationStatus: ConversationSessionStatusSchema.optional(),
   pendingIntakes: z.array(WebIntakeViewSchema).max(100), blockers: z.array(WebBlockerSchema).max(100), updatedAt: time }).strict();
+// D-WEB-READINESS-01 (project owner approved, 2026-11-05): preserve doctor warnings across CLI -> Web.
+// Existing values remain valid. Deploy contracts, CLI/local-server and Web together; older Web clients must reload.
 export const WebProjectInspectionSchema = z.object({ apiVersion: version, projectId: id, ready: z.boolean(),
-  checks: z.array(z.object({ id, state: z.enum(["passed", "failed", "unsupported"]), message: text }).strict()).max(100), observedAt: time }).strict();
+  checks: z.array(z.object({ id, state: z.enum(["passed", "failed", "warning", "unsupported"]), message: text }).strict()).max(100), observedAt: time }).strict();
 export const WebProjectPreviewSchema = z.object({ apiVersion: version, projectId: id, available: z.boolean(), summary: text,
   blockers: z.array(WebBlockerSchema).max(100), observedAt: time }).strict();
 export const WebPageQuerySchema = z.object({ cursor: token.optional(), limit: z.number().int().min(1).max(100).default(25) }).strict();

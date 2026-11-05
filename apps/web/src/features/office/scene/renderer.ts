@@ -130,6 +130,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   scene.background = new Color(BACKGROUND);
   scene.fog = new FogExp2(BACKGROUND, 0.004);
   const stage = new Stage(lease.models.furniture.scene as unknown as Group, () => { dirty = true; wake(); });
+  stage.setZoneTitles(zoneTitles(undefined));
   scene.add(stage.group);
   const kit = new MarkKit();
   const proxyGeometry = new BoxGeometry(1, 1, 1);
@@ -249,7 +250,8 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const tags = new Map<string, { label: string; pose: string; text: string; id: string; bubbleId: string; sleepId: string }>();
   let excerpts: ReadonlyMap<string, string> = new Map();
   let agentsById = new Map<string, OfficeModel['agents'][number]>();
-  let directorText = '', boardText = '', directorSigns = false;
+  let directorText = '', boardText = '';
+  let signLayout: OfficeModel['layout'] = 'unknown';
   const pt = { x: 0, y: 0 };
   /** Projects to host pixels; false when behind the camera or outside the safe area (the HUD and panel inset). */
   const project = (x: number, y: number, z: number, w: number, h: number): boolean => {
@@ -479,8 +481,9 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       syncActors();
       syncDirector(model);
       syncMarks(model);
-      // Signs are retitled only when the layout changes (the Stage is built with the legacy titles).
-      if ((model.director !== undefined) !== directorSigns) { directorSigns = model.director !== undefined; stage.setZoneTitles(zoneTitles(directorSigns)); }
+      // Keep the first frame neutral until the topology read confirms its layout.
+      const layout = model.layout ?? (model.director ? 'director' : 'legacy_v2');
+      if (layout !== signLayout) { signLayout = layout; stage.setZoneTitles(zoneTitles(layout === 'unknown' ? undefined : layout === 'director')); }
       directorText = model.director ? directorTag(model.director.presence) : '';
       boardText = model.director ? `Sự cố: ${queueText(model.queue)}` : '';
       // Closed session: the office is dimmed but furniture stays visible. The last saved data stays visible.

@@ -270,8 +270,8 @@ export const ZONE_TITLES: readonly { id: ZoneId; text: string }[] = [
  * room, whose specialists now work for the Director (there is no Coordinator), is the Director Team; legacy v2 keeps its titles.
  */
 export const DIRECTOR_ZONE_TITLES: Readonly<Partial<Record<ZoneId, string>>> = { conversation: 'Director', coordination: 'Director Team' };
-export function zoneTitles(director: boolean): { id: ZoneId; text: string }[] {
-  return ZONE_TITLES.map(t => { const text = director ? DIRECTOR_ZONE_TITLES[t.id] : undefined; return text ? { ...t, text } : t; });
+export function zoneTitles(director: boolean | undefined): { id: ZoneId; text: string }[] {
+  return ZONE_TITLES.map(t => { const text = director === undefined ? ({ conversation: 'Điều hành', coordination: 'Chuyên môn' } as Partial<Record<ZoneId, string>>)[t.id] : director ? DIRECTOR_ZONE_TITLES[t.id] : undefined; return text ? { ...t, text } : t; });
 }
 export interface ZoneSign { id: ZoneId; text: string; x: number; y: number; z: number; w: number; h: number }
 /** Signs face +z (south, towards the camera). Back rooms: on the north wall above head height; the board: on its top frame; front rooms: standing on the partition top, facing south (clear of the water coolers below). */
