@@ -494,7 +494,9 @@ export async function planChromeSession(input: {
 
 /**
  * Chrome leaves SingletonLock (a symlink to "<host>-<pid>") behind when it dies uncleanly. A lock owned by a dead
- * process on this host is stale; anything else (live pid, other host, non-symlink) is kept and blocks reuse.
+ * process on this host is stale. On Linux a pre-boot lock can also outlive its PID, now owned by an unrelated
+ * process; require an absent browser socket and a readable owner command line before recovering that case.
+ * Active or uncertain owners, other hosts and non-symlinks keep blocking reuse.
  */
 async function clearStaleChromeSingleton(profileDir: string): Promise<void> {
   let target: string;
@@ -502,7 +504,21 @@ async function clearStaleChromeSingleton(profileDir: string): Promise<void> {
   catch { return; }
   const match = /^(.*)-(\d+)$/.exec(target);
   if (!match || match[1] !== hostname()) return;
-  try { process.kill(Number(match[2]), 0); return; }
+  try {
+    process.kill(Number(match[2]), 0);
+    if (process.platform !== "linux") return;
+    const lock = await lstat(join(profileDir, "SingletonLock"));
+    const boot = /^btime (\d+)$/m.exec(await readFile("/proc/stat", "utf8"));
+    if (!boot || lock.mtimeMs >= Number(boot[1]) * 1000 - 1000) return;
+    const command = await readFile(`/proc/${match[2]}/cmdline`, "utf8");
+    if (!command || command.includes(profileDir)) return;
+    try { await realpath(join(profileDir, "SingletonSocket")); return; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return; }
+    // Recheck the lock identity after asynchronous owner/socket observations.
+    const current = await lstat(join(profileDir, "SingletonLock"));
+    if (current.ino !== lock.ino || current.mtimeMs !== lock.mtimeMs ||
+        await readlink(join(profileDir, "SingletonLock")) !== target) return;
+  }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return; }
   for (const name of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) await rm(join(profileDir, name), { force: true });
 }
