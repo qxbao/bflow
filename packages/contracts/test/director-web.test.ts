@@ -183,6 +183,7 @@ describe("D-CD-01 operation ownership and per-kind results", () => {
       operation({ owner: "host_interaction", operationKind: "issue_retry", result: { kind: "issue", issueId: "issue-1", status: "retrying" } }),
       operation({ owner: "host_interaction", operationKind: "issue_dismiss", result: { kind: "issue", issueId: "issue-1", status: "dismissed" } }),
       operation({ owner: "local_lifecycle", operationKind: "director_launch", result: launchResult }),
+      operation({ owner: "local_lifecycle", operationKind: "director_launch", result: { ...launchResult, provider: "agy", mode: "background_started" } }),
       operation({ owner: "local_lifecycle", operationKind: "director_launch", state: "running" }),
       operation({ owner: "local_lifecycle", operationKind: "director_launch", state: "reconciliation_required",
         error: { apiVersion: 1, code: "reconciliation_required", message: "Launch outcome unknown", retryable: false, correlationId: "c" } }),

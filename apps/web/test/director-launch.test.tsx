@@ -66,6 +66,14 @@ it('shows the manual command with a copy confirmation',async()=>{
   expect(await screen.findByText('Đã sao chép lệnh.')).toBeTruthy();
   expect(navigator.clipboard.writeText).toHaveBeenCalledWith(manual);
 });
+it('reports a background Director launch without claiming a terminal window opened',async()=>{
+  launchServer({launch:()=>({state:'applied',result:{kind:'director_launch',provider:'agy',mode:'background_started',manualCommand:"bflow open --provider agy",launchedAt:at}})});
+  render(open());
+  fireEvent.click(await startButton());await screen.findByRole('radiogroup');
+  fireEvent.click(screen.getByRole('button',{name:'Mở terminal Director'}));
+  expect(await screen.findByText(/Director chạy nền/)).toBeTruthy();
+  expect(screen.queryByText(/Đã mở cửa sổ terminal/)).toBeNull();
+});
 it('an uncertain launch is observed only: retrying never posts a second launch',async()=>{
   const {calls}=launchServer({launch:()=>new TypeError('lost')});render(open());
   fireEvent.click(await startButton());await screen.findByRole('radiogroup');

@@ -7,7 +7,7 @@
 ## Provider design
 
 - **Codex:** retain the tested `codex queue --resume` path.
-- **Claude Code:** extend the existing project MCP server with the documented `claude/channel` capability. On `director_suspend`, the provider-local server long-polls the host and sends one `notifications/claude/channel` wake to the same interactive session. Launch with the documented development-channel flag only where the installed Claude version supports it; if channel registration is denied, the Director keeps its normal wait loop and reports that it cannot sleep. Do not use private inbox wire frames or `--resume` on a running session.
+- **Claude Code:** on the installed 2.1.318 CLI, channel flags are absent. Run one Bflow-supervised `claude -p --input-format stream-json --output-format stream-json` process, with one input message per event, using the documented persistent streaming mode. Avoid `--resume` on a running session and private inbox wire frames. Show user interaction through Bflow Web.
 - **Agy:** run one Bflow-supervised `agy --input-format stream-json --output-format stream-json` process per repository, started from the existing Agy launch flow. Feed initial Director instructions, then wait for host events outside the model and write one NDJSON `user` event to its stdin per wake. Show transcript and approvals through Bflow Web. Do not start a second Agy client for a live conversation or infer success from the process alone.
 
 ## Shared invariants
@@ -21,8 +21,8 @@
 
 ## Tasks
 
-1. Claude channel adapter: capability, event notification and launch wiring; tests for empty waits, one wake, denial and no token leak.
-2. Agy supervisor: one stream JSON process, queue and lifecycle; tests with a fake Agy binary for two turns, no idle model calls, crash/restart and duplicate launch.
-3. Integrate provider selection into generated skill/guide/CLI and Web launch, update version and docs.
+1. Provider-neutral stream JSON supervisor: one process, queue and lifecycle; tests with fake binaries for two turns, no idle model calls, crash/restart and duplicate launch.
+2. Claude/Agy adapters: exact args and message/event codecs per installed CLI; tests for both providers and no token leak.
+3. Integrate provider selection into generated skill/guide/CLI and Web launch, update version and docs. Add the compatible `background_started` Web launch mode with a documented contract decision, while preserving old modes.
 4. Verify dependency graph, typecheck, focused tests, affected tests and built CLI smoke. Record live evidence separately from source/local tests.
 5. Review the combined diff, fix material findings, merge locally into `main`, then verify the merged result. Preserve the unrelated untracked plan in `main`.

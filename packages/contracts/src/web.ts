@@ -130,7 +130,7 @@ export const WebOperationResultSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("intake"), intakeId: id }).strict(),
   z.object({ kind: z.literal("lifecycle"), session: WebProjectSessionSchema }).strict(),
   z.object({ kind: z.literal("issue"), issueId: id, status: ParkedIssueStatusSchema }).strict(),
-  z.object({ kind: z.literal("director_launch"), provider: AgentProviderIdSchema, profileName: WebDirectorProfileNameSchema.optional(), mode: z.enum(["terminal_opened", "manual_command"]),
+  z.object({ kind: z.literal("director_launch"), provider: AgentProviderIdSchema, profileName: WebDirectorProfileNameSchema.optional(), mode: z.enum(["terminal_opened", "manual_command", "background_started"]),
     manualCommand: nonblank(4096), launchedAt: time }).strict()
 ]);
 export const WebOperationKindSchema = z.enum([...WebCommandKindSchema.options, ...WebIssueCommandKindSchema.options,

@@ -59,7 +59,7 @@ export function DirectorLaunch({label='Mở phiên Director'}:{label?:string}){
   const freshHeartbeat=Number.isFinite(heartbeat)&&Number.isFinite(launched)&&heartbeat>launched;
   const arrived=Boolean(result&&present&&freshHeartbeat&&sawAbsent===commandId);
   const unconfirmedPresent=Boolean(result&&present&&!arrived);
-  const waitingForDirector=Boolean(result?.mode==='terminal_opened'&&!arrived&&Date.now()-Date.parse(result.launchedAt)<PRESENCE_WAIT_MS);
+  const waitingForDirector=Boolean((result?.mode==='terminal_opened'||result?.mode==='background_started')&&!arrived&&Date.now()-Date.parse(result.launchedAt)<PRESENCE_WAIT_MS);
   useEffect(()=>{if(!waitingForDirector)return;const poll=setInterval(d.reload,PRESENCE_POLL_MS);return()=>clearInterval(poll);},[waitingForDirector,d.reload]);
   // Re-render once the wait window ends so the "please wait" text is replaced even without another presence change.
   const [,setExpired]=useState(0);
@@ -139,6 +139,7 @@ export function DirectorLaunch({label='Mở phiên Director'}:{label?:string}){
     </div>}
     {result?.profileName&&<p className="my-1 text-sm">Profile Director: {result.profileName}</p>}
     {result?.mode==='terminal_opened'&&<p role="status" className="my-2 text-sm">{arrived?'Director đã có mặt và đang nhận tin.':unconfirmedPresent?`Đã mở cửa sổ terminal lúc ${time(result.launchedAt)}. Có Director đang có mặt, nhưng chưa xác nhận đây là phiên mới vừa mở.`:waitingForDirector?`Đã mở cửa sổ terminal lúc ${time(result.launchedAt)}. Việc này chưa có nghĩa Director đã sẵn sàng; hãy đợi trạng thái chuyển sang “Đang hoạt động” hoặc “Đang chờ”.`:`Đã mở cửa sổ terminal lúc ${time(result.launchedAt)}. Không thấy Director đăng ký sau khi mở cửa sổ; kiểm tra cửa sổ terminal hoặc mở lại.`}</p>}
+    {result?.mode==='background_started'&&<p role="status" className="my-2 text-sm">{arrived?'Director chạy nền đã có mặt và đang nhận tin qua Bflow Web.':unconfirmedPresent?'Director chạy nền đã được yêu cầu khởi động. Có Director đang có mặt, nhưng chưa xác nhận đây là phiên mới.':waitingForDirector?'Director chạy nền đang khởi động. Hãy đợi trạng thái chuyển sang “Đang hoạt động” hoặc “Đang chờ”.':'Director chạy nền chưa đăng ký sau khi khởi động; kiểm tra trạng thái bằng bflow director watch-status.'}</p>}
     {result?.mode==='terminal_opened'&&!arrived&&<details className="my-1"><summary className="text-sm">Không thấy cửa sổ? Lệnh tự chạy</summary><CopyCommand command={result.manualCommand}/></details>}
     {result?.mode==='manual_command'&&<div className="my-2 text-sm"><p className="my-1">Không mở được terminal tự động. Chạy lệnh sau trong một terminal trên máy này:</p><CopyCommand command={result.manualCommand}/>{arrived?<p role="status" className="my-1">Director đã có mặt và đang nhận tin.</p>:unconfirmedPresent?<p role="status" className="my-1">Có Director đang có mặt, nhưng chưa xác nhận đây là phiên mới vừa mở.</p>:null}</div>}
     {op?.state==='failed'&&<p className="my-2 border-l-3 border-danger pl-3 text-sm">{op.error?.message??'Chưa mở được Director.'}</p>}
