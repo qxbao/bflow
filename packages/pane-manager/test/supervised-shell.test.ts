@@ -27,6 +27,7 @@ async function eventuallyFile(path: string): Promise<string> {
 class ShellHerdr implements HerdrCommandRunner {
   readonly calls: CommandInvocation[] = [];
   failBootstrap = false;
+  nonemptyBootstrap = false;
   unknownBootstrap = false;
   deliverUnknown = false;
   bootstrapSent = false;
@@ -52,7 +53,7 @@ class ShellHerdr implements HerdrCommandRunner {
       this.bootstrapSent = true;
       if (!this.failBootstrap && (!this.unknownBootstrap || this.deliverUnknown)) this.child.stdin.write(invocation.args[3] + "\n");
       if (this.unknownBootstrap) return { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: true };
-      return reply({ type: "ok" });
+      return this.nonemptyBootstrap ? reply({ type: "ok" }) : { exitCode: 0, stdout: "", stderr: "", started: true };
     }
     if (domain === "agent" && action === "start") {
       this.child.stdin.write("codex\n");
@@ -99,6 +100,16 @@ describe.skipIf(process.platform !== "linux")("supervised provider shell startup
     expect(result).toMatchObject({ ok: true });
     expect(await readFile(f.proof, "utf8")).toBe("supervised");
     expect(JSON.stringify(f.runner.calls)).not.toContain("never-print-this-token");
+  });
+  it("accepts the real silent pane.run acknowledgement only with shell execution proof", async () => {
+    const f = await fixture("bash");
+    expect(await f.manager().startAgentInPane(f.request)).toMatchObject({ ok: true });
+    expect(await readFile(f.proof, "utf8")).toBe("supervised");
+  });
+  it("treats nonempty pane.run output as uncertain delivery and never starts the provider", async () => {
+    const f = await fixture("bash"); f.runner.nonemptyBootstrap = true;
+    expect(await f.manager().startAgentInPane(f.request)).toMatchObject({ ok: false });
+    expect(f.runner.calls.filter(call => call.args[0] === "agent" && call.args[1] === "start")).toHaveLength(0);
   });
   it("refuses an acknowledged bootstrap without a matching acknowledgement", async () => {
     const f = await fixture("bash"); f.runner.failBootstrap = true;

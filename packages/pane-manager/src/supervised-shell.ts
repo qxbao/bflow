@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { OperationResult } from "@bflow/contracts";
 import type { AgentLaunchProfile, CommandOutcome, HerdrPaneInfo, HerdrProcessInfo } from "./types.js";
-import { isShellReadyForAgent, parseOkResponse } from "./runner.js";
+import { isShellReadyForAgent } from "./runner.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const quote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -138,7 +138,9 @@ export async function prepareSupervisedShell(input: {
           await startTime(shellPid) !== identity) return blocked("terminal or idle shell changed before bootstrap");
       const outcome = await input.run(["pane", "run", pane.paneId, `\\builtin exec ${quote(bash)} --noprofile --rcfile ${quote(rc)} -i`], input.timeoutMs);
       if (outcome.exitCode !== 0 || outcome.failure) return blocked("bootstrap delivery is uncertain; its durable intent forbids replay");
-      parseOkResponse(outcome);
+      // `herdr pane run` acknowledges CLI delivery silently (unlike JSON-returning agent commands).
+      // Delivery is not execution proof: the private nonce receipt and process checks below remain mandatory.
+      if (outcome.stdout !== "" || outcome.stderr !== "") return blocked("bootstrap delivery acknowledgement is uncertain");
     }
     // A nonce acknowledgement binds execution to this exact launch and shell. A prior pending intent is never resent.
     const deadline = Date.now() + Math.min(input.timeoutMs, 3000);
