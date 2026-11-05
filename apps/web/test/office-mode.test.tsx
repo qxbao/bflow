@@ -26,7 +26,7 @@ test('mode key does not break CommandStore.records',()=>{
 test('mode switch preserves request draft',async()=>{
   installApi({'/api/v1/projects/p/session':readySession});app('/projects/p');
   const field=await screen.findByLabelText('Tên công việc');fireEvent.change(field,{target:{value:'Nháp giữ lại'}});
-  fireEvent.click(screen.getByRole('button',{name:'Trực quan'}));
+  fireEvent.click(screen.getByRole('button',{name:'3D'}));
   // Overview is closed in visual mode; reopening it from the HUD restores the form from its session draft.
   fireEvent.click(await screen.findByRole('button',{name:'Tổng quan'}));
   expect((await screen.findByLabelText('Tên công việc') as HTMLInputElement).value).toBe('Nháp giữ lại');
@@ -37,10 +37,10 @@ test('mode switch preserves in-memory decision draft',async()=>{
   fireEvent.click(await screen.findByRole('button',{name:'Xem xét gói'}));
   fireEvent.change(screen.getByLabelText(/Lý do/),{target:{value:'Nháp trong bộ nhớ'}});
   const marker=document.getElementById('main')!.querySelector('h1,h2')!;
-  fireEvent.click(screen.getByRole('button',{name:'Trực quan'}));
+  fireEvent.click(screen.getByRole('button',{name:'3D'}));
   expect((screen.getByLabelText(/Lý do/) as HTMLTextAreaElement).value).toBe('Nháp trong bộ nhớ');
   expect(marker.isConnected).toBe(true);
-  fireEvent.click(screen.getByRole('button',{name:'Classic'}));
+  fireEvent.click(screen.getByRole('button',{name:'Web'}));
   expect((screen.getByLabelText(/Lý do/) as HTMLTextAreaElement).value).toBe('Nháp trong bộ nhớ');
 });
 test('classic mode renders no visual chrome',async()=>{
@@ -74,7 +74,7 @@ test('Esc closes overlay and restores focus',async()=>{
 });
 test('page / is identical in both modes and offers no mode switch',async()=>{
   installApi();app('/');await screen.findByRole('button',{name:'Đăng ký dự án'});
-  expect(screen.queryByRole('button',{name:'Trực quan'})).toBeNull();
+  expect(screen.queryByRole('button',{name:'3D'})).toBeNull();
 });
 
 test('Esc closes the panel after Overview was opened and then another route visited',async()=>{
@@ -108,12 +108,12 @@ test('visual HUD is pinned outside the panel and holds exactly one operations do
     if(saved && /operations/.test(path))return Response.json(saved);return base(path,init);});
   app('/projects/p');
   fireEvent.click(await screen.findByRole('button',{name:'Tổng quan'}));
-  for(const [label,value] of [['Tên công việc','Tìm sách'],['Mục tiêu','Tìm nhanh'],['Tiêu chí chấp nhận (mỗi dòng một tiêu chí)','Tìm theo tên'],['Ràng buộc (mỗi dòng một ràng buộc)','Không đổi API']])fireEvent.change(await screen.findByLabelText(label!),{target:{value}});
+  for(const [label,value] of [['Tên công việc','Tìm sách'],['Mục tiêu','Tìm nhanh'],['Kết quả cần đạt (mỗi dòng một ý)','Tìm theo tên'],['Điều cần lưu ý (không bắt buộc)','Không đổi API']])fireEvent.change(await screen.findByLabelText(label!),{target:{value}});
   fireEvent.click(screen.getByRole('button',{name:'Tạo công việc'}));await waitFor(()=>expect(posts).toHaveLength(1));
   fireEvent.click(await screen.findByRole('button',{name:/Thao tác đã gửi/}));
   const docks=await screen.findAllByRole('region',{name:'Theo dõi thao tác'});
   expect(docks).toHaveLength(1);
   const bar=screen.getByRole('region',{name:'Thanh điều khiển'}),main=document.getElementById('main')!;
   expect(bar.contains(docks[0]!)).toBe(true);expect(main.contains(docks[0]!)).toBe(false);expect(bar.contains(main)).toBe(false);
-  expect(bar.className).toMatch(/\bfixed\b/);expect(bar.className).toMatch(/z-30/);expect(main.className).toMatch(/bottom-\[var\(--hud-h/);
+  expect(bar.className).toMatch(/\bfixed\b/);expect(bar.className).toMatch(/z-30/);expect(main.className).toMatch(/bottom-0/);
 });

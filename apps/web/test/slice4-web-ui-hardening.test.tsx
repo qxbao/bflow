@@ -354,7 +354,7 @@ describe('Slice 4 — Web UI adversarial hardening', () => {
         <ChatHistory api={new ApiClient()} projectId="p" sessionId="host" runId="run" revision={0} />
       </MemoryRouter>
     );
-    const input = await screen.findByLabelText<HTMLTextAreaElement>('Tin nhắn cho Conversation');
+    const input = await screen.findByLabelText<HTMLTextAreaElement>('Tin nhắn cho trợ lý');
     await waitFor(() => expect(input.disabled).toBe(false));
     fireEvent.change(input, { target: { value: 'Tin thử lần 1' } });
     fireEvent.click(screen.getByRole('button', { name: 'Gửi tin nhắn' }));

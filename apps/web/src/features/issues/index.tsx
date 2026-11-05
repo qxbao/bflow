@@ -145,7 +145,7 @@ export function IssueQueuePanel({compact=false}:{compact?:boolean}){
 }
 
 export function IssuesPage(){
-  return <><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Theo dõi sự cố</div><h1 data-component="Issues">Sự cố đang treo</h1>
-    <p className="text-sm text-muted">Nhiệm vụ gặp sự cố được treo để không chặn phần việc còn lại. Thử lại hoặc bỏ qua tại đây; bỏ qua không làm nhiệm vụ chạy tiếp.</p>
+  return <><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Theo dõi sự cố</div><h1 data-component="Issues">Việc cần xử lý</h1>
+    <p className="text-sm text-muted">Một số việc đã tạm dừng vì gặp vấn đề. Xem nguyên nhân, rồi chọn thử lại hoặc bỏ qua. Bỏ qua chỉ đóng thông báo, không chạy tiếp công việc.</p>
     <IssueQueuePanel/></>;
 }

@@ -51,19 +51,19 @@ describe('Web UX stabilization & functional regression guards', () => {
     );
 
     render(<ProjectConfiguration api={new ApiClient()} id="p" revision={0} />);
-    const convModel = await screen.findByRole<HTMLInputElement>('textbox', { name: 'Model (conversation)' });
-    const devModel = screen.getByRole<HTMLInputElement>('textbox', { name: 'Model (developer)' });
+    const convModel = await screen.findByRole<HTMLInputElement>('textbox', { name: 'Mô hình AI (conversation)' });
+    const devModel = screen.getByRole<HTMLInputElement>('textbox', { name: 'Mô hình AI (developer)' });
     expect(convModel.getAttribute('list')).toBeNull();
     expect(convModel.value).toBe('sonnet');
     expect(devModel.value).toBe('gpt-5');
 
-    fireEvent.change(screen.getByLabelText('Áp dụng nhanh Provider'), { target: { value: 'claude' } });
-    fireEvent.change(screen.getByLabelText('Áp dụng nhanh Model'), { target: { value: 'haiku' } });
+    fireEvent.change(screen.getByLabelText('Công cụ AI cho cả nhóm'), { target: { value: 'claude' } });
+    fireEvent.change(screen.getByLabelText('Mô hình AI cho cả nhóm'), { target: { value: 'haiku' } });
     fireEvent.click(screen.getByRole('button', { name: 'Áp dụng cho tất cả vai trò' }));
 
     expect(convModel.value).toBe('haiku');
     expect(devModel.value).toBe('haiku');
-    expect((screen.getByLabelText('Provider (developer)') as HTMLSelectElement).value).toBe('claude');
+    expect((screen.getByLabelText('Công cụ AI (developer)') as HTMLSelectElement).value).toBe('claude');
   });
 
   it('keeps warnings advisory and expands blocking failures independently of readiness', async () => {

@@ -171,7 +171,7 @@ describe('FieldHelp (?) component & 100% control coverage', () => {
         <Settings api={api} project={WebProjectSchema.parse(projects[0])} />
       </MemoryRouter>,
     );
-    await screen.findByRole('textbox', { name: 'Model (conversation)' });
+    await screen.findByRole('textbox', { name: 'Mô hình AI (conversation)' });
     view.container.querySelectorAll('details').forEach(node => {
       node.open = true;
     });
@@ -180,8 +180,8 @@ describe('FieldHelp (?) component & 100% control coverage', () => {
 
     // 4. ProjectConfiguration (YAML mode)
     view = render(<ProjectConfiguration api={api} id="p" revision={0} />);
-    await screen.findByRole('textbox', { name: 'Model (conversation)' });
-    fireEvent.click(screen.getByRole('button', { name: 'YAML đầy đủ' }));
+    await screen.findByRole('textbox', { name: 'Mô hình AI (conversation)' });
+    fireEvent.click(screen.getByRole('button', { name: 'Chỉnh tệp cấu hình' }));
     assertEveryControlHasWorkingHelper(view.container);
     cleanup();
 
@@ -193,7 +193,7 @@ describe('FieldHelp (?) component & 100% control coverage', () => {
         </Operations>
       </MemoryRouter>,
     );
-    fireEvent.change(screen.getByLabelText('Tiêu chí chấp nhận (mỗi dòng một tiêu chí)'), {
+    fireEvent.change(screen.getByLabelText('Kết quả cần đạt (mỗi dòng một ý)'), {
       target: { value: 'Chuyển đổi dấu tiếng Việt\nViết unit test đầy đủ' },
     });
     assertEveryControlHasWorkingHelper(view.container);
@@ -313,7 +313,7 @@ describe('FieldHelp (?) component & 100% control coverage', () => {
         <App api={api} />
       </MemoryRouter>,
     );
-    await screen.findByLabelText('Tin nhắn cho Conversation');
+    await screen.findByLabelText('Tin nhắn cho trợ lý');
     assertEveryControlHasWorkingHelper(view.container);
     cleanup();
 
@@ -414,7 +414,7 @@ describe('Real-user UX fixes uncovered during Chrome DevTools session', () => {
     );
 
     expect(await screen.findByText(/Phiên trình duyệt đã hết hạn/)).toBeTruthy();
-    const input = screen.getByLabelText('Mã hoặc đường dẫn ghép nối (#bootstrap=...)');
+    const input = screen.getByLabelText('Liên kết mở Bflow Web');
 
     // Trying an expired/wrong 60s bootstrap code shows explicit Vietnamese feedback without crashing
     await user.type(input, 'http://127.0.0.1:4317/#bootstrap=expired-token-000');
@@ -752,6 +752,6 @@ describe('Real-user UX fixes uncovered during Chrome DevTools session', () => {
     await waitFor(() => expect(screen.getByText(/Đang hiển thị dữ liệu lưu từ phiên gần nhất/)).toBeTruthy());
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByText(/3 bước để bắt đầu làm việc/)).toBeNull();
-    expect(screen.getByText(/Phiên làm việc đang dừng/)).toBeTruthy();
+    expect(screen.getByText(/để bắt đầu hoặc tiếp tục công việc/)).toBeTruthy();
   });
 });

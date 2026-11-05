@@ -24,7 +24,7 @@ test('chat queued/lost ACK/restart reconcile by ID while direct approvals work i
  await page.goto(pairing);await page.getByLabel('Đường dẫn Git tuyệt đối').fill(repository);await page.getByRole('button',{name:'Đăng ký dự án'}).click();await page.getByRole('link',{name:/books.*Xem dự án/}).click();await page.goto(page.url()+'/chat/run');
  const chat=page.getByRole('region',{name:'Trò chuyện của công việc'});await command('chat-busy',{busy:true});
  await page.route('**/messages',async route=>{if(route.request().method()==='POST'){await route.fetch();await route.abort();}else await route.continue();});
- await expect(chat.getByLabel('Tin nhắn cho Conversation')).toBeEnabled();await chat.getByLabel('Tin nhắn cho Conversation').fill('Giải thích công việc này');await chat.getByRole('button',{name:'Gửi tin nhắn'}).dblclick();
+ await expect(chat.getByLabel('Tin nhắn cho trợ lý')).toBeEnabled();await chat.getByLabel('Tin nhắn cho trợ lý').fill('Giải thích công việc này');await chat.getByRole('button',{name:'Gửi tin nhắn'}).dblclick();
  await expect(chat.getByText(/Chưa xác định được kết quả gửi/)).toBeVisible();expect(posts).toBe(1);expect((await command('chat-inspect')).wires).toBe(0);
  await page.reload();await expect(chat.getByRole('button',{name:'Đối chiếu tin nhắn'})).toBeVisible();
  const other=await context.newPage();await other.goto(page.url());await expect(other.getByRole('button',{name:'Gửi tin nhắn'})).toBeDisabled();await other.close();

@@ -48,7 +48,7 @@ export function IssueDetail(){
     {issue&&<article data-component="IssueDetail" className="my-3 min-w-0">
       <h1 className="mt-1 mb-2">Chi tiết sự cố</h1>
       <IssueSummary issue={issue}/>
-      <dl className="my-2 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2"><div><dt>Tạo lúc</dt><dd><time dateTime={issue.createdAt}>{new Date(issue.createdAt).toLocaleString('vi')}</time></dd></div><div><dt>Mã sự cố</dt><dd className="font-mono [overflow-wrap:anywhere]">{issue.issueId}</dd></div>{issue.taskKey&&<div><dt>Nhiệm vụ</dt><dd className="font-mono [overflow-wrap:anywhere]">{issue.taskKey}</dd></div>}</dl>
+      <dl className="content-grid my-2 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2"><div><dt>Tạo lúc</dt><dd><time dateTime={issue.createdAt}>{new Date(issue.createdAt).toLocaleString('vi')}</time></dd></div><div><dt>Mã sự cố</dt><dd className="font-mono [overflow-wrap:anywhere]">{issue.issueId}</dd></div>{issue.taskKey&&<div><dt>Nhiệm vụ</dt><dd className="font-mono [overflow-wrap:anywhere]">{issue.taskKey}</dd></div>}</dl>
       <section aria-label="Công việc liên quan" className="my-3 border border-line bg-surface p-3"><h2 className="m-0 text-base">Công việc liên quan</h2>
         {Boolean(run.error)&&<p role="alert" className="text-sm">Chưa đọc được trạng thái công việc.</p>}
         {runView&&<><p className="my-1"><Link to={`${base}/runs/${encodeURIComponent(runView.runId)}`}>{runView.title}</Link> <StatusBadge value={runView.sdlcStatus}/></p>

@@ -171,6 +171,8 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const intent = new CameraIntent();
   let state: Camera = homeCamera(box);
   let move: CameraMove | undefined;
+  // Recompute an explicit selection after the scene changes size; manual pan/zoom releases it.
+  let refit: (() => Camera) | undefined;
   const aim = (): void => {
     const v = size(), p = cameraPose(state, v, box);
     cam.aspect = v.w / v.h;
@@ -178,7 +180,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     cam.lookAt(...p.target);
     cam.updateProjectionMatrix();
   };
-  const userMove = (next: Camera): void => { move = undefined; intent.touch(); if (next !== state) { state = next; aim(); dirty = true; wake(); } };
+  const userMove = (next: Camera): void => { refit = undefined; move = undefined; intent.touch(); if (next !== state) { state = next; aim(); dirty = true; wake(); } };
 
   // ---- actors and marks ----
   const choreo = new Choreographer(!reduced());
@@ -271,13 +273,17 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     boxCount = 0;
     placer.begin();
     const far = state.zoom < 1.8;
+    // Reserve the whole label rectangle, not only its anchor, beside HUD controls.
+    const fits = (x: number, y: number, width: number, height: number): boolean =>
+      x - width / 2 >= inset.left && x + width / 2 <= v.w - inset.right && y - height >= 0 && y <= v.h - inset.bottom;
+    const tagFits = (text: string): boolean => fits(pt.x, pt.y, text.length * 6.8 + 12, 22);
     for (const view of choreo.views()) {
       const a = agentsById.get(view.instanceId);
       if (!a || !project(view.point.x, 2.15, view.point.z, v.w, v.h)) continue;
       let tag = tags.get(a.instanceId);
       if (!tag || tag.label !== a.label || tag.pose !== a.pose) { tag = { label: a.label, pose: a.pose, text: agentTag(a.label, a.pose), id: `agent:${a.instanceId}`, bubbleId: `bubble:${a.instanceId}`, sleepId: `sleep:${a.instanceId}` }; tags.set(a.instanceId, tag); }
       const tagX = pt.x, tagY = pt.y;
-      if (placer.tag(tagX, tagY, tag.text.length * 6.8 + 12, 18, far)) slot(n++, tag.id, 'agent', tag.text);
+      if (tagFits(tag.text) && placer.tag(tagX, tagY, tag.text.length * 6.8 + 12, 18, far)) slot(n++, tag.id, 'agent', tag.text);
       const extra = poseLabel(a.pose);
       if (extra === 'bubble') { boxTag[boxCount] = tag; boxX[boxCount] = tagX; boxY[boxCount] = tagY - 22; boxText[boxCount] = excerpts.get(a.instanceId) ?? a.statusText; boxCount++; }
       // The z letters rise from just over the (slumped) head, below the name tag, so they read as belonging to the sleeper.
@@ -285,11 +291,11 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     }
     // The Director desk tag (also over an empty desk) and the queue board count, Director layout only.
     const desk = lastModel?.director;
-    if (desk && directorPoint && project(directorPoint.x, 2.15, directorPoint.z, v.w, v.h) && placer.tag(pt.x, pt.y, directorText.length * 6.8 + 12, 18, far)) slot(n++, 'director', 'agent', directorText);
-    if (desk && project(QUEUE_BOARD.at.x, 2.6, QUEUE_BOARD.at.z, v.w, v.h) && placer.tag(pt.x, pt.y, boardText.length * 6.8 + 12, 18, far)) slot(n++, 'queue', 'agent', boardText);
+    if (desk && directorPoint && project(directorPoint.x, 2.15, directorPoint.z, v.w, v.h) && tagFits(directorText) && placer.tag(pt.x, pt.y, directorText.length * 6.8 + 12, 18, far)) slot(n++, 'director', 'agent', directorText);
+    if (desk && project(QUEUE_BOARD.at.x, 2.6, QUEUE_BOARD.at.z, v.w, v.h) && tagFits(boardText) && placer.tag(pt.x, pt.y, boardText.length * 6.8 + 12, 18, far)) slot(n++, 'queue', 'agent', boardText);
     // Message boxes go above their name tag; far out, one that would overlap any tag or an earlier box is hidden.
     for (let i = 0; i < boxCount; i++) {
-      if (!placer.bubble(boxX[i] as number, boxY[i] as number, BUBBLE_W, BUBBLE_H, far)) continue;
+      if (!fits(boxX[i] as number, boxY[i] as number, BUBBLE_W, BUBBLE_H) || !placer.bubble(boxX[i] as number, boxY[i] as number, BUBBLE_W, BUBBLE_H, far)) continue;
       pt.x = boxX[i] as number; pt.y = boxY[i] as number;
       slot(n++, (boxTag[i] as { bubbleId: string }).bubbleId, 'bubble', boxText[i] as string);
     }
@@ -372,11 +378,13 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     const p = positionOf(target);
     if (!p || destroyed) return;
     const zoom = target.kind === 'agent' || target.kind === 'director' ? AGENT_ZOOM : target.kind === 'queue' ? 1.9 : target.object === 'board' ? 1.6 : undefined;
-    easeTo(focusOn(p, box, zoom, insetArg()));
+    refit = () => focusOn(positionOf(target) ?? p, box, zoom, insetArg());
+    easeTo(refit());
   };
   const focusZone = (zone: OfficeFocusZone): void => {
     if (destroyed) return;
-    easeTo(zone === 'overview' ? focusOn({ x: box.cx ?? box.w / 2, z: box.cz ?? box.d / 2 }, box, HOME_ZOOM, insetArg()) : focusOn(FOCUS_POINTS[zone].at, box, FOCUS_POINTS[zone].zoom, insetArg()));
+    refit = () => zone === 'overview' ? focusOn({ x: box.cx ?? box.w / 2, z: box.cz ?? box.d / 2 }, box, HOME_ZOOM, insetArg()) : focusOn(FOCUS_POINTS[zone].at, box, FOCUS_POINTS[zone].zoom, insetArg());
+    easeTo(refit());
   };
   // The consumer hears the selection first so it can set the inset (the panel about to open) before the camera moves.
   const select = (target: OfficeTarget): void => { if (!suppressTap) { rawSelect(target); focus(target); } };
@@ -444,12 +452,13 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   document.addEventListener('visibilitychange', resetPointers);
   canvas.addEventListener('wheel', onWheel, { passive: false });
   host.addEventListener('keydown', onKey);
-  // A resize only refits the projection; the camera target never re-centres.
+  // A selected object stays centred in the resized scene. Cancel an obsolete in-flight target.
   const observer = new ResizeObserver(() => {
     if (destroyed || host.clientWidth === 0 || host.clientHeight === 0) return;
     const v = size();
     gl.setSize(v.w, v.h, false);
-    state = clampCamera(state, reach());
+    move = undefined;
+    state = refit ? refit() : clampCamera(state, reach());
     aim(); dirty = true; wake();
   });
   observer.observe(host);

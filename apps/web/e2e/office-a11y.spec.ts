@@ -106,9 +106,9 @@ test('reduced motion: the scene still renders, nothing animates in the HTML and 
   expect(await page.evaluate(() => document.getAnimations().filter(a => a.playState === 'running').length)).toBe(0);
   // A mode round trip still works with the preference on.
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'Classic', exact: true }).click();
+  await page.getByRole('button', { name: 'Web', exact: true }).click();
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveCount(0);
-  await page.getByRole('button', { name: 'Trực quan', exact: true }).click();
+  await page.getByRole('button', { name: '3D', exact: true }).click();
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-renderer', 'ready', { timeout: 20000 });
 });
 

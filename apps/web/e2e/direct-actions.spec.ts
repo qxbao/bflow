@@ -15,7 +15,7 @@ test.afterAll(async()=>{if(child?.connected)child.send!({kind:'close'});await ne
 test('structured create, clarify, stale review, changes, resume/cancel and lost ACK use server state and one effect per intent',async({page,context})=>{
   test.setTimeout(90000);
   await page.goto(pairing);await page.getByLabel('Đường dẫn Git tuyệt đối').fill(repository);await page.getByRole('button',{name:'Đăng ký dự án'}).click();await page.getByRole('link',{name:/books.*Xem dự án/}).click();
-  await page.getByLabel('Tên công việc').fill('Tìm sách nhanh');await page.getByLabel('Mục tiêu',{exact:true}).fill('Tìm sách theo tên và tác giả');await page.getByLabel('Tiêu chí chấp nhận (mỗi dòng một tiêu chí)').fill('Tìm được tên sách\nTìm được tác giả');await page.getByLabel('Ràng buộc (mỗi dòng một ràng buộc)').fill('Giữ tương thích');
+  await page.getByLabel('Tên công việc').fill('Tìm sách nhanh');await page.getByLabel('Mục tiêu',{exact:true}).fill('Tìm sách theo tên và tác giả');await page.getByLabel('Kết quả cần đạt (mỗi dòng một ý)').fill('Tìm được tên sách\nTìm được tác giả');await page.getByLabel('Điều cần lưu ý (không bắt buộc)').fill('Giữ tương thích');
   await host('configure',{delay:2000});await page.getByRole('button',{name:'Tạo công việc',exact:true}).dblclick();
   await expect.poll(async()=>(await host('inspect')).effects.filter((k:string)=>k==='create_request').length).toBe(1);
   await context.setOffline(true);await page.waitForTimeout(300);await context.setOffline(false);await page.reload();

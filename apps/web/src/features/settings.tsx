@@ -81,12 +81,12 @@ export function Settings({api,project,refresh=()=>{}}:{api:ApiClient;project:Web
  async function unregister(){if(busy||running)return;setBusy(true);setError(undefined);try{await api.unregister(id);refresh();navigate('/');}catch(e){setError(e);}finally{setBusy(false);}}
  const failedChecks=inspection?.checks.filter(c=>c.state==='failed')??[],advisoryChecks=inspection?.checks.filter(c=>c.state==='warning'||c.state==='unsupported')??[],passedChecks=inspection?.checks.filter(c=>c.state==='passed')??[];
  return <><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Thông tin trên máy này</div><h1 data-component="Settings">Cài đặt dự án</h1>{build && /^[a-f0-9]{64}$/.test(build) && <p className="font-data text-xs text-muted" title={build}>Bản Web: {build.slice(0,12)}</p>}
- <nav aria-label="Các phần cài đặt" className="my-3 flex flex-wrap gap-x-5 gap-y-2 border-b border-line pb-2.5 font-data text-sm"><a href="#settings-readiness">Điều kiện sẵn sàng</a><a href="#settings-configuration">Cấu hình</a><a href="#settings-initialize">Khởi tạo</a><a href="#settings-remove" className="text-danger">Hủy đăng ký</a></nav>
+ <nav aria-label="Các phần cài đặt" className="my-3 flex flex-wrap gap-x-5 gap-y-2 border-b border-line pb-2.5 font-data text-sm"><a href="#settings-readiness">Kiểm tra trước khi bắt đầu</a><a href="#settings-configuration">Cấu hình</a><a href="#settings-initialize">Khởi tạo</a><a href="#settings-remove" className="text-danger">Hủy đăng ký</a></nav>
  {Boolean(error) && <p role="alert" className="my-3 border border-danger border-l-3 bg-surface p-3 text-sm">{explain(error)}</p>}
 
  <section id="settings-readiness" className="panel my-4 min-w-0 border border-line bg-surface p-3.5 sm:p-4">
   <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="m-0 text-base">{project.displayName}</h2><p className="my-1 font-mono text-xs leading-relaxed text-muted [overflow-wrap:anywhere]">{project.canonicalPath}</p></div><button className="min-w-52" disabled={inspecting||busy||running} onClick={()=>void inspect()}>{inspecting?'Đang kiểm tra…':'Kiểm tra điều kiện sẵn sàng'}</button></div>
-  {!configFileRevision && <p className="my-2 border-l-3 border-accent bg-canvas px-3 py-2 text-sm">Dự án mới đăng ký? Hãy xuống mục <a href="#settings-initialize" className="font-semibold">Khởi tạo / sửa GitNexus ↓</a> để tạo cấu hình ban đầu.</p>}
+  {!configFileRevision && <p className="my-2 border-l-3 border-accent bg-canvas px-3 py-2 text-sm">Dự án mới đăng ký? Hãy xuống mục <a href="#settings-initialize" className="font-semibold">Chuẩn bị dự án ↓</a> để tạo cấu hình ban đầu.</p>}
   {inspection && <div className="mt-3 border-t border-line pt-3">
    <div className="flex flex-wrap items-center justify-between gap-2"><div className="flex flex-wrap items-center gap-2"><h3 className="m-0 text-sm">Kết quả kiểm tra</h3><StatusBadge value={inspection.ready?'passed':'failed'}/></div><span className="font-data text-xs text-muted">{failedChecks.length} mục cần xử lý · {advisoryChecks.length} lưu ý · {passedChecks.length} mục đạt · Quan sát lúc {new Date(inspection.observedAt).toLocaleTimeString('vi')}</span></div>
    <p className="my-1.5 text-sm">{inspection.ready?'Tất cả điều kiện bắt buộc đã sẵn sàng. Bạn có thể khởi động phiên ở trang Tổng quan.':'Một số điều kiện cần xử lý trước khi khởi động phiên:'}</p>
@@ -99,9 +99,9 @@ export function Settings({api,project,refresh=()=>{}}:{api:ApiClient;project:Web
  <ProjectConfiguration api={api} id={id} revision={configRevision} disabled={busy||running} onDirtyChange={setConfigDirty} onRevisionChange={setConfigFileRevision}/>
 
  <section id="settings-initialize" className="panel my-4 min-w-0 border border-line bg-surface p-3.5 sm:p-4">
-  <h2 className="mt-0 text-base">Khởi tạo / sửa GitNexus & Commit cấu hình</h2>
-  <p className="my-1.5 text-sm">Tạo tệp cấu hình Bflow nếu chưa có, cài kỹ năng Director (/bflow-start, /bflow-status, /bflow-queue) trong kho, tùy chọn lập chỉ mục GitNexus và commit cấu hình trước khi khởi động phiên. Kỹ năng dùng chung trên máy vẫn được cài bằng bflow setup.</p>
-  <div className="my-2.5 grid gap-1.5 sm:grid-cols-2">
+  <h2 className="mt-0 text-base">Chuẩn bị dự án để bắt đầu</h2>
+  <p className="my-1.5 text-sm">Tạo các thiết lập cần thiết để trợ lý làm việc với dự án. Bạn có thể chọn thêm công cụ tra cứu mã nguồn bên dưới.</p>
+  <div className="content-grid my-2.5 grid gap-1.5 sm:grid-cols-2">
    <div className="flex min-h-11 items-start justify-between gap-2 border border-line bg-canvas p-2.5 sm:min-h-9">
     <label htmlFor="init-skip-gitnexus" className="flex min-w-0 flex-1 cursor-pointer items-start gap-2.5 font-normal [&_span]:min-w-0"><input id="init-skip-gitnexus" type="checkbox" checked={skipGitNexus} disabled={busy||running} onChange={e=>setSkipGitNexus(e.target.checked)}/><span className="text-sm">Khởi tạo không dùng GitNexus (tắt công cụ này trong cấu hình)</span></label>
     <FieldHelp label="Khởi tạo không dùng GitNexus" help="Chọn mục này nếu bạn muốn tạo nhanh .bflow/config.yml mà không cần lập chỉ mục đồ thị mã nguồn GitNexus (ví dụ kho mã nhỏ hoặc dự án thương mại không dùng giấy phép phi thương mại của GitNexus)."/>
@@ -119,12 +119,12 @@ export function Settings({api,project,refresh=()=>{}}:{api:ApiClient;project:Web
     <FieldHelp label="Commit cấu hình vào Git" help="Bflow yêu cầu tệp cấu hình phải được commit sạch trước khi mở worktree cho lập trình viên. Tùy chọn này chỉ commit đúng 2 tệp .bflow/config.yml và .bflow/.gitignore bạn đang xem; nếu kho đang có tệp khác staged thì hệ thống sẽ dừng an toàn."/>
    </div>
   </div>
-  <div className="my-2.5 grid items-end gap-3 sm:grid-cols-[minmax(0,280px)_auto]">
+  <div className="content-grid my-2.5 grid items-end gap-3 sm:grid-cols-[minmax(0,280px)_auto]">
    <div>
-    <FieldLabel htmlFor="init-provider" label="Provider khi tạo / cập nhật cấu hình" help="Chọn công cụ AI mặc định (claude, codex hoặc agy) khi khởi tạo tệp .bflow/config.yml lần đầu hoặc khi chạy cập nhật. Để mặc định nếu muốn giữ nguyên cấu hình hiện tại."/>
+    <FieldLabel htmlFor="init-provider" label="Công cụ AI mặc định" help="Chọn công cụ AI mặc định (claude, codex hoặc agy) khi khởi tạo tệp .bflow/config.yml lần đầu hoặc khi chạy cập nhật. Để mặc định nếu muốn giữ nguyên cấu hình hiện tại."/>
     <select id="init-provider" disabled={busy||running} value={provider} onChange={e=>setProvider(e.target.value)}><option value="">Giữ cấu hình hiện tại / mặc định</option>{['claude','codex','agy'].map(cli=><option key={cli}>{cli}</option>)}</select>
    </div>
-   <div><button className="min-w-48 border-ink bg-brand font-semibold text-on-brand hover:bg-ink hover:text-surface" disabled={busy||running||configDirty||(!license&&!skipGitNexus)} onClick={()=>void initialize()}>{running?'Đang khởi tạo…':'Khởi tạo / sửa GitNexus'}</button></div>
+   <div><button className="min-w-48 border-ink bg-brand font-semibold text-on-brand hover:bg-ink hover:text-surface" disabled={busy||running||configDirty||(!license&&!skipGitNexus)} onClick={()=>void initialize()}>{running?'Đang khởi tạo…':'Chuẩn bị dự án'}</button></div>
   </div>
   {configDirty && <p className="my-1.5 text-xs text-warning">Bạn đang có thay đổi cấu hình chưa lưu. Hãy lưu hoặc bỏ thay đổi ở mục Cấu hình trước.</p>}
   <details className="my-2"><summary>Lưu ý giấy phép GitNexus & quy tắc Commit</summary><p className="my-1 text-xs text-muted">GitNexus dùng giấy phép PolyForm-Noncommercial-1.0.0 (phi thương mại), ghi .gitnexus/ và .git/info/exclude. Tùy chọn Commit chỉ ghi .bflow/config.yml và .bflow/.gitignore; nếu kho đang có file khác staged thì thao tác sẽ dừng an toàn.</p></details>

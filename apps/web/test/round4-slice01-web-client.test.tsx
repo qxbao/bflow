@@ -202,7 +202,7 @@ describe('Round 4 Slice 01 — Web UI client hardening & failure recovery', () =
     const licenseCheckbox = screen.getByLabelText(/Tôi chấp nhận điều kiện GitNexus/i);
     fireEvent.click(licenseCheckbox);
 
-    const initBtn = screen.getByRole('button', { name: /Khởi tạo \/ sửa GitNexus/i });
+    const initBtn = screen.getByRole('button', { name: /Chuẩn bị dự án/i });
     // Double click rapidly
     fireEvent.click(initBtn);
     fireEvent.click(initBtn);
@@ -263,7 +263,7 @@ describe('Round 4 Slice 01 — Web UI client hardening & failure recovery', () =
     await waitFor(() => expect(screen.getByRole('button', { name: /Áp dụng cho tất cả vai trò/i })).toBeTruthy());
 
     // Switch bulk provider to agy
-    const bulkCliSelect = screen.getByLabelText(/Áp dụng nhanh Provider/i);
+    const bulkCliSelect = screen.getByLabelText(/Công cụ AI cho cả nhóm/i);
     fireEvent.change(bulkCliSelect, { target: { value: 'agy' } });
 
     // Click apply all

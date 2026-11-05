@@ -79,7 +79,7 @@ const rows: Row[] = [
     const refuse = () => new Response(JSON.stringify({ apiVersion: 1, code: 'session_required', message: 'x', retryable: false, correlationId: 'c' }), { status: 401 });
     vi.stubGlobal('fetch', vi.fn(async () => refuse()));
     render(<MemoryRouter initialEntries={['/projects/p']}><App api={new ApiClient()} /></MemoryRouter>);
-    expect(await screen.findByLabelText('Mã hoặc đường dẫn ghép nối (#bootstrap=...)')).toBeTruthy();
+    expect(await screen.findByLabelText('Liên kết mở Bflow Web')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Ghép nối lại' })).toBeTruthy();
     expect(marked('ErrorState', document.body)).toHaveLength(1);
     // Nothing of the scene is left behind: no HUD, rail, mirror, stage or canvas.
@@ -122,18 +122,18 @@ const rows: Row[] = [
   { row: 6, name: 'init, GitNexus and commit config: Settings via the settings object', go: async () => {
     await mount('/projects/p', { '/api/v1/projects/p/configuration': cfg });
     await mirror(/Bảng cài đặt/);
-    expect(await inMain().findByRole('button', { name: 'Khởi tạo / sửa GitNexus' })).toBeTruthy();
+    expect(await inMain().findByRole('button', { name: 'Chuẩn bị dự án' })).toBeTruthy();
     expect(marked('Settings')).toHaveLength(1);
-    expect(inMain().getByText(/Khởi tạo \/ sửa GitNexus & Commit cấu hình/)).toBeTruthy();
+    expect(inMain().getByText(/Chuẩn bị dự án để bắt đầu/)).toBeTruthy();
   } },
   { row: 7, name: 'configuration form, YAML and bulk role bar', go: async () => {
     await mount('/projects/p', { '/api/v1/projects/p/configuration': cfg });
     await rail('Cài đặt');
-    expect(await inMain().findByLabelText('Model (conversation)')).toBeTruthy();
+    expect(await inMain().findByLabelText('Mô hình AI (conversation)')).toBeTruthy();
     expect(marked('Settings')).toHaveLength(1);
     expect(inMain().getByRole('button', { name: 'Lưu cấu hình' })).toBeTruthy();
     expect(inMain().getByRole('button', { name: 'Áp dụng cho tất cả vai trò' })).toBeTruthy();
-    expect(inMain().getByRole('button', { name: 'YAML đầy đủ' })).toBeTruthy();
+    expect(inMain().getByRole('button', { name: 'Chỉnh tệp cấu hình' })).toBeTruthy();
   } },
   { row: 8, name: 'readiness check', go: async () => {
     const api = await mount('/projects/p', { '/api/v1/projects/p/configuration': cfg, '/api/v1/projects/p/inspection': { apiVersion: 1, projectId: 'p', ready: true, checks: [{ id: 'git', state: 'passed', message: 'Kho Git hợp lệ' }], observedAt: now } });
@@ -152,7 +152,7 @@ const rows: Row[] = [
   { row: 10, name: 'preparation preview: the Overview panel', go: async () => {
     await mount('/projects/p', { '/api/v1/projects/p/preview': { apiVersion: 1, projectId: 'p', available: true, summary: 'ok', blockers: [], observedAt: now } });
     await rail('Tổng quan');
-    const summary = await inMain().findByText('Thông tin chuẩn bị');
+    const summary = await inMain().findByText('Thông tin kết nối');
     fireEvent.click(summary);
     expect(await inMain().findByText(/Đã đọc được cấu hình dự kiến/)).toBeTruthy();
     expect(marked('Overview')).toHaveLength(1);
@@ -358,10 +358,10 @@ const rows: Row[] = [
   { row: 32, name: 'recent activity is a disclosure in Overview', go: async () => {
     const api = await mount();
     await rail('Tổng quan');
-    expect(await inMain().findByText(/Hoạt động gần đây \(0\)/)).toBeTruthy();
+    expect(await inMain().findByText(/Lịch sử cập nhật \(0\)/)).toBeTruthy();
     await waitFor(() => expect(api.handlers.has('invalidate')).toBe(true));
     api.handlers.get('invalidate')!({ type: 'invalidate', lastEventId: '', data: JSON.stringify({ apiVersion: 1, cursor: 'e:1', projectId: 'p', type: 'invalidate', resourceIds: [], occurredAt: now }) } as unknown as Event);
-    expect(await inMain().findByText(/Hoạt động gần đây \(1\)/)).toBeTruthy();
+    expect(await inMain().findByText(/Lịch sử cập nhật \(1\)/)).toBeTruthy();
   } },
   { row: 33, name: 'technical details and diagnostics in RunView', go: async () => {
     await openRunViaRail();

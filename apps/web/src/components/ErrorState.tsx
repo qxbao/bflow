@@ -50,23 +50,21 @@ export function ErrorState({
   }
 
   return (
-    <section data-component="ErrorState" className="my-4 border border-line border-l-3 border-l-danger bg-surface p-4" role="alert">
-      <h2>Chưa tải được dữ liệu</h2>
+    <section data-component="ErrorState" className="notice my-4 border-l-3 border-l-danger" role="alert">
+      <div className="flex flex-wrap items-center justify-between gap-3"><h2>Chưa tải được dữ liệu</h2><button type="button" onClick={retry}>Thử tải lại</button></div>
       <p>{explain(error)}</p>
       {error instanceof ApiError && error.code === 'unavailable' && (
-        <p className="text-sm text-muted">
-          Đây là lỗi đọc dữ liệu: phiên và công việc có thể vẫn đang chạy. Dữ liệu chưa đọc được không có nghĩa là trống.
-        </p>
+        <details><summary>Điều này ảnh hưởng thế nào?</summary><p>Công việc có thể vẫn đang chạy. Chưa tải được dữ liệu không có nghĩa là chưa có công việc.</p></details>
       )}
       {stale && <p>Dữ liệu bên dưới đã cũ. Chỉ tham khảo cho đến khi tải lại thành công.</p>}
       {canPair && (
         <form onSubmit={e => void submitPair(e)} className="my-3 border border-line bg-canvas p-3">
           <p className="mt-0 mb-2 text-sm text-muted">
-            Chạy lệnh <code className="font-mono text-xs text-ink">bflow web</code> trên terminal để mở lại, hoặc dán liên kết ghép nối vào đây để tiếp tục ngay tại trang này:
+            Mở lại bằng lệnh <code className="font-mono text-xs text-ink">bflow web</code> trên máy này, hoặc dán liên kết vừa nhận vào đây:
           </p>
           <FieldLabel
             htmlFor={pairId}
-            label="Mã hoặc đường dẫn ghép nối (#bootstrap=...)"
+            label="Liên kết mở Bflow Web"
             help="Dán toàn bộ liên kết http://127.0.0.1:PORT/#bootstrap=... hiển thị trên terminal khi chạy bflow web (hoặc chỉ phần mã sau dấu =). Mỗi mã có hiệu lực 60 giây, chỉ dùng một lần để tạo phiên cookie an toàn và không lưu vào bộ nhớ trình duyệt."
             example="Ví dụ: http://127.0.0.1:4317/#bootstrap=..."
           />
@@ -90,9 +88,6 @@ export function ErrorState({
           {pairFeedback && <p role="status" className="mt-2 mb-0 text-xs text-danger">{pairFeedback}</p>}
         </form>
       )}
-      <button type="button" onClick={retry}>
-        Thử tải lại
-      </button>
     </section>
   );
 }

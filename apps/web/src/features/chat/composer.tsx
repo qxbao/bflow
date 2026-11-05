@@ -94,13 +94,13 @@ export function ChatComposer({api,projectId,sessionId,runId,ready,sessionFresh,r
     htmlFor="chat-draft"
     className="mb-0"
     labelClassName="font-data text-xs font-medium text-muted"
-    label="Tin nhắn cho Conversation"
-    help="Gửi trao đổi hoặc câu hỏi bổ sung tới Trợ lý hội thoại (Conversation) của riêng công việc này. Nhấn Enter để gửi, Shift+Enter để xuống dòng; các quyết định phê duyệt chính thức vẫn thực hiện ở trang chi tiết công việc."
+    label="Tin nhắn cho trợ lý"
+    help="Gửi câu hỏi hoặc trao đổi thêm về công việc này. Nhấn Enter để gửi, Shift+Enter để xuống dòng; các quyết định phê duyệt chính thức vẫn thực hiện ở trang chi tiết công việc."
    />
    <span className="hidden font-data text-xs text-muted lg:inline">Enter để gửi · Shift+Enter để xuống dòng</span>
   </div>
   <div className="flex items-end gap-2">
-   <textarea id="chat-draft" value={sending?'':draft} onChange={e=>setDraft(e.target.value)} onKeyDown={keyDown} readOnly={busy} disabled={!ready||(uncertain&&!busy)} aria-describedby={!ready?'chat-unavailable':undefined} rows={1} placeholder={ready?'Nhập tin nhắn…':'Trò chuyện trực tiếp chưa bật trong phiên này'} className="max-h-40 min-h-11 resize-none rounded-2xl px-4 lg:min-h-9"/>
+   <textarea id="chat-draft" value={sending?'':draft} onChange={e=>setDraft(e.target.value)} onKeyDown={keyDown} readOnly={busy} disabled={!ready||(uncertain&&!busy)} aria-describedby={!ready?'chat-unavailable':undefined} rows={2} placeholder={ready?'Nhập tin nhắn…':'Trò chuyện trực tiếp chưa bật trong phiên này'} className="max-h-40 min-h-11 resize-none rounded-2xl px-4 lg:min-h-9"/>
    <button type="submit" aria-label="Gửi tin nhắn" disabled={!canSend} className="shrink-0 rounded-full border-steel bg-steel px-4 text-surface hover:bg-ink">{busy?'Đang gửi…':'Gửi'}</button>
   </div>
   {uncertain&&<div className="mt-1.5 flex flex-wrap justify-end gap-2">{canUnlock&&<button type="button" disabled={busy} onClick={()=>void unlock()}>Mở khóa khung soạn tin</button>}<button type="button" disabled={busy} onClick={()=>void reconcile()}>Đối chiếu tin nhắn</button></div>}

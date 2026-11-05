@@ -2,11 +2,11 @@
 @source "../";
 
 @theme {
-  --color-canvas: #fafaf7;
+  --color-canvas: #f5f6f3;
   --color-ink: #1a1a1a;
   --color-muted: #4a4843;
-  --color-faint: #e7e5de;
-  --color-line: #d4d1c7;
+  --color-faint: #eef0e9;
+  --color-line: #dce0d6;
   --color-accent: #6b4400;
   --color-steel: #3b536f;
   --color-brand: #ffc400;
@@ -57,8 +57,8 @@
   body { @apply m-0 bg-canvas font-prose text-base leading-relaxed text-ink antialiased; }
   :focus-visible { @apply outline-2 outline-offset-2 outline-focus; }
   a { @apply text-accent underline-offset-4 hover:underline; }
-  button, input, select, textarea { @apply max-w-full rounded-none border border-input bg-transparent px-3 py-2 font-data text-base leading-5 text-ink transition-colors lg:py-1.5 lg:text-sm; }
-  button, input, select { @apply min-h-11 lg:min-h-9; }
+  button, input, select, textarea { @apply max-w-full rounded-xl border border-input bg-transparent px-3 py-2 font-data text-base leading-5 text-ink transition-colors lg:text-sm; }
+  button, input, select { @apply min-h-11; }
   button { @apply cursor-pointer touch-manipulation font-medium hover:bg-ink hover:text-surface disabled:cursor-not-allowed disabled:opacity-50; }
   button[aria-pressed="true"] { @apply border-ink bg-faint font-semibold; }
   input, select, textarea { @apply w-full; }
@@ -110,4 +110,125 @@
   15% { opacity: 1; }
   70% { opacity: .9; }
   100% { translate: 1.5rem -2.2rem; scale: 1.4; opacity: 0; }
+}
+
+/* Workspace sizing is based on the space a page actually receives, including the 3D panel. */
+.workspace-main { container: workspace / inline-size; }
+.workspace-main > h1 { margin-top: 1rem; margin-bottom: 1rem; }
+.workspace-main > section:not([data-component="ErrorState"]),
+.workspace-main .panel { border-radius: 1rem; }
+.workspace-main .panel { padding: clamp(1.25rem, 3cqi, 2rem); margin-block: 1.5rem; }
+.workspace-main :where(article, fieldset, pre, [data-component="EmptyState"]) { border-radius: .75rem; }
+.workspace-main :where(input, select, textarea) { background-color: var(--color-surface); }
+.workspace-navigation { align-self: start; }
+.workspace-navigation nav a { border-radius: .65rem; margin-block: .15rem; }
+.workspace-navigation nav a[aria-current="page"] { box-shadow: inset 3px 0 var(--color-accent); }
+.workspace-shell > header { background: var(--color-surface); min-height: 4.25rem; }
+.workspace-shell > footer { background: var(--color-surface); }
+.notice { border-radius: .75rem; border: 1px solid var(--color-line); padding: 1rem 1.25rem; background: var(--color-surface); }
+.notice h2 { font-size: 1rem; margin: 0; }
+.notice p { font-size: .875rem; margin-block: .5rem; }
+.notice details { margin-bottom: 0; }
+.office-3d { --office-panel-width: clamp(420px, 40vw, 680px); }
+.office-panel { padding: 0 1.5rem 2rem; }
+.office-panel-header { position: sticky; top: 0; z-index: 10; margin-inline: -1.5rem; padding: 1rem 1.5rem; background: var(--color-surface); border-bottom: 1px solid var(--color-line); }
+.office-hud-root { container: office / inline-size; }
+.office-panel-open .office-stage, .office-panel-open .office-hud-root { right: var(--office-panel-width); }
+.office-panel-open .office-panel { width: var(--office-panel-width); }
+.office-3d .workspace-grid { display: block; }
+.office-3d .office-panel .panel { padding: 1.5rem; }
+.office-3d .office-panel h1 { font-size: 1.5rem; }
+.office-topbar { display: grid; grid-template-columns: minmax(0, 18rem) auto; gap: .75rem; align-items: start; }
+.office-topbar > [aria-label="Trạng thái văn phòng"] { grid-column: 1 / -1; justify-self: start; max-width: 100%; }
+.office-rail { left: .75rem; right: auto; top: 50%; transform: translateY(-42%); }
+.office-rail button { min-height: 44px; width: 72px; font-size: 11px; }
+.office-panel-open .office-quick-chat { display: none; }
+.office-cameras { margin-inline: auto; }
+.chat-layout { position: relative; border-radius: 1rem; overflow: clip; }
+.chat-toolbar { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+.chat-toolbar h1 { margin: 0; }
+.chat-history { max-height: 16rem; overflow-y: auto; border-bottom: 1px solid var(--color-line); }
+.chat-thread { display: flex; flex-direction: column; height: max(32rem, calc(100dvh - 17rem)); min-height: 0; }
+.chat-thread > header { padding: 1.25rem; gap: .75rem; }
+.chat-thread > [role="log"] { padding: 1.5rem clamp(1rem, 4cqi, 3rem); }
+.chat-thread > [role="log"] > ol { gap: 1.5rem; max-width: 52rem; margin-inline: auto; }
+.chat-thread > form { padding: 1.25rem; flex-shrink: 0; }
+.chat-thread textarea { min-height: 4.5rem; padding-block: .75rem; border-radius: 1rem; }
+.chat-thread p { line-height: 1.65; }
+@container workspace (min-width: 960px) {
+  .chat-layout.history-open { display: grid; grid-template-columns: 250px minmax(0, 1fr); }
+  .chat-history { max-height: none; height: calc(100dvh - 17rem); overflow-y: auto; border-right: 1px solid var(--color-line); border-bottom: 0; }
+}
+@container workspace (max-width: 760px) {
+  .content-grid { grid-template-columns: minmax(0, 1fr); }
+  .content-grid > * { grid-column: auto; }
+  .chat-thread > header > .min-w-0 { flex-basis: calc(100% - 4rem); }
+}
+@container office (max-width: 900px) {
+  .office-topbar { grid-template-columns: minmax(0, 1fr) auto; }
+  .office-topbar section { max-width: 17rem; }
+  .office-topbar [aria-label="Trạng thái văn phòng"] { font-size: .75rem; }
+  .office-cameras button span { display: none; }
+  .office-quick-chat { max-width: 26rem; }
+}
+@media (min-width: 1024px) { .workspace-navigation { position: sticky; top: 1rem; } }
+@media (max-width: 1099px) {
+  .office-panel-open .office-panel { width: 100%; }
+  .office-panel-open .office-stage { right: 0; visibility: hidden; pointer-events: none; }
+  .office-panel-open .office-hud-root { right: 0; visibility: hidden; pointer-events: none; }
+  .office-panel-open .office-hud-root [data-hud-bottom] { visibility: visible; position: fixed; bottom: 0; left: 1rem; right: 1rem; padding: .5rem; }
+  .office-panel-open .office-hud-root [data-hud-bottom] > :not([data-hud-dock]) { visibility: hidden; }
+  .office-panel-open .office-hud-root [data-hud-bottom] > button { visibility: visible; }
+  .office-panel-open .office-hud-root { z-index: 50; }
+  .office-panel { padding-bottom: calc(var(--hud-h, 0px) + 2rem); }
+}
+@media (max-width: 600px) {
+  .workspace-main { padding-inline: 1rem; }
+  .office-panel-header { margin-inline: -1rem; padding-inline: 1rem; }
+  .office-rail { left: .5rem; }
+  .office-rail button { width: 58px; min-height: 40px; }
+  .office-topbar section { padding: .75rem; }
+  .office-topbar section h2 { font-size: 1rem; }
+  .office-cameras { margin-left: 4.5rem; }
+  .chat-thread { height: calc(100dvh - 14rem); min-height: 26rem; }
+  .chat-thread > header, .chat-thread > form { padding: 1rem; }
+}
+@media (max-height: 650px) {
+  .office-rail { top: 6.5rem; bottom: 7rem; transform: none; overflow-y: auto; }
+  .office-topbar section > div { display: none; }
+  .chat-thread { height: auto; min-height: 30rem; }
+}
+
+.office-topbar > details { display: block; margin: 0; padding-block: 0; }
+.office-topbar > details summary { min-height: 40px; }
+@media (max-width: 1099px) { .office-panel-open [data-hud-bottom] > div:last-child { display: none; } }
+.overview-session-details { border: 0; margin: 0; padding: 0; }
+.overview-session-details > summary { margin-bottom: .75rem; }
+.new-work-disclosure { border: 1px solid var(--color-line); border-radius: 1rem; padding: 1rem 1.5rem; background: var(--color-surface); }
+.new-work-disclosure > .panel { border: 0; padding: 0; }
+/* A chat page uses the available height; only the message log scrolls while composing. */
+@media (min-height: 650px) {
+  .workspace-main:has(.chat-layout) { display: flex; flex-direction: column; height: calc(100dvh - 4.25rem); padding-bottom: 1.5rem; }
+  .workspace-shell:has(.chat-layout) > footer { display: none; }
+  .office-panel:has(.chat-layout) { height: 100dvh; }
+  .chat-layout { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .chat-layout > div { flex: 1; min-height: 0; }
+  .chat-history { flex-shrink: 0; max-height: min(16rem, 30dvh); }
+  .chat-thread { height: 100%; min-height: 0; }
+  @container workspace (min-width: 960px) {
+    .chat-layout.history-open { display: grid; }
+    .chat-history { height: 100%; max-height: none; }
+  }
+}
+@media (min-height: 650px) {
+  .chat-layout > div { display: flex; flex-direction: column; }
+  .chat-layout > div > :not(.chat-thread) { flex-shrink: 0; }
+  .chat-layout > div > .chat-thread { flex: 1; height: auto; min-height: 0; }
+}
+
+@media (max-width: 600px) {
+  .chat-toolbar { flex-wrap: nowrap; }
+  .chat-toolbar > div p { display: none; }
+  .chat-toolbar h1 { font-size: 1.5rem; }
+  .office-cameras { max-width: calc(100% - 4.5rem); }
 }
