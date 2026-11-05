@@ -60,7 +60,7 @@ function useAnnouncement(model: OfficeModel, notice: string | undefined): string
  * visually hidden but still reachable by Tab (and revealed over the scene while focused); when the canvas failed it is the visible,
  * complete list. `extra` carries page navigation that has no scene object yet.
  */
-export function AccessibleOffice({ model, onSelect, visible, notice, extra }: { model: OfficeModel; onSelect: (target: OfficeTarget) => void; visible: boolean; notice?: string | undefined; extra?: ReactNode }) {
+export function AccessibleOffice({ model, onSelect, visible, notice, extra, onTargetFocus, onTargetBlur, onTargetEscape }: { model: OfficeModel; onSelect: (target: OfficeTarget) => void; onTargetFocus?: (target: OfficeTarget) => void; onTargetBlur?: () => void; onTargetEscape?: () => void; visible: boolean; notice?: string | undefined; extra?: ReactNode }) {
   const announced = useAnnouncement(model, notice);
   const taskTitle = (runId: string | undefined, taskId: string | undefined): string => {
     if (!taskId) return 'Không có việc';
@@ -68,14 +68,14 @@ export function AccessibleOffice({ model, onSelect, visible, notice, extra }: { 
   };
   return <>
     <div aria-live="polite" role="status" className="sr-only">{announced}</div>
-    <section aria-label="Bản văn bản của văn phòng" className={visible ? '' : 'sr-only focus-within:not-sr-only focus-within:absolute focus-within:inset-x-3 focus-within:top-28 focus-within:bottom-36 focus-within:z-20 focus-within:overflow-auto focus-within:rounded-xl focus-within:bg-surface md:focus-within:right-24'}>
+    <section aria-label="Bản văn bản của văn phòng" onKeyDownCapture={event => { if (event.key === 'Escape' && !event.defaultPrevented && !event.nativeEvent.isComposing) onTargetEscape?.(); }} className={visible ? '' : 'sr-only focus-within:not-sr-only focus-within:absolute focus-within:inset-x-3 focus-within:top-28 focus-within:bottom-36 focus-within:z-20 focus-within:overflow-auto focus-within:rounded-xl focus-within:bg-surface md:focus-within:right-24'}>
       <div className="border border-line p-3">
         {notice && <p className="m-0 mb-2 font-semibold">{notice}</p>}
         {model.tier !== 'full' && <p className="m-0 mb-2">{model.statusText} ({CERTAINTY[model.certainty]})</p>}
         {model.director && <>
           <h3 className="m-0 text-base font-semibold">Director</h3>
           <ul className="my-2 list-none p-0"><li className="py-1.5">
-            <button type="button" className="text-left" onClick={() => onSelect({ kind: 'director' })}>
+            <button type="button" className="text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warning" onBlur={onTargetBlur} onFocus={() => onTargetFocus?.({ kind: 'director' })} onClick={() => onSelect({ kind: 'director' })}>
               <span className="font-semibold">Director:</span> {model.director.statusText}. Mức tin cậy: {CERTAINTY[model.director.certainty]}{model.director.heartbeatAt ? `, báo hoạt động lúc ${directorTime(model.director.heartbeatAt)}` : ''}{model.director.provider ? `, ${model.director.provider}` : ''}.
             </button>
           </li></ul>
@@ -83,7 +83,7 @@ export function AccessibleOffice({ model, onSelect, visible, notice, extra }: { 
         <h3 className="m-0 text-base font-semibold">Nhân viên</h3>
         {model.agents.length === 0 ? <p className="m-0 text-sm text-muted">Chưa có nhân viên nào.</p> : <ul className="my-2 list-none p-0">
           {model.agents.map(a => <li key={a.instanceId} className="border-t border-line py-1.5 first:border-t-0">
-            <button type="button" className="text-left" onClick={() => onSelect({ kind: 'agent', instanceId: a.instanceId })}>
+            <button type="button" className="text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warning" onBlur={onTargetBlur} onFocus={() => onTargetFocus?.({ kind: 'agent', instanceId: a.instanceId })} onClick={() => onSelect({ kind: 'agent', instanceId: a.instanceId })}>
               <span className="font-semibold">{a.label}</span> ({roleLabel(a.role)}): {a.statusText}. Mức tin cậy: {CERTAINTY[a.certainty]}{a.observedAt ? `, quan sát lúc ${a.observedAt}` : ''}. Việc: {taskTitle(a.runId, a.taskId)}.
             </button>
           </li>)}
@@ -91,9 +91,9 @@ export function AccessibleOffice({ model, onSelect, visible, notice, extra }: { 
         <h3 className="m-0 text-base font-semibold">Đối tượng</h3>
         <ul className="my-2 list-none p-0">
           {OBJECTS.map(([object, label]) => <li key={object} className="py-0.5">
-            <button type="button" onClick={() => onSelect({ kind: 'object', object })}>{object === 'counter' && model.director ? DIRECTOR_COUNTER : label}{object === 'mailbox' && model.pendingDecisions > 0 ? ` (${model.pendingDecisions} đang chờ)` : ''}</button>
+            <button type="button" className="focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warning" onBlur={onTargetBlur} onFocus={() => onTargetFocus?.({ kind: 'object', object })} onClick={() => onSelect({ kind: 'object', object })}>{object === 'counter' && model.director ? DIRECTOR_COUNTER : label}{object === 'mailbox' && model.pendingDecisions > 0 ? ` (${model.pendingDecisions} đang chờ)` : ''}</button>
           </li>)}
-          {model.director && <li className="py-0.5"><button type="button" onClick={() => onSelect({ kind: 'queue' })}>Bảng sự cố ({queueText(model.queue)})</button></li>}
+          {model.director && <li className="py-0.5"><button type="button" className="focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warning" onBlur={onTargetBlur} onFocus={() => onTargetFocus?.({ kind: 'queue' })} onClick={() => onSelect({ kind: 'queue' })}>Bảng sự cố ({queueText(model.queue)})</button></li>}
         </ul>
         {extra}
       </div>

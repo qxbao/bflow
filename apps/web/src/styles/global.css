@@ -236,3 +236,13 @@
   .chat-toolbar h1 { font-size: 1.5rem; }
   .office-cameras { max-width: calc(100% - 4.5rem); }
 }
+
+/* The immersive desk dialog shares the viewport on short landscape screens; keep its composer above the fold. */
+.director-dialogue .chat-thread { height: 100%; min-height: 0; }
+@media (max-height: 480px) {
+  .director-dialogue .chat-thread > header,
+  .director-dialogue .chat-thread > form { padding: .25rem .5rem; }
+  .director-dialogue .chat-thread [aria-label="Gợi ý trò chuyện"] { gap: .25rem; margin-bottom: .25rem; }
+  .director-dialogue .chat-thread [aria-label="Gợi ý trò chuyện"] button { min-height: 2rem; padding: .25rem .5rem; }
+  .director-dialogue .chat-thread #director-chat-approval { margin-top: 0; line-height: 1.15; }
+}

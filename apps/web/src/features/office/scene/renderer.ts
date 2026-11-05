@@ -1,7 +1,7 @@
 // Office scene (stylized 3D). Reads an OfficeModel and draws it; emits selections and never writes anywhere else.
 // Plain three.js, no React: scene state changes per frame outside React. Loaded only through the dynamic import in ui/OfficeStage.
 import {
-  ACESFilmicToneMapping, BoxGeometry, Color, FogExp2, Group, Mesh, MeshBasicMaterial, PCFShadowMap, PerspectiveCamera, Raycaster, SRGBColorSpace, Scene, Vector2, Vector3, WebGLRenderer, type Material, type Object3D,
+  ACESFilmicToneMapping, BoxGeometry, Color, EdgesGeometry, FogExp2, Group, LineBasicMaterial, LineSegments, Mesh, MeshBasicMaterial, PCFShadowMap, PerspectiveCamera, Plane, Raycaster, SRGBColorSpace, Scene, Vector2, Vector3, WebGLRenderer, type Material, type Object3D,
 } from 'three';
 import { acquireModels, type ModelLease } from './assets';
 import type { OfficeFocusZone, OfficeModel, OfficeObjectId, OfficeTarget } from '../model/types';
@@ -31,6 +31,10 @@ export interface OfficeRenderer {
   focus?(target: OfficeTarget): void;
   /** Eases the camera to a HUD preset: the whole office or one room. */
   focusZone?(zone: OfficeFocusZone): void;
+  highlight?(target?: OfficeTarget): void;
+  preview?(target?: OfficeTarget): void;
+  setInteracting?(active: boolean): void;
+  cameraControl?(action: 'left' | 'right' | 'up' | 'down' | 'zoom-in' | 'zoom-out'): void;
   destroy(): void;
 }
 
@@ -51,7 +55,7 @@ const assetUrl = (path: string): string => `${import.meta.env.BASE_URL}${path}`;
  * `signal` lets the caller cancel a creation that is no longer wanted; a cancelled creation rejects without touching the page or the shared models.
  * `onContextLost` fires once if the WebGL context is lost after creation. The renderer does not retry: the caller shows its fallback and destroys it.
  */
-export async function createOfficeRenderer(host: HTMLElement, onSelect: (target: OfficeTarget) => void, signal?: AbortSignal, onContextLost?: () => void): Promise<OfficeRenderer> {
+export async function createOfficeRenderer(host: HTMLElement, onSelect: (target: OfficeTarget) => void, signal?: AbortSignal, onContextLost?: () => void, options: { immersive?: boolean; onDeselect?: () => void } = {}): Promise<OfficeRenderer> {
   const cancelled = (): Error => new DOMException('office renderer creation cancelled', 'AbortError');
   if (signal?.aborted) throw cancelled();
   const lease = await acquireModels({ character: assetUrl(OFFICE_ASSET_PATHS.character), furniture: assetUrl(OFFICE_ASSET_PATHS.furniture) }, signal);
@@ -63,7 +67,7 @@ export async function createOfficeRenderer(host: HTMLElement, onSelect: (target:
     // Each stage below runs in its own task, so input is not starved while the scene comes up.
     await yieldToEventLoop();
     if (signal?.aborted) throw cancelled();
-    built = build(gl, lease, host, onSelect, onContextLost);
+    built = build(gl, lease, host, onSelect, onContextLost, options.immersive === true, options.onDeselect);
     await yieldToEventLoop();
     if (signal?.aborted) throw cancelled();
     await warmBeforeUse(built.warm, gl.domElement, signal);
@@ -104,7 +108,7 @@ function warmBeforeUse(warm: () => Promise<void>, canvas: HTMLCanvasElement, sig
   });
 }
 
-function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelect: (target: OfficeTarget) => void, onContextLost?: () => void): { renderer: OfficeRenderer; warm(): Promise<void> } {
+function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelect: (target: OfficeTarget) => void, onContextLost: (() => void) | undefined, immersive: boolean, onDeselect?: () => void): { renderer: OfficeRenderer; warm(): Promise<void> } {
   const size = (): { w: number; h: number } => ({ w: Math.max(1, host.clientWidth), h: Math.max(1, host.clientHeight) });
   const reduced = (): boolean => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
   // A tap that ends a drag or a pinch is not a selection.
@@ -180,7 +184,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     cam.lookAt(...p.target);
     cam.updateProjectionMatrix();
   };
-  const userMove = (next: Camera): void => { refit = undefined; move = undefined; intent.touch(); if (next !== state) { state = next; aim(); dirty = true; wake(); } };
+  const userMove = (next: Camera): void => { refit = undefined; move = undefined; intent.touch(); if (immersive) host.dataset.officeState = 'moving'; if (next !== state) { state = next; aim(); dirty = true; wake(); } };
 
   // ---- actors and marks ----
   const choreo = new Choreographer(!reduced());
@@ -308,7 +312,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     gl.render(scene, cam);
     if (!ready) { ready = true; host.dataset.officeRenderer = 'ready'; }
   };
-  let moving = false;
+  let moving = false, activeGesture = false;
   const stopTimers = (): void => { if (raf) cancelAnimationFrame(raf); raf = 0; if (timer) clearTimeout(timer); timer = 0; };
   /** `fast` wants the next display frame; otherwise the idle interval is used. Nothing is scheduled when `fast` is undefined. */
   const schedule = (fast: boolean | undefined): void => {
@@ -329,8 +333,9 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     const dt = lastRender === 0 ? 16 : Math.min(gap, 100);
     lastRender = now;
     if (move) {
-      const step = move.at(now);
-      state = step.camera; if (step.done) move = undefined;
+      const step = move.at(now, reduced());
+      state = step.camera;
+      if (step.done) { move = undefined; host.dataset.officeState = host.dataset.officeInteracting === 'true' ? 'interacting' : host.dataset.officeSelected === 'true' ? 'selected' : 'overview'; }
       aim();
     }
     const tick = choreo.tick(dt);
@@ -340,6 +345,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     dirty = false;
     render();
     sink?.(projectLabels());
+    if (!move && !activeGesture && host.dataset.officeState === 'moving') host.dataset.officeState = host.dataset.officeInteracting === 'true' ? 'interacting' : host.dataset.officeSelected === 'true' ? 'selected' : 'overview';
     if (quality.tier === 'high' && governor.frame(now, moving)) applyQuality(settingsFor('low', window.devicePixelRatio));
     if (moving || dirty) schedule(true);
     else if (choreo.busy() || (director && !reduced())) schedule(false);
@@ -363,6 +369,37 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     if (data?.object) return { kind: 'object', object: data.object };
     return undefined;
   };
+  const targetFor = (object: Object3D): OfficeTarget | undefined => {
+    const data = object.userData as { instanceId?: string; object?: OfficeObjectId; director?: boolean; queue?: boolean };
+    if (data.director) return { kind: 'director' };
+    if (data.queue) return lastModel?.director ? { kind: 'queue' } : undefined;
+    if (data.instanceId) return { kind: 'agent', instanceId: data.instanceId };
+    if (data.object) return { kind: 'object', object: data.object };
+    return undefined;
+  };
+  const outlineGeometry = new EdgesGeometry(proxyGeometry);
+  const outlineMaterial = new LineBasicMaterial({ color: '#ffe36a', depthTest: false, transparent: true, opacity: 0.98 });
+  let outline: LineSegments | undefined;
+  let outlineTarget: OfficeTarget | undefined, selectedTarget: OfficeTarget | undefined, hoveredTarget: OfficeTarget | undefined;
+  const sameTarget = (a?: OfficeTarget, b?: OfficeTarget): boolean => {
+    if (lastModel?.director && ((a?.kind === 'director' && b?.kind === 'object' && b.object === 'counter') || (b?.kind === 'director' && a?.kind === 'object' && a.object === 'counter'))) return true;
+    return a?.kind === b?.kind && (a?.kind === 'agent' ? a.instanceId === (b as typeof a)?.instanceId : a?.kind === 'object' ? a.object === (b as typeof a)?.object : true);
+  };
+  const paintHighlight = (target?: OfficeTarget): void => {
+    outline?.removeFromParent(); outline = undefined; outlineTarget = target;
+    if (target) {
+      const proxy = picks.find(item => sameTarget(targetFor(item), target));
+      if (proxy instanceof Mesh) {
+        outline = new LineSegments(outlineGeometry, outlineMaterial);
+        outline.position.copy(proxy.position); outline.rotation.copy(proxy.rotation); outline.scale.copy(proxy.scale).multiplyScalar(1.025);
+        outline.renderOrder = 1000; proxy.parent?.add(outline);
+      }
+    }
+    dirty = true; wake();
+  };
+  const highlight = (target?: OfficeTarget): void => { if (!immersive) return; selectedTarget = target; host.dataset.officeSelected = String(Boolean(target)); paintHighlight(hoveredTarget ?? selectedTarget); };
+  const preview = (target?: OfficeTarget): void => { if (!immersive) return; hoveredTarget = target; paintHighlight(hoveredTarget ?? selectedTarget); };
+  const setInteracting = (active: boolean): void => { if (!immersive) return; host.dataset.officeInteracting = String(active); host.dataset.officeState = active ? 'interacting' : selectedTarget ? 'selected' : 'overview'; };
   const positionOf = (target: OfficeTarget): Vec2 | undefined => {
     if (target.kind === 'agent') return choreo.views().find(v => v.instanceId === target.instanceId)?.point;
     if (target.kind === 'director') return directorPoint ?? cellCentre(OBJECT_CELLS.counter);
@@ -373,41 +410,49 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   /** The box with the reach an active inset needs; user gestures clamp against it. */
   const reach = (): WorldBox => (inset === NO_INSET ? box : withInset(box, size(), inset));
   const insetArg = (): { view: { w: number; h: number }; inset: Inset } | undefined => (inset === NO_INSET ? undefined : { view: size(), inset });
-  const easeTo = (to: Camera): void => { intent.touch(); move = new CameraMove(state, to, performance.now(), reduced()); wake(); };
+  const easeTo = (to: Camera): void => { intent.touch(); move = new CameraMove(state, to, performance.now(), reduced()); host.dataset.officeState = 'moving'; wake(); };
   const focus = (target: OfficeTarget): void => {
     const p = positionOf(target);
     if (!p || destroyed) return;
+    highlight(target);
     const zoom = target.kind === 'agent' || target.kind === 'director' ? AGENT_ZOOM : target.kind === 'queue' ? 1.9 : target.object === 'board' ? 1.6 : undefined;
     refit = () => focusOn(positionOf(target) ?? p, box, zoom, insetArg());
     easeTo(refit());
   };
   const focusZone = (zone: OfficeFocusZone): void => {
     if (destroyed) return;
+    highlight(undefined);
     refit = () => zone === 'overview' ? focusOn({ x: box.cx ?? box.w / 2, z: box.cz ?? box.d / 2 }, box, HOME_ZOOM, insetArg()) : focusOn(FOCUS_POINTS[zone].at, box, FOCUS_POINTS[zone].zoom, insetArg());
     easeTo(refit());
   };
   // The consumer hears the selection first so it can set the inset (the panel about to open) before the camera moves.
-  const select = (target: OfficeTarget): void => { if (!suppressTap) { rawSelect(target); focus(target); } };
+  const select = (target: OfficeTarget): void => { if (!suppressTap) { highlight(target); if (immersive) host.dataset.officeState = 'selected'; rawSelect(target); focus(target); } };
 
   // ---- camera input: user gestures only ----
   let drag: { id: number; x: number; y: number; sx: number; sy: number; moved: boolean } | undefined;
   const pointers = new Map<number, { x: number; y: number }>();
   let pinchDist = 0;
   const spread = (): number => { const [a, b] = [...pointers.values()]; return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : 0; };
-  const resetPointers = (): void => { pointers.clear(); drag = undefined; pinchDist = 0; };
+  const resetPointers = (): void => { pointers.clear(); drag = undefined; pinchDist = 0; activeGesture = false; if (immersive && hoveredTarget) { hoveredTarget = undefined; paintHighlight(selectedTarget); } if (immersive && host.dataset.officeState === 'moving' && !move) host.dataset.officeState = host.dataset.officeInteracting === 'true' ? 'interacting' : host.dataset.officeSelected === 'true' ? 'selected' : 'overview'; };
   const onDown = (e: PointerEvent): void => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (e.pointerType === 'mouse') resetPointers();
     if (pointers.size === 0) suppressTap = false;
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (pointers.size === 2) { drag = undefined; pinchDist = spread(); suppressTap = true; }
+    if (pointers.size === 2) { drag = undefined; pinchDist = spread(); suppressTap = true; activeGesture = true; if (immersive) host.dataset.officeState = 'moving'; }
     else if (pointers.size === 1) drag = { id: e.pointerId, x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, moved: false };
   };
   let hoverAt = 0;
   const onMove = (e: PointerEvent): void => {
     if (!pointers.has(e.pointerId)) {
-      // Hover only changes the cursor; at most every 60 ms.
-      if (e.target === canvas && e.pointerType === 'mouse' && e.timeStamp - hoverAt > 60) { hoverAt = e.timeStamp; canvas.style.cursor = pick(e.clientX, e.clientY) ? 'pointer' : 'default'; }
+      if (e.pointerType === 'mouse' && e.timeStamp - hoverAt > 60) {
+        hoverAt = e.timeStamp;
+        const target = e.target === canvas ? pick(e.clientX, e.clientY) : undefined;
+        if (e.target === canvas) canvas.style.cursor = target ? 'pointer' : 'default';
+        hoveredTarget = target;
+        if (immersive && target && !sameTarget(target, outlineTarget)) paintHighlight(target);
+        else if (immersive && !target && outlineTarget && !sameTarget(outlineTarget, selectedTarget)) paintHighlight(selectedTarget);
+      }
       return;
     }
     if (e.pointerType === 'mouse' && e.buttons === 0) { resetPointers(); return; }
@@ -419,7 +464,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     }
     if (!drag || e.pointerId !== drag.id) return;
     if (!drag.moved && Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < DRAG_THRESHOLD) return;
-    drag.moved = true; suppressTap = true;
+    drag.moved = true; suppressTap = true; activeGesture = true; if (immersive) host.dataset.officeState = 'moving';
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     drag.x = e.clientX; drag.y = e.clientY;
     userMove(panByPixels(state, dx, dy, size(), reach()));
@@ -430,13 +475,26 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     pointers.delete(e.pointerId);
     if (drag && e.pointerId === drag.id) drag = undefined;
     pinchDist = 0;
-    if (tap) { const target = pick(at.x, at.y); if (target) select(target); }
+    if (pointers.size < 2) activeGesture = false;
+    if (tap) {
+      const target = pick(at.x, at.y);
+      if (target) select(target);
+      else if (immersive) {
+        highlight(undefined);
+        const rect = canvas.getBoundingClientRect();
+        ndc.set(((at.x - rect.left) / rect.width) * 2 - 1, -(((at.y - rect.top) / rect.height) * 2 - 1));
+        ray.setFromCamera(ndc, cam);
+        const point = ray.ray.intersectPlane(new Plane(new Vector3(0, 1, 0), 0), new Vector3());
+        if (point) easeTo(focusOn({ x: point.x, z: point.z }, reach(), state.zoom, insetArg()));
+      }
+    } else if (immersive && !activeGesture) host.dataset.officeState = host.dataset.officeInteracting === 'true' ? 'interacting' : host.dataset.officeSelected === 'true' ? 'selected' : 'overview';
   };
   const onWheel = (e: WheelEvent): void => { e.preventDefault(); if (e.deltaY !== 0) userMove(zoomBy(state, wheelFactor(e.deltaY), reach())); };
   const onKey = (e: KeyboardEvent): void => {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const t = e.target;
     if (t instanceof HTMLElement && (t.isContentEditable || /^(input|textarea|select)$/i.test(t.tagName))) return;
+    if (immersive && e.key === 'Escape' && !e.defaultPrevented && !e.isComposing && (selectedTarget || host.dataset.officeInteracting === 'true')) { hoveredTarget = undefined; highlight(undefined); setInteracting(false); onDeselect?.(); host.dataset.officeState = 'overview'; return; }
     const action = cameraKey(e.key);
     if (!action) return;
     e.preventDefault();
@@ -451,6 +509,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   window.addEventListener('blur', resetPointers);
   document.addEventListener('visibilitychange', resetPointers);
   canvas.addEventListener('wheel', onWheel, { passive: false });
+  host.dataset.officeState = 'overview'; host.dataset.officeSelected = 'false'; host.dataset.officeInteracting = 'false';
   host.addEventListener('keydown', onKey);
   // A selected object stays centred in the resized scene. Cancel an obsolete in-flight target.
   const observer = new ResizeObserver(() => {
@@ -489,6 +548,8 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       }
       syncActors();
       syncDirector(model);
+      const missingAgent = selectedTarget;
+      if (missingAgent?.kind === 'agent' && !model.agents.some(agent => agent.instanceId === missingAgent.instanceId)) highlight(undefined);
       syncMarks(model);
       // Keep the first frame neutral until the topology read confirms its layout.
       const layout = model.layout ?? (model.director ? 'director' : 'legacy_v2');
@@ -504,6 +565,16 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     },
     projectLabels,
     setExcerpts(next) { excerpts = next; dirty = true; wake(); },
+    highlight,
+    preview,
+    setInteracting,
+    cameraControl(action) {
+      if (!immersive) return;
+      const step = 64;
+      if (action === 'zoom-in') userMove(zoomBy(state, 1.2, reach()));
+      else if (action === 'zoom-out') userMove(zoomBy(state, 1 / 1.2, reach()));
+      else userMove(panByPixels(state, action === 'left' ? step : action === 'right' ? -step : 0, action === 'up' ? step : action === 'down' ? -step : 0, size(), reach()));
+    },
     setInset(next) { inset = next.right === 0 && next.bottom === 0 && next.left === 0 ? NO_INSET : next; dirty = true; wake(); },
     setLabelSink(next) { sink = next; if (next && ready) next(projectLabels()); },
     setPaused(next) {
@@ -541,6 +612,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       for (const g of marks.values()) g.removeFromParent();
       marks.clear();
       kit.dispose();
+      outlineGeometry.dispose(); outlineMaterial.dispose();
       stage.dispose();
       proxyGeometry.dispose();
       proxyMaterial.dispose();

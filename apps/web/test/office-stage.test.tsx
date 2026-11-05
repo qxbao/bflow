@@ -162,6 +162,26 @@ describe('OfficeStage cues', () => {
 });
 
 describe('AccessibleOffice mirror', () => {
+  test('selection and interaction made before renderer readiness replay after the latest model applies', async () => {
+    let resolve!: (r: OfficeRenderer) => void;
+    const late: CreateRenderer = () => new Promise<OfficeRenderer>(r => { resolve = r; });
+    const control: { current: import('../src/features/office/ui/OfficeStage').StageControl | null } = { current: null };
+    const picked = vi.fn();
+    render(<OfficeStage model={model()} onSelect={picked} control={control} immersive createRenderer={late} />);
+    const mailbox = screen.getByRole('button', { name: /Hộp thư/ });
+    mailbox.focus();
+    await userEvent.keyboard('{Enter}');
+    control.current!.setInteracting?.(true);
+    const fake = newFake();
+    fake.highlight = vi.fn(); fake.focus = vi.fn(); fake.setInteracting = vi.fn();
+    await act(async () => { resolve(fake); await Promise.resolve(); });
+    expect(picked).toHaveBeenCalledWith({ kind: 'object', object: 'mailbox' });
+    expect(fake.apply.mock.invocationCallOrder[0]).toBeLessThan((fake.highlight as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!);
+    expect(fake.highlight).toHaveBeenCalledWith({ kind: 'object', object: 'mailbox' });
+    expect(fake.focus).toHaveBeenCalledWith({ kind: 'object', object: 'mailbox' });
+    expect(fake.setInteracting).toHaveBeenCalledWith(true);
+  });
+
   test('stays reachable while the canvas is healthy and objects are real buttons', async () => {
     const picked: OfficeTarget[] = [];
     render(<OfficeStage model={model({ pendingDecisions: 2 })} onSelect={t => picked.push(t)} createRenderer={factory} />);

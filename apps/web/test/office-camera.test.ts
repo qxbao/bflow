@@ -90,6 +90,10 @@ describe('focus', () => {
     const to = focusOn({ x: 20, z: 4 }, WORLD);
     expect(new CameraMove(fitCamera(WORLD), to, 0, true).at(0)).toEqual({ camera: to, done: true });
   });
+  test('reduced motion enabled during a move finishes immediately', () => {
+    const to = focusOn({ x: 20, z: 4 }, WORLD), move = new CameraMove(fitCamera(WORLD), to, 100, false);
+    expect(move.at(200, true)).toEqual({ camera: to, done: true });
+  });
 });
 
 const fit_zoom = (c: { zoom: number }): number => c.zoom;

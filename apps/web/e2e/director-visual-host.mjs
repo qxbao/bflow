@@ -67,7 +67,7 @@ const server=await createLocalWebServer({host:'127.0.0.1',port:0,stateDirectory:
 process.on('message',async message=>{
  try{
   if(message.kind==='inspect')process.send({requestId:message.requestId,value:{commands,launches,presence,messages,issues}});
-  else if(message.kind==='configure'){if(message.terminal!==undefined)terminal=message.terminal;if(message.presence)presence=message.presence;sequence++;process.send({requestId:message.requestId,value:true});}
+  else if(message.kind==='configure'){if(message.terminal!==undefined)terminal=message.terminal;if(message.presence)presence=message.presence;if(message.clearMessages)messages.splice(0);sequence++;process.send({requestId:message.requestId,value:true});}
   else if(message.kind==='pair')process.send({requestId:message.requestId,value:server.origin+'/#bootstrap='+await server.issueBootstrap()});
   else if(message.kind==='close'){await server.close();await rm(scratch,{recursive:true,force:true});process.exit(0);}
  }catch(error){process.send({requestId:message.requestId,error:String(error)});}

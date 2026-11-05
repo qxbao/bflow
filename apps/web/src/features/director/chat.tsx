@@ -29,9 +29,9 @@ export function DirectorChat({initialDraft='',handoffKey='',immersive=false}:{in
   },[last?.messageId,items.length]);
   const lastOwn=[...items].reverse().find(item=>item.author==='user');
   const replied=Boolean(lastOwn&&items.some(item=>item.author==='director'&&item.seq>lastOwn.seq));
-  return <section data-component="DirectorChat" aria-label="Trò chuyện với Director" className="chat-thread m-0 min-w-0 bg-surface">
-    <header className="flex flex-wrap items-center gap-3 border-b border-line px-4 py-3">
-      <span aria-hidden="true" className="flex size-10 shrink-0 items-center justify-center rounded-full bg-steel font-data font-semibold text-surface">D</span>
+  return <section data-component="DirectorChat" aria-label="Trò chuyện với Director" className={`chat-thread m-0 min-w-0 bg-surface ${immersive?'flex h-full min-h-0 flex-col overflow-hidden':''}`}>
+    <header className={`flex flex-wrap items-center gap-3 border-b border-line px-4 py-3 ${immersive?'max-[480px]:gap-1 max-[480px]:px-2 max-[480px]:py-1':''}`}>
+      <span aria-hidden="true" className={`flex size-10 shrink-0 items-center justify-center rounded-full bg-steel font-data font-semibold text-surface ${immersive?'max-[480px]:size-8':''}`}>D</span>
       <div className="min-w-0 grow basis-40"><h2 className="m-0 truncate text-base">Director</h2><DirectorPresenceStatus compact/></div>
       <button type="button" onClick={()=>{d.reload();void transcript.refresh();}}>Đọc lại hội thoại</button>
       <DirectorLaunch label="Khởi động phiên"/>
@@ -42,7 +42,7 @@ export function DirectorChat({initialDraft='',handoffKey='',immersive=false}:{in
       {d.view?.cliCaptureMayBeIncomplete&&<p className="my-2 text-center text-xs text-muted">Trao đổi gõ trực tiếp trong terminal của Director có thể chưa được ghi đầy đủ ở đây.</p>}
       {transcript.hasOlder&&<div className="text-center"><button type="button" disabled={transcript.loadingOlder} onClick={()=>{const e=log.current;if(e)anchor.current=e.scrollHeight-e.scrollTop;void transcript.loadOlder();}}>{transcript.loadingOlder?'Đang đọc tin cũ…':'Xem tin cũ hơn'}</button></div>}
       {Boolean(transcript.olderError)&&<p role="alert" className="text-center text-xs text-warning">Chưa đọc được tin cũ hơn. Thử lại sau.</p>}
-      {transcript.loaded&&!items.length&&<p className="mx-auto text-center text-sm text-muted">Chưa có tin nhắn với Director.</p>}
+      {transcript.loaded&&!items.length&&(immersive?<p className="mx-auto my-8 max-w-sm rounded-2xl bg-surface px-5 py-4 text-center text-sm">Chào bạn, tôi là Director của dự án này. Bạn có thể giao việc, hỏi tiến độ hoặc hỏi điều gì đang chờ xử lý.</p>:<p className="mx-auto text-center text-sm text-muted">Chưa có tin nhắn với Director.</p>)}
       <ol className="m-0 flex list-none flex-col gap-2 p-0">{items.map((item,index)=><Bubble key={item.seq} item={item} previous={items[index-1]} note={item.messageId===lastOwn?.messageId&&!replied?c.ownNote[d.presence]:undefined}/>)}</ol>
     </div>
     <DirectorChatComposer initialDraft={initialDraft} handoffKey={handoffKey} immersive={immersive}/>

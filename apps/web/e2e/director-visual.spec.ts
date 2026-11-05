@@ -138,3 +138,53 @@ test('Office3D: Director desk and issue board in the WebGL scene and the accessi
   await blur(page); await page.waitForTimeout(500);
   await shot(page, '13-office3d-phone-reduced-motion');
 });
+
+test('Immersive flag: Director desk opens one persistent, editable in-scene dialogue', async ({ page }) => {
+  test.skip(!process.env.VITE_BFLOW_IMMERSIVE_OFFICE, 'This browser check requires a build with the immersive flag enabled.');
+  test.setTimeout(120000);
+  await call('configure', { presence: 'active', clearMessages: true });
+  expect((await call('inspect')).messages).toHaveLength(0);
+  const base = await openProject(page, await call('pair'), repository, /guides.*Xem dự án/);
+  await enterVisual(page);
+  await page.goto(`${new URL(page.url()).origin}${base}/chat`);
+  await expect(page.getByRole('region', { name: 'Trò chuyện với Director' })).toHaveCount(1);
+  const opener = page.getByLabel('Bản văn bản của văn phòng').getByRole('button', { name: /^Director: Đang hoạt động/ });
+  await opener.focus();
+  await page.keyboard.press('Enter');
+  const dialogue = page.getByRole('region', { name: 'Hội thoại tại bàn Director' });
+  await expect(dialogue).toBeVisible();
+  await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-state', 'interacting');
+  await page.waitForTimeout(600);
+  await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-state', 'interacting');
+  await expect(dialogue.getByRole('region', { name: 'Trò chuyện với Director' })).toHaveCount(1);
+  expect(await page.evaluate(() => document.elementFromPoint(20, Math.floor(innerHeight / 2))?.getAttribute('aria-hidden'))).toBe('true');
+  await expect(dialogue.getByText(/Chào bạn, tôi là Director/)).toBeVisible();
+  const before = await call('inspect');
+  await dialogue.getByRole('button', { name: 'Hỏi tiến độ' }).click();
+  await expect(dialogue.getByLabel('Tin nhắn cho Director')).toHaveValue(/Cho tôi biết tiến độ/);
+  const after = await call('inspect');
+  expect(after.commands).toHaveLength(before.commands.length);
+  expect(after.messages.filter((message: any) => message.author === 'user' && message.channel === 'web')).toHaveLength(before.messages.filter((message: any) => message.author === 'user' && message.channel === 'web').length);
+  for (const viewport of [{ width: 375, height: 812 }, { width: 812, height: 375 }]) {
+    await page.setViewportSize(viewport);
+    const input = await dialogue.getByLabel('Tin nhắn cho Director').boundingBox();
+    expect(input).not.toBeNull();
+    expect(input!.y + input!.height).toBeLessThanOrEqual(viewport.height);
+  }
+  await dialogue.getByRole('button', { name: 'Rời bàn Director' }).click();
+  await expect(dialogue).toBeHidden();
+  await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-state', 'selected');
+  await expect(opener).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-state', 'overview');
+  await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-selected', 'false');
+  await page.getByText('Camera', { exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Phóng to' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Di chuyển góc nhìn sang trái' })).toBeVisible();
+  await opener.focus();
+  await page.keyboard.press('Enter');
+  await expect(dialogue).toBeVisible();
+  await page.goBack();
+  await expect(dialogue).toBeHidden();
+  await expect(page.getByRole('region', { name: 'Trò chuyện với Director' })).toHaveCount(1);
+});
