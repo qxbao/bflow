@@ -26,7 +26,7 @@ HTTP endpoints, never a traditional mutation CLI or fake host hook.
 
 ## Visualization mode (3D office)
 
-An optional mode, off by default: Classic stays the default view, and the choice is remembered per browser. The top-bar switch ("Trực quan") or the
+An optional mode, off by default: Classic stays the default view, and the choice is remembered per browser. The top-bar switch (`3D`) or the
 HUD toggle (`Classic | 3D`) enters it; the same `<Routes>` render in a floating panel, so every Classic page, form, recovery path and the operations
 dock are reachable from the scene (parity table in `test/office-parity.test.tsx`, 34 rows).
 

@@ -3,7 +3,7 @@ import type { WebProjectSession, WebRunView } from '@bflow/contracts/web';
 import { phases } from '../../../components/StatusBadge';
 import type { Connection } from '../../../api/events';
 import { connectionText } from '../../../components/ConnectionBanner';
-import type { UiMode } from '../mode';
+import { UI_MODE_OPTIONS, type UiMode } from '../mode';
 import type { OfficeFocusZone, OfficeModel, OfficePose } from '../model/types';
 
 /** Terminal runs are not "being worked on". */
@@ -159,7 +159,7 @@ export function OfficeHud(p: OfficeHudProps) {
         </div>
       </section>
       <div role="group" aria-label="Chế độ hiển thị" className={`pointer-events-auto inline-flex overflow-hidden ${panel}`}>
-        {(['classic', 'visual'] as const).map(value => <button type="button" key={value} aria-pressed={p.mode === value} className="min-w-14 rounded-none border-0 px-3 font-data text-xs aria-pressed:bg-accent aria-pressed:text-surface lg:min-w-16" onClick={() => { if (p.mode !== value) p.onMode(value); }}>{value === 'classic' ? 'Classic' : '3D'}</button>)}
+        {UI_MODE_OPTIONS.map(([value, label]) => <button type="button" key={value} aria-pressed={p.mode === value} className="min-w-14 rounded-none border-0 px-3 font-data text-xs aria-pressed:bg-accent aria-pressed:text-surface lg:min-w-16" onClick={() => { if (p.mode !== value) p.onMode(value); }}>{label}</button>)}
       </div>
       <div aria-label="Trạng thái văn phòng" className={`pointer-events-auto col-span-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 justify-self-start px-3 py-1.5 font-data text-xs text-ink lg:col-span-1 lg:col-start-2 lg:row-start-1 lg:justify-self-center ${panel}`}>
         <span>{p.session ? SESSION[p.session.state] ?? 'Phiên chưa rõ' : 'Đang đọc phiên'}</span>

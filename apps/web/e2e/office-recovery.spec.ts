@@ -223,7 +223,7 @@ test('3D mode toggled 50 times neither leaks WebGL contexts nor leaves a canvas 
   const TOGGLES = 50;
   const live = () => page.evaluate(() => (window as unknown as { __gl: WebGLRenderingContext[] }).__gl.filter(g => !g.isContextLost()).length);
   for (let i = 0; i < TOGGLES; i++) {
-    await page.getByRole('button', { name: 'Trực quan', exact: true }).click();
+    await page.getByRole('button', { name: '3D', exact: true }).click();
     await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-renderer', 'ready', { timeout: 20000 });
     // Never more than the one live context, however many scenes were created before.
     expect(await live(), `live contexts in visit ${i + 1}`).toBe(1);
