@@ -3,7 +3,7 @@
 // and no success animation: a finished turn has no clip of its own.
 import { dropBacklog, enqueue, type VisualCue, type VisualEndpoint, type VisualLimits } from '../model/timeline';
 import type { OfficeAgent, OfficeDirectorPresence, OfficeModel, OfficePose } from '../model/types';
-import { OBJECT_CELLS, cellCentre, deskPlan, routeBetween, seatCell, type Cell, type Vec2 } from './world';
+import { OBJECT_CELLS, cellCentre, deskCentre, deskPlan, roomShift, routeBetween, seatCell, type Cell, type Vec2 } from './world';
 
 export type Clip = 'sleep' | 'idle' | 'type' | 'type_fast' | 'walk' | 'carry' | 'raise_hand' | 'blocked' | 'ghost';
 /** Clip names of character.glb (office-actors.test compares them with the file). */
@@ -63,7 +63,7 @@ interface Trip { cells: Cell[]; elapsed: number }
 interface Actor { instanceId: string; role: string; certainty: OfficeAgent['certainty']; pose: OfficePose; home: Cell; trip?: Trip; key: string }
 
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
-const SEATED_AT = (c: Cell): Vec2 => { const p = cellCentre(c); return { x: p.x, z: p.z + SEAT_OFFSET_Z }; };
+const SEATED_AT = (c: Cell): Vec2 => { const p = deskCentre(c); return { x: p.x, z: p.z + SEAT_OFFSET_Z }; };
 
 export class Choreographer {
   private readonly actors = new Map<string, Actor>();
@@ -163,12 +163,13 @@ export class Choreographer {
     const p = Math.min(1, trip.elapsed / WALK_LIMITS.walkMs) * steps;
     const i = Math.min(steps - 1, Math.floor(p));
     const a = cellCentre(trip.cells[i] as Cell), b = cellCentre(trip.cells[i + 1] as Cell), f = p - i;
-    // The seat offset fades over the first and last step, so the character stands up and sits down instead of jumping.
+    // The seat offset (and a desk's half-cell room shift) fades over the first and last step, so the character stands up and sits down instead of jumping.
     const seat = i === 0 ? 1 - f : i === steps - 1 ? f : 0;
+    const shift = (i === 0 ? roomShift(trip.cells[0] as Cell) * (1 - f) : 0) + (i === steps - 1 ? roomShift(trip.cells[steps] as Cell) * f : 0);
     const out = trip.elapsed < WALK_LIMITS.walkMs / 2;
     return {
       ...base, clip: out ? 'carry' : 'walk', walking: true, carrying: out,
-      point: { x: lerp(a.x, b.x, f), z: lerp(a.z, b.z, f) + SEAT_OFFSET_Z * seat },
+      point: { x: lerp(a.x, b.x, f) + shift, z: lerp(a.z, b.z, f) + SEAT_OFFSET_Z * seat },
       heading: Math.atan2(b.x - a.x, b.z - a.z),
     };
   }

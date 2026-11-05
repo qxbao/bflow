@@ -33,6 +33,10 @@ describe('generated office models', () => {
     const names = (readJson('character.glb').animations ?? []).map(a => a.name);
     expect(names.sort()).toEqual([...CLIPS].sort());
   });
+  test('character has the dress-up nodes the scene toggles per role', () => {
+    const names = readJson('character.glb').nodes.map(n => n.name);
+    for (const n of ['hoodie', 'suit', 'tank', 'sleeve_l', 'sleeve_r', 'bare_l', 'bare_r', 'hair_short', 'hair_spiky', 'hair_long', 'face_f']) expect(names, n).toContain(n);
+  });
   test('colour only: no images or textures, and the two files stay under 4 MiB', () => {
     for (const f of ['character.glb', 'furniture.glb']) {
       const j = readJson(f);

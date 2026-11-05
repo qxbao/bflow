@@ -222,6 +222,7 @@ const mats = g => {
   g.material('shirt', '#f7f5ef', { rough: 0.6 });
   g.material('tie', '#a3192b', { rough: 0.45 });
   g.material('lapel', '#1b2436', { rough: 0.5 });
+  g.material('lips', '#d4677a', { rough: 0.5 });
 };
 
 // ---------- character.glb ----------
@@ -237,10 +238,40 @@ function character() {
       ] },
     ];
   };
+  // Each arm has two dress-up children: `sleeve_<k>` in the outfit colour (default) and `bare_<k>`, a skin arm for a sleeveless top.
   const arm = k => {
     const x = k === 'l' ? -1 : 1;
-    return { name: `arm_${k}`, t: [x * 0.2, 0.25, 0], parts: [limb(0.085, 0.2, 0.09, -0.09, 'outfit', 0.03), { g: place(ball(0.05, 0.05, 0.05, 8, 6), { t: [0, -0.215, 0] }), m: 'skin' }] };
+    return { name: `arm_${k}`, t: [x * 0.2, 0.25, 0], parts: [{ g: place(ball(0.05, 0.05, 0.05, 8, 6), { t: [0, -0.215, 0] }), m: 'skin' }], children: [
+      { name: `sleeve_${k}`, parts: [limb(0.085, 0.2, 0.09, -0.09, 'outfit', 0.03)] },
+      { name: `bare_${k}`, parts: [limb(0.07, 0.2, 0.075, -0.09, 'skin', 0.03)] },
+    ] };
   };
+  // Three dress-up hair styles under the head (the scene shows one): `hair_short` (dome with a straight fringe, the default), `hair_spiky`
+  // (a close cap with spikes standing up) and `hair_long` (dome, side-swept fringe, locks framing the face and long hair down the back).
+  const spike = (t, r) => ({ g: place(cyl(0, 0.07, 0.17, 6), { t, r }), m: 'hair' });
+  const hair = [
+    { name: 'hair_short', parts: [
+      { g: place(ball(0.25, 0.19, 0.235, 14, 7), { t: [0, 0.255, -0.03] }), m: 'hair' },
+      { g: place(box(0.34, 0.045, 0.04, 0.015), { t: [0, 0.31, 0.175] }), m: 'hair' },
+    ] },
+    { name: 'hair_spiky', parts: [
+      { g: place(ball(0.245, 0.16, 0.23, 14, 7), { t: [0, 0.27, -0.03] }), m: 'hair' },
+      spike([0, 0.45, -0.02], [0, 0, 0]), spike([-0.1, 0.43, 0.04], [12, 0, 25]), spike([0.1, 0.43, 0.04], [12, 0, -25]), spike([0, 0.43, 0.11], [28, 0, 0]),
+      spike([-0.08, 0.42, -0.12], [-22, 0, 20]), spike([0.08, 0.42, -0.12], [-22, 0, -20]), spike([-0.18, 0.37, -0.03], [0, 0, 48]), spike([0.18, 0.37, -0.03], [0, 0, -48]),
+    ] },
+    { name: 'hair_long', parts: [
+      { g: place(ball(0.255, 0.2, 0.24, 14, 7), { t: [0, 0.255, -0.03] }), m: 'hair' },
+      { g: place(box(0.26, 0.05, 0.05, 0.02), { t: [-0.05, 0.315, 0.17], r: [0, 0, 10] }), m: 'hair' },
+      ...[-1, 1].map(x => ({ g: place(box(0.075, 0.36, 0.15, 0.03), { t: [x * 0.215, 0.1, 0.03] }), m: 'hair' })),
+      { g: place(box(0.42, 0.38, 0.12, 0.05), { t: [0, 0.09, -0.15] }), m: 'hair' },
+      { g: place(ball(0.2, 0.06, 0.06, 10, 6), { t: [0, -0.1, -0.15] }), m: 'hair' },
+    ] },
+    // Feminine face details (lashes and lips), shown with `hair_long`.
+    { name: 'face_f', parts: [
+      ...[-1, 1].map(x => ({ g: place(box(0.06, 0.014, 0.014, 0.004), { t: [x * 0.088, 0.203, 0.205] }), m: 'eye' })),
+      { g: place(ball(0.035, 0.014, 0.012, 8, 6), { t: [0, 0.075, 0.175] }), m: 'lips' },
+    ] },
+  ];
   const root = g.node({
     name: 'character', s: [1.6, 1.6, 1.6],
     children: [{
@@ -257,6 +288,12 @@ function character() {
               { g: place(box(0.22, 0.09, 0.08, 0.03), { t: [0, 0.29, -0.09] }), m: 'outfit' },
               { g: place(box(0.095, 0.05, 0.016, 0.006), { t: [0.075, 0.2, 0.113] }), m: 'tag' },
             ] },
+            // `tank` (a sleeveless top): bare shoulders and a scoop neck over the outfit torso, worn with the `bare_<k>` arms.
+            { name: 'tank', parts: [
+              ...[-1, 1].map(x => ({ g: place(box(0.075, 0.03, 0.226, 0.01), { t: [x * 0.124, 0.262, 0] }), m: 'skin' })),
+              { g: place(box(0.13, 0.06, 0.014, 0.006), { t: [0, 0.24, 0.111] }), m: 'skin' },
+              { g: place(box(0.13, 0.04, 0.014, 0.006), { t: [0, 0.25, -0.111] }), m: 'skin' },
+            ] },
             { name: 'suit', parts: [
               { g: place(box(0.11, 0.17, 0.012, 0.004), { t: [0, 0.19, 0.112] }), m: 'shirt' },
               ...[-1, 1].map(x => ({ g: place(box(0.03, 0.035, 0.012, 0.004), { t: [x * 0.03, 0.262, 0.116], r: [0, 0, x * -35] }), m: 'shirt' })),
@@ -271,15 +308,14 @@ function character() {
             arm('l'), arm('r'),
             { name: 'paper', t: [0, 0.07, 0.19], r: [-12, 0, 0], parts: [{ g: box(0.22, 0.28, 0.014, 0.004), m: 'paper' }] },
             {
-              // Oversized round head, a dark blocky hair dome with a straight fringe.
+              // Oversized round head; the hair styles are dress-up children.
               name: 'head', t: [0, 0.27, 0], s: [1.12, 1.12, 1.12],
               parts: [
                 { g: place(ball(0.235, 0.215, 0.215, 14, 10), { t: [0, 0.2, 0] }), m: 'skin' },
-                { g: place(ball(0.25, 0.19, 0.235, 14, 7), { t: [0, 0.255, -0.03] }), m: 'hair' },
-                { g: place(box(0.34, 0.045, 0.04, 0.015), { t: [0, 0.31, 0.175] }), m: 'hair' },
                 { g: place(ball(0.034, 0.046, 0.024, 8, 6), { t: [-0.085, 0.15, 0.2] }), m: 'eye' },
                 { g: place(ball(0.034, 0.046, 0.024, 8, 6), { t: [0.085, 0.15, 0.2] }), m: 'eye' },
               ],
+              children: hair,
             },
           ],
         },

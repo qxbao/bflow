@@ -1,11 +1,12 @@
 import { describe, expect, test } from 'vitest';
-import { DECOR, DECOR_CELLS, DECOR_SIZE, DEVELOPER_SEAT_COUNT, DOORWAY_CELLS, GRID_H, GRID_W, OBJECT_CELLS, PARTITION_CELLS, PLANT_CELLS, TABLE_CELLS, ZONE_SIGNS, ZONE_TITLES, decorFootprint, decorPlacement, deskPlan, partitionPieces, routeBetween, seatCell, zoneAt, type Cell } from '../src/features/office/scene/world';
+import { cellCentre, DECOR, DECOR_CELLS, DECOR_SIZE, deskCentre, DEVELOPER_SEAT_COUNT, DOORWAY_CELLS, GRID_H, GRID_W, OBJECT_CELLS, PARTITION_CELLS, PLANT_CELLS, TABLE_CELLS, ZONE_SIGNS, ZONE_TITLES, decorFootprint, decorPlacement, deskPlan, partitionPieces, routeBetween, seatCell, zoneAt, type Cell } from '../src/features/office/scene/world';
 
 const key = (c: Cell): string => `${c.gx},${c.gy}`;
 const ALL_SEATS = [
   ...Array.from({ length: DEVELOPER_SEAT_COUNT }, (_, i) => `developer:${i + 1}`),
   'conversation:conversation', 'conversation:conversation:2', 'conversation:conversation:3',
-  ...['coordination:planner', 'coordination:coordinator', 'coordination:architect', 'coordination:specifier', 'verification:reviewer', 'verification:qa', 'verification:tester', 'verification:security'].flatMap(s => [s, `${s}:2`]),
+  'coordination:planner', 'coordination:coordinator', 'coordination:architect', 'coordination:specifier', 'verification:reviewer', 'verification:qa', 'verification:tester', 'verification:security',
+  'coordination:planner:2', 'coordination:specifier:2', 'verification:reviewer:2', 'verification:qa:2',
 ];
 const seatCells = ALL_SEATS.map(s => seatCell(s) as Cell);
 /** Plan rectangle of a desk with its chair (the chair stands on the -z side). */
@@ -21,10 +22,14 @@ describe('partitions', () => {
   test('wall cells and doorways follow the plan and never coincide', () => {
     const walls = new Set(PARTITION_CELLS.map(key));
     expect(walls.size).toBe(PARTITION_CELLS.length);
-    for (const gx of [1, 2, 3, 5, 12, 14, 22, 24, 27]) expect(walls.has(`${gx},8`), `${gx},8`).toBe(true);
-    for (const gy of [1, 4, 6, 7]) for (const gx of [8, 18]) expect(walls.has(`${gx},${gy}`), `${gx},${gy}`).toBe(true);
-    for (const gy of [9, 12, 13, 18]) expect(walls.has(`18,${gy}`)).toBe(true);
-    expect(DOORWAY_CELLS.map(key).sort()).toEqual(['13,8', '18,11', '18,5', '23,8', '4,8', '8,5'].sort());
+    // The back/front partition runs wall to wall (no gap at the west wall).
+    for (const gx of [0, 1, 2, 3, 5, 12, 15, 22, 24, 27]) expect(walls.has(`${gx},8`), `${gx},8`).toBe(true);
+    // One straight wall at x 9 from the back wall to the front edge: Director | Director Team above, Developer | spare room below.
+    for (const gy of [1, 3, 5, 7, 9, 12, 14, 18]) expect(walls.has(`9,${gy}`), `9,${gy}`).toBe(true);
+    for (let gy = 0; gy < 8; gy++) expect(walls.has(`8,${gy}`), `old wall 8,${gy}`).toBe(false);
+    for (const gy of [1, 3, 5, 7, 9, 12, 15, 17, 18]) expect(walls.has(`18,${gy}`), `18,${gy}`).toBe(true);
+    for (const gx of [19, 22, 24, 27]) expect(walls.has(`${gx},14`), `split ${gx},14`).toBe(true);
+    expect(DOORWAY_CELLS.map(key).sort()).toEqual(['4,8', '13,8', '14,8', '23,8', '9,4', '18,4', '9,13', '18,11', '18,16', '23,14'].sort());
     for (const d of DOORWAY_CELLS) expect(walls.has(key(d)), `doorway ${key(d)} is open`).toBe(false);
     for (const c of PARTITION_CELLS) { expect(c.gx).toBeGreaterThanOrEqual(0); expect(c.gx).toBeLessThan(GRID_W); expect(c.gy).toBeLessThan(GRID_H); }
   });
@@ -32,7 +37,9 @@ describe('partitions', () => {
     const { segments, posts } = partitionPieces();
     expect(segments).toHaveLength(PARTITION_CELLS.length);
     for (const g of segments) expect(PARTITION_CELLS.some(c => Math.abs(c.gx + 0.5 - g.x) <= 0.5 + g.len && Math.abs(c.gy + 0.5 - g.z) <= 0.5 + g.len)).toBe(true);
-    expect(posts.length).toBeGreaterThanOrEqual(DOORWAY_CELLS.length * 2);
+    // Each door opening (the Director Team double door is one opening of two cells) has a post either side.
+    const openings = DOORWAY_CELLS.filter(d => !DOORWAY_CELLS.some(o => o.gy === d.gy && o.gx === d.gx - 1)).length;
+    expect(posts.length).toBeGreaterThanOrEqual(openings * 2);
   });
   test('seats, desks and decor stay clear of the walls', () => {
     const walls = new Set(PARTITION_CELLS.map(key));
@@ -85,11 +92,57 @@ describe('decor', () => {
   test('floor decor blocks its cells; wall, ceiling, rug and table pieces do not', () => {
     const blocked = new Set(DECOR_CELLS.map(key));
     for (const d of floorItems) expect(blocked.has(key(d.cell)), `${d.node} ${key(d.cell)}`).toBe(true);
-    for (const gy of [5, 6, 7]) expect(blocked.has(`1,${gy}`) && blocked.has(`3,${gy}`), `sofas at row ${gy}`).toBe(true); // the long sofas face each other
-    expect(blocked.has('2,6')).toBe(true); // the tea table between them
+    for (const gy of [4, 5, 6]) expect(blocked.has(`2,${gy}`) && blocked.has(`6,${gy}`), `sofas at row ${gy}`).toBe(true); // the long sofas face each other
+    expect(blocked.has('4,5')).toBe(true); // the tea table between them
     for (const gx of [1, 2, 3, 4, 5, 6, 7]) expect(blocked.has(`${gx},0`), `back wall ${gx}`).toBe(true); // bookcases and statue span the back wall
-    const lamp = DECOR.find(d => d.node === 'pendant_lamp')!;
-    expect(decorPlacement(lamp).y).toBeGreaterThan(2.5);
+    // No ceiling lamps: they cluttered the overview.
+    expect(DECOR.filter(d => d.mount === 'ceiling' || d.node === 'pendant_lamp')).toHaveLength(0);
+  });
+});
+
+describe('symmetry', () => {
+  /** Whether world x positions (with their row) mirror about a room's centre line. */
+  const mirrored = (points: readonly { x: number; z: number }[], axis: number): boolean => points.every(p => points.some(o => Math.abs(o.z - p.z) < 1e-6 && Math.abs(o.x - (2 * axis - p.x)) < 1e-6));
+  const devSeats = Array.from({ length: DEVELOPER_SEAT_COUNT }, (_, i) => `developer:${i + 1}`);
+  test('always-drawn desks and the seats of every room are mirror-symmetric about the room centre line', () => {
+    const drawn = deskPlan([]).desks.map(deskCentre);
+    expect(mirrored(drawn.filter(p => p.z < 8 && p.x > 9.5 && p.x < 18), 14)).toBe(true);
+    expect(drawn.filter(p => p.z < 8 && p.x > 9.5 && p.x < 18).map(p => p.x)).toEqual([11, 14, 17]);
+    expect(mirrored(drawn.filter(p => p.z > 9 && p.x > 18), 23.5)).toBe(true);
+    expect(mirrored(drawn.filter(p => p.z > 9 && p.x < 9), 4.5)).toBe(true);
+    expect(mirrored(deskPlan(devSeats).desks.map(deskCentre).filter(p => p.z > 9 && p.x < 9), 4.5)).toBe(true);
+    expect(mirrored(ALL_SEATS.filter(s => s.startsWith('coordination:')).map(s => deskCentre(seatCell(s)!)), 14)).toBe(true);
+    expect(mirrored(ALL_SEATS.filter(s => s.startsWith('verification:')).map(s => deskCentre(seatCell(s)!)), 23.5)).toBe(true);
+    expect(deskCentre(OBJECT_CELLS.server).x).toBe(14);
+  });
+  test('the Developer desks sit on the Developer floor with the same margin either side and keep the doors clear', () => {
+    const desks = deskPlan(devSeats).desks.filter(c => c.gy > 8 && c.gx < 9);
+    const x0 = Math.min(...desks.map(c => deskRect(c).x0)), x1 = Math.max(...desks.map(c => deskRect(c).x1));
+    for (const c of desks) expect(zoneAt(c)).toBe('developer');
+    const floor = { x0: 0, x1: 9 };
+    expect(x0).toBeGreaterThanOrEqual(floor.x0); expect(x1).toBeLessThanOrEqual(floor.x1);
+    expect(x0 - floor.x0).toBeCloseTo(floor.x1 - x1);
+    for (const d of DOORWAY_CELLS.filter(c => c.gx < 10 && c.gy > 7)) for (const a of [d, ...approach(d)]) expect(desks.some(c => key(c) === key(a)), `door ${key(d)}`).toBe(false);
+  });
+  test('each decor pair of the back rooms mirrors about its room centre', () => {
+    const at = (node: string, f: (p: { x: number; z: number }) => boolean = () => true) => DECOR.filter(d => d.node === node).map(decorPlacement).filter(f);
+    expect(mirrored([...at('sofa_lux'), ...at('plant_tall', p => p.x < 9)], 4.5)).toBe(true);
+    expect(mirrored([...at('bookshelf', p => p.z < 1), ...at('window')], 14)).toBe(true);
+    expect(mirrored(at('plant_tall', p => p.x > 18 && p.z < 8), 23.5)).toBe(true);
+    expect(mirrored(PLANT_CELLS.filter(c => c.gy === 7).map(cellCentre), 14)).toBe(true);
+  });
+  test('the spare room under QA / Reviewer is empty and has its own doors', () => {
+    expect(DECOR.filter(d => d.cell.gx > 18 && d.cell.gy > 14)).toHaveLength(0);
+    expect(PLANT_CELLS.filter(c => c.gx > 18 && c.gy > 14)).toHaveLength(0);
+    expect(DOORWAY_CELLS.map(key)).toEqual(expect.arrayContaining(['23,14', '18,16']));
+  });
+});
+
+describe('water coolers', () => {
+  test('stand either side of the door from the Director room into the Developer zone', () => {
+    const coolers = DECOR.filter(d => d.node === 'water_cooler').map(d => key(d.cell)).sort();
+    expect(coolers).toEqual(['3,8', '5,8']);
+    expect(DOORWAY_CELLS.map(key)).toContain('4,8');
   });
 });
 
@@ -102,11 +155,15 @@ describe('signs', () => {
       expect(s.z).toBeGreaterThan(0); expect(s.z).toBeLessThan(GRID_H); expect(s.y).toBeGreaterThan(0.5);
     }
   });
-  test('front-room signs hang on the partition clear of the doorways; back-room signs sit over their own room', () => {
+  test('front-room signs are lintels centred over the room door, resting on the partition either side; back-room signs sit over their own room', () => {
+    const walls = new Set(PARTITION_CELLS.map(key));
     for (const id of ['developer', 'verification'] as const) {
       const s = ZONE_SIGNS.find(q => q.id === id)!;
       expect(s.z).toBeGreaterThan(8.58); expect(s.z).toBeLessThan(8.8);
-      for (const d of DOORWAY_CELLS.filter(c => c.gy === 8)) expect(s.x + s.w / 2 <= d.gx || s.x - s.w / 2 >= d.gx + 1, `${id} vs doorway ${d.gx}`).toBe(true);
+      const door = DOORWAY_CELLS.find(d => d.gy === 8 && d.gx + 0.5 === s.x);
+      expect(door, `${id} sign is centred over a door`).toBeDefined();
+      expect(walls.has(`${door!.gx - 1},8`) && walls.has(`${door!.gx + 1},8`), `${id} rests on both sides`).toBe(true);
+      expect(s.x - s.w / 2).toBeGreaterThan(door!.gx - 1); expect(s.x + s.w / 2).toBeLessThan(door!.gx + 2);
       expect(zoneAt({ gx: Math.floor(s.x), gy: 9 })).toBe(id);
     }
     for (const id of ['conversation', 'coordination'] as const) expect(zoneAt({ gx: Math.floor(ZONE_SIGNS.find(q => q.id === id)!.x), gy: 1 })).toBe(id);

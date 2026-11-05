@@ -115,7 +115,7 @@ describe('camera intent and inset', () => {
     expect(AGENT_ZOOM).toBeLessThanOrEqual(1.8);
   });
   test('with an inset the camera looks right of and above the target so the target sits in the visible area', () => {
-    const at = { x: 12, z: 4 };
+    const at = { x: 12, z: box.cz }; // away from the clamp edges, so only the inset moves the camera
     const plain = focusOn(at, box, AGENT_ZOOM), shifted = focusOn(at, box, AGENT_ZOOM, { view, inset });
     // Panel at the right: the camera moves right, so the target appears left of the screen centre, i.e. in the visible part.
     expect(shifted.x).toBeGreaterThan(plain.x);
@@ -138,8 +138,8 @@ describe('camera intent and inset', () => {
 describe('layout', () => {
   test('every seat the assignment can produce has a cell inside the grid, and no two seats share one', () => {
     const seats = [...DEVELOPER_SEATS, 'conversation:conversation', 'coordination:coordinator', 'coordination:planner', 'coordination:architect', 'coordination:specifier',
-      'verification:reviewer', 'verification:qa', 'verification:tester', 'verification:security', 'verification:reviewer:2', 'verification:qa:2', 'verification:tester:2', 'verification:security:2',
-      'conversation:conversation:2', 'conversation:conversation:3', 'coordination:coordinator:2', 'coordination:planner:2', 'coordination:architect:2', 'coordination:specifier:2'];
+      'verification:reviewer', 'verification:qa', 'verification:tester', 'verification:security', 'verification:reviewer:2', 'verification:qa:2',
+      'conversation:conversation:2', 'conversation:conversation:3', 'coordination:planner:2', 'coordination:specifier:2'];
     const keys = seats.map(seat => {
       const c = seatCell(seat);
       expect(c, seat).toBeDefined();
@@ -150,35 +150,39 @@ describe('layout', () => {
     expect(seatCell('developer:21')).toBeUndefined();
     // Beyond the spare seats of a role there is no cell (the instance is not drawn).
     expect(seatCell('verification:reviewer:3')).toBeUndefined();
+    expect(seatCell('verification:tester:2')).toBeUndefined();
+    expect(seatCell('coordination:architect:2')).toBeUndefined();
     expect(seatCell('conversation:conversation:4')).toBeUndefined();
     expect(seatCell('annex:1')).toBeUndefined();
     expect(seatCell('nonsense')).toBeUndefined();
   });
-  test('20 developer seats, rows of six, and the zone grows with the count (occupied rows plus the next free one)', () => {
+  test('20 developer seats, rows of four, and the zone grows with the count (occupied rows plus the next free one)', () => {
     expect(DEVELOPER_SEATS).toHaveLength(20);
-    expect(developerRowsFor(0)).toBe(1);
-    expect(developerRowsFor(1)).toBe(2);
-    expect(developerRowsFor(6)).toBe(2);
-    expect(developerRowsFor(7)).toBe(3);
-    expect(developerRowsFor(13)).toBe(4);
-    expect(developerRowsFor(20)).toBe(4);
-    expect(developerRowsFor(99)).toBe(4);
+    // Four rows are always furnished (with or without a session); a fifth appears once the fourth is in use.
+    expect(developerRowsFor(0)).toBe(4);
+    expect(developerRowsFor(1)).toBe(4);
+    expect(developerRowsFor(12)).toBe(4);
+    expect(developerRowsFor(13)).toBe(5);
+    expect(developerRowsFor(20)).toBe(5);
+    expect(developerRowsFor(99)).toBe(5);
     expect(DEVELOPER_SEAT_COUNT).toBe(20);
     const area = (rows: number): number => { const z = zones(rows).find(q => q.id === 'developer')!; return (z.x1 - z.x0) * (z.y1 - z.y0); };
-    expect(area(2)).toBeGreaterThan(area(1));
+    expect(area(5)).toBeGreaterThan(area(4));
     for (let n = 1; n <= 20; n++) { const c = seatCell(`developer:${n}`)!; expect(zoneAt(c, developerRowsFor(n)), `developer:${n}`).toBe('developer'); }
     // Few developers: the zone and its desks stay small, so the office does not look empty or sprawling.
-    expect(deskPlan(['developer:1', 'developer:2', 'developer:3']).desks.filter(c => c.gy >= 10 && c.gx <= 17)).toHaveLength(12);
-    expect(deskPlan([]).desks.filter(c => c.gy >= 10 && c.gx <= 17)).toHaveLength(6);
+    expect(deskPlan(['developer:1', 'developer:2', 'developer:3']).desks.filter(c => c.gy >= 10 && c.gx <= 8)).toHaveLength(16);
+    expect(deskPlan([]).desks.filter(c => c.gy >= 10 && c.gx <= 8)).toHaveLength(16);
+    expect(deskPlan(['developer:13']).desks.filter(c => c.gy >= 10 && c.gx <= 8)).toHaveLength(20);
   });
-  test('developer desks stand in north-south lines, mirror-symmetric about the centre aisle, which is wider than the side aisles', () => {
+  test('developer desks stand in four evenly spaced north-south lines in the west half; the east half is the empty spare room', () => {
     const cells = DEVELOPER_SEATS.map(s => seatCell(s)!), cols = [...new Set(cells.map(c => c.gx))].sort((a, b) => a - b);
-    expect(cols).toEqual([1, 4, 7, 11, 14, 17]);
-    for (const gx of cols) expect(cols).toContain(18 - gx);
-    const gaps = cols.slice(1).map((gx, i) => gx - cols[i]!);
-    expect(gaps[2]).toBeGreaterThan(Math.max(...gaps.filter((_, i) => i !== 2)));
-    // A partly used last row stays symmetric: its seats are the two centre lines.
-    expect([19, 20].map(n => seatCell(`developer:${n}`)!.gx).sort()).toEqual([11, 7].sort());
+    expect(cols).toEqual([1, 3, 5, 7]);
+    for (const gx of cols) expect(cols).toContain(8 - gx);
+    // The first seats of a row are the two centre lines.
+    expect([1, 2].map(n => seatCell(`developer:${n}`)!.gx).sort()).toEqual([3, 5]);
+    for (const c of cells) expect(zoneAt(c)).toBe('developer');
+    for (let gy = 9; gy <= 18; gy++) for (let gx = 10; gx <= 17; gx++) expect(zoneAt({ gx, gy })).toBe('spare');
+    expect(deskPlan(DEVELOPER_SEATS).desks.some(c => c.gy >= 9 && c.gx >= 9 && c.gx <= 17)).toBe(false);
   });
   test('rooms follow the reference layout: back row above the front row, QA/Reviewer at the right', () => {
     const z = (id: string) => zones(4).find(q => q.id === id)!;
@@ -211,10 +215,15 @@ describe('layout', () => {
     expect(zoneAt({ gx: Math.floor(FOCUS_POINTS.developer.at.x), gy: Math.floor(FOCUS_POINTS.developer.at.z) })).toBe('developer');
     expect(zoneAt({ gx: Math.floor(FOCUS_POINTS.qa.at.x), gy: Math.floor(FOCUS_POINTS.qa.at.z) })).toBe('verification');
   });
-  test('only Coordinator and QA anchor desks are drawn without agents; others appear with their agent', () => {
+  test('the Director Team, Reviewer and QA desks are drawn with or without a session; the Coordinator desk and spares appear with their agent', () => {
     const keys = (seats: string[]) => deskPlan(seats).desks.filter(c => c.gy < 9 || c.gx >= 19).map(c => `${c.gx},${c.gy}`);
-    expect(keys([]).sort()).toEqual([`${seatCell('coordination:coordinator')!.gx},3`, `${seatCell('verification:qa')!.gx},10`].sort());
-    expect(keys(['coordination:planner'])).toContain(`${seatCell('coordination:planner')!.gx},3`);
+    const at = (seat: string) => { const c = seatCell(seat)!; return `${c.gx},${c.gy}`; };
+    const always = ['coordination:planner', 'coordination:architect', 'coordination:specifier', 'verification:reviewer', 'verification:qa'].map(at);
+    expect(keys([]).sort()).toEqual([...always].sort());
+    expect(keys(['coordination:planner', 'coordination:architect', 'coordination:specifier', 'verification:reviewer', 'verification:qa']).sort()).toEqual([...always].sort());
+    expect(keys([])).not.toContain(at('coordination:coordinator'));
+    expect(keys(['coordination:coordinator'])).toContain(at('coordination:coordinator'));
+    expect(keys(['verification:tester'])).toContain(at('verification:tester'));
   });
   test('content framing follows the drawn desks, so few agents leave no empty foreground, and the camera clamps to it', () => {
     const few = contentBox(deskPlan([]).desks), many = contentBox(deskPlan(DEVELOPER_SEATS).desks);
@@ -228,7 +237,7 @@ describe('layout', () => {
     expect(ZONE_TITLES.map(z => z.text)).toEqual(['Conversation', 'Coordinator', 'Task Board', 'Developer Zone', 'QA / Reviewer']);
   });
   test('objects, desks and plants do not collide and stay inside the world', () => {
-    const everyDesk = deskPlan([...Array.from({ length: 20 }, (_, i) => `developer:${i + 1}`), 'verification:reviewer:2', 'verification:qa:2', 'verification:tester:2', 'verification:security:2', 'coordination:coordinator:2', 'coordination:planner:2', 'coordination:architect:2', 'coordination:specifier:2', 'conversation:conversation:2', 'conversation:conversation:3']).desks;
+    const everyDesk = deskPlan([...Array.from({ length: 20 }, (_, i) => `developer:${i + 1}`), 'verification:reviewer:2', 'verification:qa:2', 'coordination:planner:2', 'coordination:specifier:2', 'conversation:conversation:2', 'conversation:conversation:3']).desks;
     const cells = [...Object.values(OBJECT_CELLS).filter(c => c !== OBJECT_CELLS.counter), ...everyDesk, ...PLANT_CELLS, ...TABLE_CELLS].map(c => `${c.gx},${c.gy}`);
     expect(new Set(cells).size).toBe(cells.length);
     expect(OBJECT_CELLS.counter).toEqual(seatCell('conversation:conversation'));
@@ -239,7 +248,7 @@ describe('layout', () => {
   });
   test('every occupied seat has a drawn desk (or the counter) and can reach the rest of the office', () => {
     const occupied = [...DEVELOPER_SEATS, 'conversation:conversation', 'conversation:conversation:2', 'conversation:conversation:3', 'coordination:planner', 'coordination:coordinator', 'coordination:architect', 'coordination:specifier', 'coordination:planner:2',
-      'verification:reviewer', 'verification:qa', 'verification:tester', 'verification:security', 'verification:reviewer:2', 'verification:qa:2', 'verification:tester:2', 'verification:security:2'];
+      'verification:reviewer', 'verification:qa', 'verification:tester', 'verification:security', 'verification:reviewer:2', 'verification:qa:2'];
     const plan = deskPlan(occupied);
     const drawn = new Set(plan.desks.map(c => `${c.gx},${c.gy}`));
     const counter = OBJECT_CELLS.counter;
@@ -257,13 +266,13 @@ describe('layout', () => {
   });
   test('unused developer rows have no desks and do not block a path', () => {
     const plan = deskPlan(['developer:1']);
-    expect(plan.developerRows).toBe(2);
-    const third = plan.desks.filter(c => c.gy === 14 && c.gx <= 17);
-    expect(third).toHaveLength(0);
-    const straight = routeBetween({ gx: 3, gy: 14 }, { gx: 15, gy: 14 }, plan.desks);
-    expect(straight).toHaveLength(13); // a straight line through where the desks would be
+    expect(plan.developerRows).toBe(4);
+    const fifth = plan.desks.filter(c => c.gy === 18 && c.gx <= 8);
+    expect(fifth).toHaveLength(0);
+    const straight = routeBetween({ gx: 1, gy: 18 }, { gx: 7, gy: 18 }, plan.desks);
+    expect(straight).toHaveLength(7); // a straight line through where the desks would be
     // With a full office the same trip must go around the desks.
-    expect(routeBetween({ gx: 3, gy: 14 }, { gx: 15, gy: 14 }, deskPlan(DEVELOPER_SEATS).desks).length).toBeGreaterThan(13);
+    expect(routeBetween({ gx: 1, gy: 18 }, { gx: 7, gy: 18 }, deskPlan(DEVELOPER_SEATS).desks).length).toBeGreaterThan(7);
   });
   test('applySeats fills seats without mutating the model', () => {
     const model = { tier: 'degraded', certainty: 'unknown', statusText: '', agents: [{ instanceId: 'a', label: 'a', role: 'developer', pose: 'sleeping', certainty: 'unknown', statusText: '' }], tasks: [], pendingDecisions: 0, handoffs: [], connection: 'connected' } as OfficeModel;
