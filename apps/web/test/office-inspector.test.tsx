@@ -125,12 +125,12 @@ test('a refused session opens re-pairing in the panel instead of stale data', as
   render(<MemoryRouter initialEntries={['/projects/p']}><App api={new ApiClient()} /></MemoryRouter>);
   await screen.findByText('Cần ghép nối lại');
   const main = document.getElementById('main')!;
-  expect(await within(main).findByLabelText(/Mã hoặc đường dẫn ghép nối/)).toBeTruthy();
+  expect(await within(main).findByLabelText(/Liên kết mở Bflow Web/)).toBeTruthy();
   expect(screen.getByLabelText('Trạng thái văn phòng').textContent).toContain('Cần ghép nối lại');
   // Toàn cảnh closes panels but the re-pair view cannot be dismissed.
   fireEvent.click(screen.getByRole('button', { name: 'Toàn cảnh' }));
   await new Promise(resolve => setTimeout(resolve, 20));
-  expect(within(main).getByLabelText(/Mã hoặc đường dẫn ghép nối/)).toBeTruthy();
+  expect(within(main).getByLabelText(/Liên kết mở Bflow Web/)).toBeTruthy();
   expect(main.classList.contains('hidden')).toBe(false);
 });
 
@@ -172,11 +172,11 @@ test('the re-pair view does not close on Esc or by button', async () => {
   render(<MemoryRouter initialEntries={['/projects/p']}><App api={new ApiClient()} /></MemoryRouter>);
   await screen.findByText('Cần ghép nối lại');
   const main = document.getElementById('main')!;
-  await within(main).findByLabelText(/Mã hoặc đường dẫn ghép nối/);
+  await within(main).findByLabelText(/Liên kết mở Bflow Web/);
   fireEvent.keyDown(main, { key: 'Escape' });
   expect(main.classList.contains('hidden')).toBe(false);
   expect((screen.getByRole('button', { name: 'Đóng bảng' }) as HTMLButtonElement).disabled).toBe(true);
-  expect(within(main).getByLabelText(/Mã hoặc đường dẫn ghép nối/)).toBeTruthy();
+  expect(within(main).getByLabelText(/Liên kết mở Bflow Web/)).toBeTruthy();
 });
 
 test('shows the agent terminal text and a link to all staff', async () => {

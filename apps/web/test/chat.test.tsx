@@ -89,7 +89,7 @@ it('sends on Enter, keeps Shift+Enter and IME composition, and shows the sending
   if(init.method==='POST'){posts.push(String(init.body));return new Promise<Response>(resolve=>{finish=resolve;});}
   return Promise.resolve(new Response(JSON.stringify({apiVersion:1,items:history})));
  }));
- render(open());const input=await screen.findByLabelText<HTMLTextAreaElement>('Tin nhắn cho Conversation');await vi.waitFor(()=>expect(input.disabled).toBe(false));
+ render(open());const input=await screen.findByLabelText<HTMLTextAreaElement>('Tin nhắn cho trợ lý');await vi.waitFor(()=>expect(input.disabled).toBe(false));
  fireEvent.change(input,{target:{value:'Xin chào'}});
  fireEvent.keyDown(input,{key:'Enter',shiftKey:true});fireEvent.keyDown(input,{key:'Enter',isComposing:true});expect(posts).toHaveLength(0);
  fireEvent.keyDown(input,{key:'Enter'});
@@ -115,7 +115,7 @@ it('sends a validated message with exact run/session and never auto retries a lo
   if(init.method==='POST'){const input=JSON.parse(String(init.body));metadata.push(input);sent++;original=input.messageId;throw Error('Lost ACK');}
   return new Response(JSON.stringify({apiVersion:1,items:original?[{...message,messageId:original,sender:'user',source:'web',content:'Nội dung mới',delivery:'queued'}]:[]}));
  }));
- render(open());const input=await screen.findByLabelText<HTMLTextAreaElement>('Tin nhắn cho Conversation');await vi.waitFor(()=>expect(input.disabled).toBe(false));
+ render(open());const input=await screen.findByLabelText<HTMLTextAreaElement>('Tin nhắn cho trợ lý');await vi.waitFor(()=>expect(input.disabled).toBe(false));
  fireEvent.change(input,{target:{value:'Nội dung mới'}});fireEvent.click(screen.getByRole('button',{name:'Gửi tin nhắn'}));
  await screen.findByText(/Chưa xác định được kết quả gửi/);expect(sent).toBe(1);expect(metadata[0]).toMatchObject({projectId:'p',sessionId:'host',runId:'run',content:'Nội dung mới'});
  expect(JSON.stringify(localStorage)).not.toContain('Nội dung mới');
@@ -128,7 +128,7 @@ it('allows a new message after verified session readiness while first-message hi
   :new Response(JSON.stringify({apiVersion:1,code:'unavailable',message:'History not created yet',retryable:true,correlationId:'cold'}),{status:503}));
  vi.stubGlobal('fetch',fetcher);render(open());
  await screen.findByRole('alert');
- await vi.waitFor(()=>expect(screen.getByLabelText<HTMLTextAreaElement>('Tin nhắn cho Conversation').disabled).toBe(false));
+ await vi.waitFor(()=>expect(screen.getByLabelText<HTMLTextAreaElement>('Tin nhắn cho trợ lý').disabled).toBe(false));
  expect(screen.queryByText('Chưa có tin nhắn trong công việc này.')).toBeNull();
  expect(fetcher.mock.calls.every(([,init])=>init?.method==='GET')).toBe(true);
 });

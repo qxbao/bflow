@@ -64,7 +64,7 @@ export function AgentsPage({ api, id, revision }: { api: ApiClient; id: string; 
     <LoadingState loading={result.loading} initial={!result.data} label="Đang tải danh sách nhân viên…" />
     {Boolean(result.error) && (unsupported && !result.data ? <EmptyState title="Chưa có dữ liệu nhân viên"><p>Máy chủ chưa cung cấp danh sách nhân viên. Có thể phiên chưa chạy.</p></EmptyState> : <ErrorState stale={Boolean(result.data)} error={result.error} retry={() => setReload(n => n + 1)} />)}
     {result.data && agents.length === 0 && <EmptyState title="Chưa có nhân viên nào"><p>Phiên chưa có nhân viên nào được theo dõi.</p></EmptyState>}
-    {selected && <div className="grid min-w-0 gap-4 md:grid-cols-[minmax(0,14rem)_minmax(0,1fr)]">
+    {selected && <div className="content-grid grid min-w-0 gap-4 md:grid-cols-[minmax(0,14rem)_minmax(0,1fr)]">
       <ul aria-label="Danh sách nhân viên" className="m-0 list-none p-0">{agents.map(a => <li key={a.instanceId} className="border-t border-line first:border-t-0">
         <button type="button" aria-pressed={a.instanceId === selected.instanceId} onClick={() => setParams({ agent: a.instanceId }, { replace: true })} className="w-full rounded-none border-transparent px-2 py-1.5 text-left aria-pressed:bg-faint">
           <span className="block font-semibold [overflow-wrap:anywhere]">{a.displayName}</span>

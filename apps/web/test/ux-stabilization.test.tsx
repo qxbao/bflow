@@ -51,19 +51,19 @@ describe('Web UX stabilization & functional regression guards', () => {
     );
 
     render(<ProjectConfiguration api={new ApiClient()} id="p" revision={0} />);
-    const convModel = await screen.findByRole<HTMLInputElement>('textbox', { name: 'Model (conversation)' });
-    const devModel = screen.getByRole<HTMLInputElement>('textbox', { name: 'Model (developer)' });
+    const convModel = await screen.findByRole<HTMLInputElement>('textbox', { name: 'Mô hình AI (conversation)' });
+    const devModel = screen.getByRole<HTMLInputElement>('textbox', { name: 'Mô hình AI (developer)' });
     expect(convModel.getAttribute('list')).toBeNull();
     expect(convModel.value).toBe('sonnet');
     expect(devModel.value).toBe('gpt-5');
 
-    fireEvent.change(screen.getByLabelText('Áp dụng nhanh Provider'), { target: { value: 'claude' } });
-    fireEvent.change(screen.getByLabelText('Áp dụng nhanh Model'), { target: { value: 'haiku' } });
+    fireEvent.change(screen.getByLabelText('Công cụ AI cho cả nhóm'), { target: { value: 'claude' } });
+    fireEvent.change(screen.getByLabelText('Mô hình AI cho cả nhóm'), { target: { value: 'haiku' } });
     fireEvent.click(screen.getByRole('button', { name: 'Áp dụng cho tất cả vai trò' }));
 
     expect(convModel.value).toBe('haiku');
     expect(devModel.value).toBe('haiku');
-    expect((screen.getByLabelText('Provider (developer)') as HTMLSelectElement).value).toBe('claude');
+    expect((screen.getByLabelText('Công cụ AI (developer)') as HTMLSelectElement).value).toBe('claude');
   });
 
   it.each([
@@ -91,17 +91,17 @@ describe('Web UX stabilization & functional regression guards', () => {
       return Response.json(config);
     }));
     render(<ProjectConfiguration api={new ApiClient()} id="p" revision={0} />);
-    await screen.findByLabelText('Provider (developer)');
-    fireEvent.change(screen.getByLabelText('Áp dụng nhanh Provider'), { target: { value: provider } });
+    await screen.findByLabelText('Công cụ AI (developer)');
+    fireEvent.change(screen.getByLabelText('Công cụ AI cho cả nhóm'), { target: { value: provider } });
     expect(screen.queryByRole('button', { name: 'sonnet' })).toBeNull();
     expect(screen.queryByRole('button', { name: provider === 'codex' ? 'team-agy-model' : 'team-codex-model' })).toBeNull();
     expect(screen.getByRole('button', { name: provider === 'codex' ? 'team-codex-model' : 'team-agy-model' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: provider === 'codex' ? 'o4-mini' : 'gemini-2.5-pro' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: label }));
-    expect((screen.getByLabelText('Áp dụng nhanh Model') as HTMLInputElement).value).toBe(modelId);
+    expect((screen.getByLabelText('Mô hình AI cho cả nhóm') as HTMLInputElement).value).toBe(modelId);
     fireEvent.click(screen.getByRole('button', { name: 'Áp dụng cho tất cả vai trò' }));
-    expect((screen.getByLabelText('Model (developer)') as HTMLInputElement).value).toBe(modelId);
-    expect((screen.getByLabelText('Model (conversation)') as HTMLInputElement).value).toBe(provider === 'agy' ? 'sonnet' : modelId);
+    expect((screen.getByLabelText('Mô hình AI (developer)') as HTMLInputElement).value).toBe(modelId);
+    expect((screen.getByLabelText('Mô hình AI (conversation)') as HTMLInputElement).value).toBe(provider === 'agy' ? 'sonnet' : modelId);
     fireEvent.click(screen.getByRole('button', { name: 'Lưu cấu hình' }));
     await screen.findByText(/Đã lưu cấu hình/);
     expect(saved.values.environment.roles[1]).toEqual({ role: 'developer', cli: provider, model: modelId });
@@ -114,13 +114,13 @@ describe('Web UX stabilization & functional regression guards', () => {
     };
     vi.stubGlobal('fetch', vi.fn(async () => Response.json(config)));
     render(<ProjectConfiguration api={new ApiClient()} id="p" revision={0} />);
-    await screen.findByLabelText('Provider (developer)');
+    await screen.findByLabelText('Công cụ AI (developer)');
     fireEvent.click(screen.getByRole('button', { name: 'haiku' }));
-    fireEvent.change(screen.getByLabelText('Áp dụng nhanh Provider'), { target: { value: 'codex' } });
-    expect((screen.getByLabelText('Áp dụng nhanh Model') as HTMLInputElement).value).toBe('');
+    fireEvent.change(screen.getByLabelText('Công cụ AI cho cả nhóm'), { target: { value: 'codex' } });
+    expect((screen.getByLabelText('Mô hình AI cho cả nhóm') as HTMLInputElement).value).toBe('');
     fireEvent.click(screen.getByRole('button', { name: 'Áp dụng cho tất cả vai trò' }));
-    expect((screen.getByLabelText('Provider (developer)') as HTMLSelectElement).value).toBe('codex');
-    expect((screen.getByLabelText('Model (developer)') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('Công cụ AI (developer)') as HTMLSelectElement).value).toBe('codex');
+    expect((screen.getByLabelText('Mô hình AI (developer)') as HTMLInputElement).value).toBe('');
   });
 
   it('keeps warnings advisory and expands blocking failures independently of readiness', async () => {

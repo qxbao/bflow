@@ -3,7 +3,7 @@ import type { WebProjectSession, WebRunView } from '@bflow/contracts/web';
 import { phases } from '../../../components/StatusBadge';
 import type { Connection } from '../../../api/events';
 import { connectionText } from '../../../components/ConnectionBanner';
-import { UI_MODE_OPTIONS, type UiMode } from '../mode';
+import type { UiMode } from '../mode';
 import type { OfficeFocusZone, OfficeModel, OfficePose } from '../model/types';
 
 /** Terminal runs are not "being worked on". */
@@ -140,9 +140,9 @@ export function OfficeHud(p: OfficeHudProps) {
     ...(desk && p.onQueue ? [['issues', 'Sự cố', p.onQueue, queue?.availability === 'ready' ? queue.open : undefined, 'Sự cố đang mở: '] as [IconName, string, () => void, number?, string?]] : []),
     ['agents', 'Nhân viên', () => p.onNavigate('agents')], ['docs', 'Tài liệu', p.onDocuments], ['settings', 'Cài đặt', () => p.onNavigate('settings')], ['refresh', 'Tải lại dữ liệu', p.onRefresh],
   ];
-  const cams: [OfficeFocusZone, IconName, string][] = [['overview', 'all', 'Toàn cảnh'], ['conversation', 'chat', desk ? 'Director' : 'Conversation'], ['coordinator', 'coordinator', desk ? 'Director Team' : 'Coordinator'], ['developer', 'developer', 'Developer'], ['qa', 'qa', 'QA']];
+  const cams: [OfficeFocusZone, IconName, string][] = [['overview', 'all', 'Toàn cảnh'], ['conversation', 'chat', desk ? 'Director' : 'Trợ lý'], ['coordinator', 'coordinator', 'Điều phối'], ['developer', 'developer', 'Lập trình'], ['qa', 'qa', 'Kiểm tra']];
   return <>
-    <div className={`pointer-events-none absolute inset-x-3 top-3 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)_auto] ${hideOnPhone}`}>
+    <div className={`pointer-events-none office-topbar absolute inset-x-4 top-4 ${hideOnPhone}`}>
       <section aria-label="Văn phòng Bflow" className={`pointer-events-auto m-0 min-w-0 p-3 ${panel}`}>
         <h2 className="m-0 font-display text-xl leading-none font-extrabold tracking-wide text-ink">Bflow Office</h2>
         <select aria-label="Chuyển dự án" value={p.projectId} onChange={e => p.onProject(e.target.value)} className="mt-1 min-h-9 w-full truncate px-2 py-1 text-xs lg:min-h-8">
@@ -159,9 +159,9 @@ export function OfficeHud(p: OfficeHudProps) {
         </div>
       </section>
       <div role="group" aria-label="Chế độ hiển thị" className={`pointer-events-auto inline-flex overflow-hidden ${panel}`}>
-        {UI_MODE_OPTIONS.map(([value, label]) => <button type="button" key={value} aria-pressed={p.mode === value} className="min-w-14 rounded-none border-0 px-3 font-data text-xs aria-pressed:bg-accent aria-pressed:text-surface lg:min-w-16" onClick={() => { if (p.mode !== value) p.onMode(value); }}>{label}</button>)}
+        {(['classic', 'visual'] as const).map(value => <button type="button" key={value} aria-pressed={p.mode === value} className="min-w-14 rounded-none border-0 px-3 font-data text-xs aria-pressed:bg-accent aria-pressed:text-surface lg:min-w-16" onClick={() => { if (p.mode !== value) p.onMode(value); }}>{value === 'classic' ? 'Web' : '3D'}</button>)}
       </div>
-      <div aria-label="Trạng thái văn phòng" className={`pointer-events-auto col-span-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 justify-self-start px-3 py-1.5 font-data text-xs text-ink lg:col-span-1 lg:col-start-2 lg:row-start-1 lg:justify-self-center ${panel}`}>
+      <details aria-label="Trạng thái văn phòng" className={`pointer-events-auto col-span-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 justify-self-start px-3 py-1.5 font-data text-xs text-ink  ${panel}`}><summary className="m-0 text-xs">Kết nối{p.stale?' · Dữ liệu cũ':p.authRequired?' · Cần ghép nối lại':link.degraded?' · Cần kiểm tra':''}</summary><div className="flex flex-wrap items-center gap-2 pb-2">
         <span>{p.session ? SESSION[p.session.state] ?? 'Phiên chưa rõ' : 'Đang đọc phiên'}</span>
         <span aria-hidden="true" className="text-line">|</span>
         <span role="status" className={link.degraded ? 'text-warning' : ''}>{link.label}</span>
@@ -171,9 +171,9 @@ export function OfficeHud(p: OfficeHudProps) {
         {blockers > 0 && <span className="rounded border border-warning px-1.5 text-warning">{blockers} điểm cần lưu ý</span>}
         {p.authRequired && <span className="rounded border border-warning px-1.5 text-warning">Cần ghép nối lại</span>}
         {p.stale && <span className="rounded border border-warning px-1.5 text-warning">Dữ liệu cũ</span>}
-      </div>
+      </div></details>
     </div>
-    <nav aria-label="Lối tắt" className={`pointer-events-auto absolute top-[11.5rem] right-2 flex flex-col gap-0.5 p-1 sm:top-[8.5rem] md:right-3 md:top-1/2 md:-translate-y-1/2 ${panel} ${hideOnPhone}`}>
+    <nav aria-label="Lối tắt" className={`pointer-events-auto office-rail absolute flex flex-col gap-1 p-1 ${panel} ${hideOnPhone}`}>
       {rail.map(([icon, label, action, badge, badgeText]) => <button type="button" key={label} className={railButton} onClick={action}>
         <Icon name={icon}/><span className="text-center">{label}</span>
         {badge !== undefined && badge > 0 && <span className="absolute top-0.5 right-1.5 min-w-4 rounded-full bg-danger px-1 text-center text-[0.625rem] leading-4 font-semibold text-canvas"><span className="sr-only">{badgeText}</span>{badge}</span>}
@@ -185,11 +185,11 @@ export function OfficeHud(p: OfficeHudProps) {
       <span role="status" className="sr-only" data-testid="dock-attention">{p.dockSummary.attention ? 'Có thao tác cần xem trong Thao tác đã gửi' : ''}</span>
       <div id={dockId} hidden={!dockOpen} data-hud-dock className="pointer-events-auto max-h-[40dvh] overflow-y-auto empty:hidden">{p.dock}</div>
       <div className={`flex flex-col items-stretch gap-2 ${p.panelOpen ? '' : 'md:flex-row md:items-end'} ${hideOnPhone}`}>
-        <div role="group" aria-label="Góc nhìn camera" className={`pointer-events-auto flex flex-wrap gap-1 self-start p-1 ${panel}`}>
+        <div role="group" aria-label="Góc nhìn camera" className={`office-cameras pointer-events-auto flex flex-wrap gap-1 self-start p-1 ${panel}`}>
           {cams.map(([zone, icon, label]) => <button type="button" key={zone} aria-label={label} title={label} className={camButton} onClick={() => { if (zone === 'overview') setDockOpen(false); p.onFocusZone(zone); }}><Icon name={icon}/><span className="max-sm:hidden">{label}</span></button>)}
           {p.overflow > 0 && <button type="button" className={`${camButton} text-accent`} aria-label={`Còn ${p.overflow} lập trình viên chưa hiện trong cảnh. Mở danh sách nhân viên`} title="Mở danh sách nhân viên" onClick={p.onAgentList}>+{p.overflow}</button>}
         </div>
-        <form onSubmit={submit} className={`pointer-events-auto m-0 flex min-w-0 flex-1 items-center gap-2 py-1 pr-1 pl-3 md:mx-auto md:w-full md:max-w-xl ${panel}`}>
+        <form onSubmit={submit} className={`office-quick-chat pointer-events-auto m-0 flex min-w-0 flex-1 items-center gap-2 py-1 pr-1 pl-3 md:mx-auto md:w-full md:max-w-xl ${panel}`}>
           <Icon name="chat"/>
           <input aria-label="Trò chuyện với Bflow" placeholder={chat ? (p.director ? 'Trò chuyện với Director…' : 'Trò chuyện với Bflow...') : 'Chưa trò chuyện được lúc này'} disabled={!chat} value={draft} onChange={e => setDraft(e.target.value)} className="min-w-0 flex-1 rounded-none border-0 bg-transparent px-1 text-sm"/>
           <button type="submit" disabled={!chat || !draft.trim()} aria-label="Mở trò chuyện với nội dung này" title="Mở trò chuyện (chưa gửi)" className="shrink-0 rounded-lg border-transparent px-2.5"><Icon name="send"/></button>

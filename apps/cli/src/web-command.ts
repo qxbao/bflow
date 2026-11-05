@@ -15,7 +15,7 @@ import { createWebWorkspaceServices, type WebWorkspaceOptions, type WebWorkspace
 import { createWebInteractionServices } from './web-interaction.js';
 import type { CliIo } from './types.js';
 
-export const WEB_HELP = 'Cách dùng: bflow web [--port N] [--no-open]\nWeb localhost (mặc định 127.0.0.1:4317). Ctrl-C chỉ đóng web; phiên dự án tiếp tục chạy. Tự thay server Web đã cũ sau khi xác thực và khi không có thao tác đang chờ; không dừng Runtime. Không tự setup/init/index. Không hỗ trợ --json vì URL ghép nối chỉ dành cho terminal khởi chạy.';
+export const WEB_HELP = 'Cách dùng: bflow web [--port N] [--no-open]\nWeb localhost (mặc định 127.0.0.1:4317). Lần chạy mới thay server Web cũ sau khi xác thực, kể cả cùng bản build; chỉ giữ owner mới nhất trong cùng machine state. Còn thao tác khởi động/dừng chưa kết thúc thì chờ rồi chạy lại. Ctrl-C chỉ đóng web; phiên dự án tiếp tục chạy. Không tự setup/init/index. Không hỗ trợ --json vì URL ghép nối chỉ dành cho terminal khởi chạy.';
 export interface WebArgs { port: number; open: boolean; help?: boolean }
 export function parseWebArgs(args: readonly string[]): WebArgs {
   let port = 4317, openBrowser = true, seenPort = false, seenOpen = false;
@@ -139,6 +139,23 @@ async function retireWebOwner(locator: z.infer<typeof LocatorSchema>,locatorPath
   }
   throw Error('Web cũ đang chờ lưu kết quả thao tác. Chờ hoàn tất rồi chạy lại bflow web; không tự khởi động trùng.');
 }
+/** Check a requested port change before retiring the working owner. Never stop an unrelated listener. */
+async function checkReplacementPort(port:number,currentOrigin:string):Promise<void>{
+  if(port===0 || port===Number(new URL(currentOrigin).port))return;
+  const probe=createServer();
+  try{
+    await new Promise<void>((accept,reject)=>{
+      probe.once('error',reject);
+      probe.listen(port,'127.0.0.1',()=>{probe.off('error',reject);accept();});
+    });
+  }catch(error){
+    if((error as NodeJS.ErrnoException).code==='EADDRINUSE')
+      throw Error(`Port ${port} đang bận (EADDRINUSE). Web cũ vẫn chạy tại ${currentOrigin}; chọn cổng khác.`);
+    throw error;
+  }finally{
+    if(probe.listening)await new Promise<void>((accept,reject)=>probe.close(error=>error?reject(error):accept()));
+  }
+}
 export async function openWebBrowser(url: string): Promise<void> {
   const executable = process.platform === 'darwin' ? 'open' : process.platform === 'linux' ? 'xdg-open' : undefined;
   if (!executable) throw new Error('Unsupported browser opener');
@@ -206,9 +223,8 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
         existing = undefined;
       }
       if (existing && secret !== undefined) {
-        if (args.port !== Number(new URL(existing.origin).port)) throw new Error(`Web đã chạy tại ${existing.origin}; dùng đúng --port để mở lại. Không đổi origin tự động.`);
-        if(existing.buildId===buildId)return { bootstrap: secret, handle: { origin: existing.origin, reused: true, async close() {} } };
-        io.stderr('Phát hiện bản build Web mới; đang thay thế server Web cũ. Các phiên Runtime tiếp tục hoạt động.');
+        await checkReplacementPort(args.port,existing.origin);
+        io.stderr('Đang thay thế server Web cũ bằng lần chạy mới. Các phiên Runtime tiếp tục hoạt động.');
         preparedSnapshot=await snapshotWebAssets(assetsDirectory,stateDirectory,buildId);
         try{await retireWebOwner(existing,locatorPath);}catch(error){await rm(preparedSnapshot,{recursive:true,force:true});throw error;}
         existing=undefined;

@@ -36,7 +36,7 @@ it('HTTP timeout is recovered from correlated CLI receipt without repeating life
  }finally{release();}
 },15000);
 
-it('refuses a build replacement while a lifecycle effect is pending and allows it after settlement',async()=>{
+it.each([false,true])('refuses replacement while a lifecycle effect is pending, including unchanged builds (changed=%s)',async changed=>{
  const root=await mkdtemp(join(tmpdir(),'web-replace-'));roots.push(root);const assets=join(root,'client');await cp(getWebAssetDirectory(),assets,{recursive:true});
  let release!:()=>void;const pending=new Promise<void>(r=>{release=r;});const up=vi.fn(()=>pending);
  const f=await setup({assetsDirectory:assets,createLifecycle:()=>({up,down:vi.fn(),doctor:vi.fn()}),
@@ -46,10 +46,17 @@ it('refuses a build replacement while a lifecycle effect is pending and allows i
  try{
   const response=await f.send(path+'/session/start','POST',{apiVersion:1,operationId:crypto.randomUUID()},f.headers);expect(response.status).toBe(202);
   await vi.waitFor(()=>expect(up).toHaveBeenCalledOnce());
-  const html=await readFile(join(assets,'index.html'),'utf8');await writeFile(join(assets,'index.html'),html.replace('</head>','<!-- new build --></head>'));
+  if(changed){const html=await readFile(join(assets,'index.html'),'utf8');await writeFile(join(assets,'index.html'),html.replace('</head>','<!-- new build --></head>'));}
   const update=()=>startWebCommand({port:Number(new URL(f.server.origin).port),open:false},{stateDirectory:f.stateDirectory,assetsDirectory:assets,io:{stdout:()=>{},stderr:()=>{}}});
   await expect(update()).rejects.toThrow(/chưa kết thúc/);expect((await fetch(f.server.origin)).status).toBe(200);
   release();await Promise.allSettled(f.server.pendingLifecycle?.()??[]);
   const next=await update();servers.push(next);expect(next.reused).toBe(false);expect(next.origin).toBe(f.server.origin);
+  const output:string[]=[];
+  const paired=await startWebCommand({port:Number(new URL(next.origin).port),open:false},{stateDirectory:f.stateDirectory,assetsDirectory:assets,isTerminal:true,io:{stdout:s=>output.push(s),stderr:()=>{}}});servers.push(paired);
+  const secret=new URL(output[0]!).hash.slice('#bootstrap='.length);
+  const auth=await fetch(paired.origin+'/api/v1/session/bootstrap',{method:'POST',headers:{Origin:paired.origin,'content-type':'application/json'},body:JSON.stringify({apiVersion:1,secret})});
+  expect(auth.status).toBe(200);const cookie=auth.headers.get('set-cookie')!.split(';')[0]!;
+  const projects=await (await fetch(paired.origin+'/api/v1/projects',{headers:{Origin:paired.origin,Cookie:cookie}})).json();
+  expect(projects.items).toEqual(expect.arrayContaining([expect.objectContaining({projectId:f.project.projectId})]));expect(up).toHaveBeenCalledOnce();
  }finally{release();}
 },30000);

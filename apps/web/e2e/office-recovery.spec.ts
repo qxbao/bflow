@@ -173,7 +173,7 @@ test('3D session expiry returns to pairing and destroys the scene', async ({ pag
   // Reload so the client re-reads its session and arms the expiry timer (25 s: a slow start still gets its scene first).
   shorten = true;
   await page.reload();
-  const pairing = page.getByLabel('Mã hoặc đường dẫn ghép nối (#bootstrap=...)');
+  const pairing = page.getByLabel('Liên kết mở Bflow Web');
   const stage = page.getByLabel('Cảnh văn phòng');
   await expect(stage.or(pairing)).toBeVisible({ timeout: 30000 });
   const sawScene = await stage.isVisible();
@@ -227,7 +227,7 @@ test('3D mode toggled 50 times neither leaks WebGL contexts nor leaves a canvas 
     await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-renderer', 'ready', { timeout: 20000 });
     // Never more than the one live context, however many scenes were created before.
     expect(await live(), `live contexts in visit ${i + 1}`).toBe(1);
-    await page.getByRole('button', { name: 'Classic', exact: true }).click();
+    await page.getByRole('button', { name: 'Web', exact: true }).click();
     await expect(page.getByLabel('Cảnh văn phòng')).toHaveCount(0);
   }
   const { created, alive } = await page.evaluate(() => { const all = (window as unknown as { __gl: WebGLRenderingContext[] }).__gl; return { created: all.length, alive: all.filter(g => !g.isContextLost()).length }; });

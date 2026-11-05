@@ -60,7 +60,7 @@ it('UX-14: one cause across several reads is one notice with one retry',()=>{
 it('UX-15: required blockers lead, optional degradation is labelled and unknown codes stay required',()=>{
  render(<Blockers items={[{code:'chat_adapter_unavailable',message:'x'},{code:'something_new',message:'x'},{code:'auto_resume_scheduled',message:'x'}]}/>);
  const text=screen.getAllByText(/./).map(node=>node.textContent).join('|');
- expect(text.indexOf('Cần xử lý')).toBeLessThan(text.indexOf('Đang kiểm tra'));expect(text.indexOf('Đang kiểm tra')).toBeLessThan(text.indexOf('Suy giảm tùy chọn'));
+ expect(text.indexOf('Cần xử lý')).toBeLessThan(text.indexOf('Đang kiểm tra'));expect(text.indexOf('Đang kiểm tra')).toBeLessThan(text.indexOf('Lưu ý'));
 });
 it('UX-17: operations of other runs that settled long ago move to history',async()=>{
  const old={apiVersion:1,projectId:'p',owner:'host_interaction',operationKind:'cancel',state:'applied',result:{kind:'interaction',runId:'other',currentRunId:'other'},updatedAt:'2026-01-01T00:00:00Z'};
@@ -85,7 +85,7 @@ it('UX-24: mixed verification methods are sent per criterion and nothing is sile
  const commands:any[]=[];vi.stubGlobal('fetch',async(path:string,init?:RequestInit)=>{if(init?.method==='POST'){const body=JSON.parse(init.body as string);commands.push(body);return Response.json({apiVersion:1,projectId:'p',operationId:body.commandId,owner:'host_interaction',operationKind:'create_request',state:'accepted',updatedAt:now});}return Response.json(path.includes('/operations/')?{apiVersion:1,projectId:'p',operationId:path.split('/').at(-1),owner:'host_interaction',operationKind:'create_request',state:'accepted',updatedAt:now}:{apiVersion:1,projectId:'p',state:'ready',pendingIntakes:[],blockers:[],updatedAt:now});});
  const api=new ApiClient();render(<MemoryRouter><Operations api={api} id="p" refresh={()=>{}}><RequestForm api={api} id="p" sessionId="s" enabled/></Operations></MemoryRouter>);
  fireEvent.change(screen.getByLabelText('Tên công việc'),{target:{value:'Tên'}});fireEvent.change(screen.getByLabelText('Mục tiêu'),{target:{value:'Mục tiêu'}});
- fireEvent.change(screen.getByLabelText('Tiêu chí chấp nhận (mỗi dòng một tiêu chí)'),{target:{value:'DOM đúng\nKiểu đúng'}});
+ fireEvent.change(screen.getByLabelText('Kết quả cần đạt (mỗi dòng một ý)'),{target:{value:'DOM đúng\nKiểu đúng'}});
  fireEvent.change(screen.getByLabelText('Cách kiểm chứng: Kiểu đúng'),{target:{value:'typecheck'}});
  fireEvent.click(screen.getByRole('button',{name:'Tạo công việc'}));await waitFor(()=>expect(commands).toHaveLength(1));
  expect(commands[0].acceptanceCriteria).toEqual([{description:'DOM đúng',verificationMethod:'integration_test'},{description:'Kiểu đúng',verificationMethod:'typecheck'}]);

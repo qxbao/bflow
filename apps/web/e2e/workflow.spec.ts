@@ -49,8 +49,8 @@ test('LIVE AC03–AC06/AC11: browser-only create → clarify → review → appr
   note('session.ready',session.body);
   await page.getByLabel('Tên công việc').fill('Thêm hàm tính tổng');
   await page.getByLabel('Mục tiêu',{exact:true}).fill('Thêm hàm sum(a, b) trả về tổng hai số vào src/sum.js (CommonJS) kèm kiểm thử node:test trong test/sum.test.js.');
-  await page.getByLabel('Tiêu chí chấp nhận (mỗi dòng một tiêu chí)').fill('sum(2, 3) trả về 5 và được kiểm chứng bằng node --test');
-  await page.getByLabel('Ràng buộc (mỗi dòng một ràng buộc)').fill('Không thêm dependency\nChỉ sửa src/sum.js và test/sum.test.js');
+  await page.getByLabel('Kết quả cần đạt (mỗi dòng một ý)').fill('sum(2, 3) trả về 5 và được kiểm chứng bằng node --test');
+  await page.getByLabel('Điều cần lưu ý (không bắt buộc)').fill('Không thêm dependency\nChỉ sửa src/sum.js và test/sum.test.js');
   await page.getByRole('button',{name:'Tạo công việc',exact:true}).click();
   const deadline=Date.now()+budget;let runId:string|undefined,last='';const answered=new Set<string>();
   while(Date.now()<deadline){

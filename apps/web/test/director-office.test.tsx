@@ -229,16 +229,16 @@ describe('HUD: Director chat gate and queue shortcut', () => {
     expect((screen.getByLabelText('Trò chuyện với Bflow') as HTMLInputElement).disabled).toBe(false);
     expect(screen.getByLabelText('Trạng thái văn phòng').textContent).toContain('Director đang hoạt động');
     expect(screen.getByRole('button', { name: 'Director' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Conversation' })).toBeNull();
-    expect(screen.getByRole('button', { name: 'Director Team' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Trợ lý' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Điều phối' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Coordinator' })).toBeNull();
     expect((screen.getByLabelText('Trò chuyện với Bflow') as HTMLInputElement).placeholder).toBe('Trò chuyện với Director…');
     rerender(<OfficeHud {...base({ director: { canSend: false, presenceLabel: 'Chưa đọc được trạng thái Director' } })} />);
     expect((screen.getByLabelText('Trò chuyện với Bflow') as HTMLInputElement).disabled).toBe(true);
     rerender(<OfficeHud {...base({ model: empty })} />);
     expect((screen.getByLabelText('Trò chuyện với Bflow') as HTMLInputElement).disabled).toBe(true);
-    expect(screen.getByRole('button', { name: 'Conversation' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Coordinator' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Trợ lý' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Điều phối' })).toBeTruthy();
   });
   test('the rail offers the queue with its open count only in a Director layout', () => {
     const onQueue = vi.fn();

@@ -24,8 +24,8 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
   await rail(page, /^Tổng quan/).click();
   await page.getByLabel('Tên công việc').fill('Tìm sách nhanh');
   await page.getByLabel('Mục tiêu', { exact: true }).fill('Tìm sách theo tên và tác giả');
-  await page.getByLabel('Tiêu chí chấp nhận (mỗi dòng một tiêu chí)').fill('Tìm được tên sách\nTìm được tác giả');
-  await page.getByLabel('Ràng buộc (mỗi dòng một ràng buộc)').fill('Giữ tương thích');
+  await page.getByLabel('Kết quả cần đạt (mỗi dòng một ý)').fill('Tìm được tên sách\nTìm được tác giả');
+  await page.getByLabel('Điều cần lưu ý (không bắt buộc)').fill('Giữ tương thích');
   await host.call('configure', { delay: 2000 });
   await page.getByRole('button', { name: 'Tạo công việc', exact: true }).dblclick();
   await expect.poll(() => effects('create_request')).toBe(1);

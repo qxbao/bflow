@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Link, NavLink, useLocation, useNavigate, useParams } from 'react-router';
 import { ApiClient, ApiError } from '../../api/client';
 import { EmptyState } from '../../components/EmptyState';
@@ -21,24 +21,26 @@ export function ChatPage({api,id,revision,refresh}:{api:ApiClient;id:string;revi
   const {runId}=useParams(),location=useLocation(),base=`/projects/${encodeURIComponent(id)}/chat`,draft=handedDraft(location.state);
   // A confirmed Director layout selects the project-scoped Director chat; per-run Conversation threads remain as read-only history.
   const director=Boolean(useOptionalDirector()?.directorLayout);
+  const [historyOpen,setHistoryOpen]=useState(!runId&&!director),historyId=useId(),seenDirector=useRef(director);
+  useEffect(()=>{if(director&&!seenDirector.current&&!runId)setHistoryOpen(false);seenDirector.current=director;},[director,runId]);
   const pagination=useCursorPagination(JSON.stringify(['chat',id])),cursor=pagination.cursor;
   const runs=useRead(`chat-runs:${id}:${cursor??''}`,()=>api.runs(id,undefined,undefined,cursor),revision);
   const items=[...(runs.data?.items??[])].sort((a,b)=>Number(finished(a.sdlcStatus))-Number(finished(b.sdlcStatus))||b.updatedAt.localeCompare(a.updatedAt));
-  return <><h1 className={runId?'sr-only':'lg:sr-only'}>Trò chuyện</h1>
-    <div className="grid min-w-0 border border-line bg-surface lg:grid-cols-[280px_minmax(0,1fr)]">
-      <nav data-component="ChatPage" aria-label={director?'Lịch sử Conversation theo công việc (chỉ đọc)':'Trò chuyện theo công việc'} className={`${runId?'hidden lg:block':'block'} min-w-0 border-line lg:h-[calc(100dvh-15rem)] lg:min-h-[26rem] lg:overflow-y-auto lg:border-r`}>
-        {director && <div className="border-b border-line px-3 py-2"><NavLink end to={{pathname:base,search:location.search}} className="block font-data text-sm font-semibold">Trò chuyện với Director</NavLink><p className="m-0 mt-1 font-data text-xs text-muted">Lịch sử Conversation cũ bên dưới chỉ để đọc.</p></div>}
+  return <><div className="chat-toolbar"><div><h1>Trò chuyện</h1><p className="m-0 text-sm text-muted">Giao việc, hỏi tiến độ hoặc trao đổi với trợ lý của bạn.</p></div><button type="button" aria-controls={historyId} aria-expanded={historyOpen} onClick={()=>setHistoryOpen(value=>!value)}>Lịch sử trò chuyện</button></div>
+    <div className={`chat-layout min-w-0 border border-line bg-surface ${historyOpen?'history-open':''}`}>
+      <nav id={historyId} data-component="ChatPage" aria-label={director?'Lịch sử trò chuyện theo công việc (chỉ đọc)':'Trò chuyện theo công việc'} className={`chat-history min-w-0 border-line ${historyOpen?'':'hidden'}`}>
+        {director && <div className="border-b border-line px-3 py-2"><NavLink end to={{pathname:base,search:location.search}} className="block font-data text-sm font-semibold">Trò chuyện với Director</NavLink><p className="m-0 mt-1 font-data text-xs text-muted">Trao đổi của các công việc trước nằm ở đây.</p></div>}
         <LoadingState loading={runs.loading} initial={!runs.data} label="Đang tải công việc…"/>
         {Boolean(runs.error) && <ErrorState stale={Boolean(runs.data)} error={runs.error} retry={()=>{if(cursor && runs.error instanceof ApiError && runs.error.code==='stale_version')pagination.first?.();refresh();}}/>}
         {runs.data && !items.length && <p className="p-4 text-sm text-muted">Chưa có công việc để trò chuyện.</p>}
-        {items.map(run=><NavLink key={run.runId} to={{pathname:`${base}/${encodeURIComponent(run.runId)}`,search:location.search}} {...(draft?{state:{draft}}:{})} className="block min-w-0 border-b border-l-2 border-line border-l-transparent px-3 py-3 text-ink no-underline hover:bg-faint hover:no-underline aria-[current=page]:border-l-accent aria-[current=page]:bg-faint">
+        {items.map(run=><NavLink onClick={()=>setHistoryOpen(false)} key={run.runId} to={{pathname:`${base}/${encodeURIComponent(run.runId)}`,search:location.search}} {...(draft?{state:{draft}}:{})} className="block min-w-0 border-b border-l-2 border-line border-l-transparent px-3 py-3 text-ink no-underline hover:bg-faint hover:no-underline aria-[current=page]:border-l-accent aria-[current=page]:bg-faint">
           <span className="block truncate font-data text-sm font-semibold">{run.title}</span>
           <span className="block truncate font-data text-xs text-muted">{phases[run.sdlcStatus]??run.sdlcStatus} · {ago(run.updatedAt)}</span>
         </NavLink>)}
         {runs.data && <div className="px-3"><Pagination label="Phân trang danh sách trò chuyện" page={pagination.page} first={pagination.first} previous={pagination.previous} next={runs.data.nextCursor?()=>pagination.next(runs.data!.nextCursor!):undefined} busy={runs.loading || Boolean(runs.error)}/></div>}
       </nav>
-      <div className={`${runId||director?'block':'hidden lg:block'} min-w-0`}>
-        {runId?<><Link className="block border-b border-line px-4 py-2 font-data text-sm lg:hidden" to={{pathname:base,search:location.search}}>← Danh sách trò chuyện</Link><Thread key={runId} api={api} id={id} runId={runId} revision={revision} refresh={refresh} draft={draft} readOnly={director}/></>:director?<DirectorChat {...(draft?{initialDraft:draft}:{})}/>:<div className="p-6"><EmptyState title="Chọn một công việc"><p>Mỗi công việc có một cuộc trò chuyện riêng với Conversation.</p>{draft&&<p className="whitespace-pre-wrap border-l-3 border-line pl-3 text-sm">Bản nháp chưa gửi: {draft}</p>}</EmptyState></div>}
+      <div className="min-w-0">
+        {runId?<><Link className="block border-b border-line px-4 py-2 font-data text-sm lg:hidden" to={{pathname:base,search:location.search}}>← Danh sách trò chuyện</Link><Thread key={runId} api={api} id={id} runId={runId} revision={revision} refresh={refresh} draft={draft} readOnly={director}/></>:director?<DirectorChat {...(draft?{initialDraft:draft}:{})}/>:<div className="p-6"><EmptyState title="Chọn một công việc"><p>Mở lịch sử và chọn công việc bạn muốn trao đổi.</p>{draft&&<p className="whitespace-pre-wrap border-l-3 border-line pl-3 text-sm">Bản nháp chưa gửi: {draft}</p>}</EmptyState></div>}
       </div>
     </div>
   </>;

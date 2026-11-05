@@ -18,7 +18,7 @@ const blockText:Record<DirectorChatBlock,string>={
   unknown:'Chưa xác nhận được phiên Director nên chưa gửi được tin. Tải lại dữ liệu hoặc kiểm tra phiên dự án.',
   legacy:'Phiên này dùng bố cục cũ (v2); trò chuyện Director không dùng được.',
   host_not_ready:'Phiên chưa sẵn sàng; tin chưa gửi được. Bấm Khởi động phiên để mở Director.',
-  session_mismatch:'Phiên host vừa thay đổi. Đang đọc lại trạng thái trước khi cho gửi tin.',
+  session_mismatch:'Phiên làm việc vừa đổi. Đang cập nhật trước khi cho gửi tin.',
 };
 const ownNote:Record<DirectorPresenceState,string>={
   absent:'Đã lưu vào hội thoại; Director sẽ đọc khi mở phiên.',active:'Đã lưu vào hội thoại; đang chờ Director trả lời.',
@@ -42,7 +42,7 @@ export function DirectorChat({initialDraft=''}:{initialDraft?:string}){
   },[last?.messageId,items.length]);
   const lastOwn=[...items].reverse().find(item=>item.author==='user');
   const replied=Boolean(lastOwn&&items.some(item=>item.author==='director'&&item.seq>lastOwn.seq));
-  return <section data-component="DirectorChat" aria-label="Trò chuyện với Director" className="m-0 flex h-[calc(100dvh-20rem)] min-h-[26rem] min-w-0 flex-col bg-surface lg:h-[calc(100dvh-15rem)]">
+  return <section data-component="DirectorChat" aria-label="Trò chuyện với Director" className="chat-thread m-0 min-w-0 bg-surface">
     <header className="flex flex-wrap items-center gap-3 border-b border-line px-4 py-3">
       <span aria-hidden="true" className="flex size-10 shrink-0 items-center justify-center rounded-full bg-steel font-data font-semibold text-surface">D</span>
       <div className="min-w-0 grow basis-40"><h2 className="m-0 truncate text-base">Director</h2><DirectorPresenceStatus compact/></div>
@@ -66,13 +66,13 @@ function Bubble({item,previous,note}:{item:DirectorMessage;previous:DirectorMess
   return <li className="min-w-0">
     {(!previous||day(previous.at)!==day(item.at))&&<p className="mx-auto my-3 text-center font-data text-xs text-muted">{day(item.at)}</p>}
     <div className={`flex flex-col ${own?'items-end':'items-start'}`}>
-      <p className={`m-0 max-w-[85%] rounded-2xl px-3 py-2 whitespace-pre-wrap [overflow-wrap:anywhere] sm:max-w-[70%] ${own?'rounded-br-sm bg-steel text-surface':'rounded-bl-sm bg-faint'}`}>{item.text}</p>
+      <p className={`m-0 max-w-[92%] rounded-2xl px-4 py-3 whitespace-pre-wrap [overflow-wrap:anywhere] sm:max-w-[85%] ${own?'rounded-br-sm bg-steel text-surface':'rounded-bl-sm bg-faint'}`}>{item.text}</p>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-2 font-data text-xs text-muted">
         <span>{own?'Bạn':'Director'}</span>
         <time dateTime={item.at} title={new Date(item.at).toLocaleString('vi')}>{clock(item.at)}</time>
         {own&&item.channel==='cli'&&<span>Từ terminal</span>}
       </div>
-      {note&&<p className="m-0 max-w-[85%] text-right text-xs text-muted sm:max-w-[70%]">{note}</p>}
+      {note&&<p className="m-0 max-w-[85%] text-right text-xs text-muted sm:max-w-[85%]">{note}</p>}
     </div>
   </li>;
 }
@@ -189,10 +189,10 @@ function DirectorComposer({transcript,initialDraft}:{transcript:DirectorTranscri
       <span className="hidden font-data text-xs text-muted lg:inline">Enter để gửi · Shift+Enter để xuống dòng</span>
     </div>
     <div className="flex items-end gap-2">
-      <textarea ref={input} id="director-draft" value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={keyDown} readOnly={busy} disabled={Boolean(block)||(uncertain&&!busy)} aria-describedby={block?'director-chat-blocked':'director-chat-approval'} rows={1} placeholder={block?'Chưa gửi được tin lúc này':'Nhập tin nhắn…'} className="max-h-40 min-h-11 resize-none rounded-2xl px-4 lg:min-h-9"/>
+      <textarea ref={input} id="director-draft" value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={keyDown} readOnly={busy} disabled={Boolean(block)||(uncertain&&!busy)} aria-describedby={block?'director-chat-blocked':'director-chat-approval'} rows={2} placeholder={block?'Chưa gửi được tin lúc này':'Nhập tin nhắn…'} className="max-h-40 min-h-11 resize-none rounded-2xl px-4 lg:min-h-9"/>
       <button type="submit" aria-label="Gửi tin nhắn" disabled={!canSend} className="min-w-16 shrink-0 rounded-full border-steel bg-steel px-4 text-surface hover:bg-ink">{busy?'Đang gửi…':'Gửi'}</button>
     </div>
-    <p id="director-chat-approval" className="mt-1.5 mb-0 text-xs text-muted">Tin nhắn trò chuyện không phải là phê duyệt. Duyệt hoặc từ chối chỉ thực hiện bằng thẻ quyết định trên trang công việc.</p>
+    <p id="director-chat-approval" className="mt-1.5 mb-0 text-xs text-muted">Để phê duyệt, dùng nút Duyệt ở trang công việc. Tin nhắn không thay thế việc phê duyệt.</p>
     {uncertain&&<div className="mt-1.5 flex flex-wrap justify-end gap-2">
       {sessionChanged&&!stored.corrupt?<>
         <p className="m-0 basis-full text-right text-xs text-warning">Không xác định, phiên đã đổi.</p>

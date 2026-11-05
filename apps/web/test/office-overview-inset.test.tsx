@@ -36,7 +36,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 let where = '';
 function Probe() { const l = useLocation(); where = l.pathname; return null; }
 
-test('Toàn cảnh eases the camera only after a route panel has closed, with the closed inset', async () => {
+test('Toàn cảnh eases the camera only after a route panel has closed, without reserving the panel twice', async () => {
   const list = { apiVersion: 1, items: [run] };
   installApi({ '/api/v1/projects/p/session': { ...session, state: 'ready', sessionId: 'host-session' }, '/api/v1/projects/p/runs/run': run, '/api/v1/projects/p/runs?limit=25&search=&phase=': list });
   render(<MemoryRouter initialEntries={['/projects/p/runs']}><App api={new ApiClient()} /><Probe /></MemoryRouter>);
@@ -44,7 +44,7 @@ test('Toàn cảnh eases the camera only after a route panel has closed, with th
   await waitFor(() => expect(main().classList.contains('hidden')).toBe(false));
   await screen.findByRole('region', { name: 'Bản văn bản của văn phòng' });
   const openInset = (): number => insets.at(-1)?.right ?? -1;
-  await waitFor(() => expect(openInset()).toBeGreaterThan(0));
+  await waitFor(() => expect(openInset()).toBe(0));
   const openRight = openInset();
   calls.length = 0;
   fireEvent.click(within(screen.getByRole('group', { name: 'Góc nhìn camera' })).getByRole('button', { name: 'Toàn cảnh' }));
@@ -54,9 +54,10 @@ test('Toàn cảnh eases the camera only after a route panel has closed, with th
   const focusAt = calls.indexOf('focus:overview');
   expect(focusAt).toBeGreaterThan(0);
   expect(calls[focusAt - 1]).toBe('inset');
-  // The inset passed right before the focus call is the closed one: the panel width is gone from the right edge.
+  // The adjacent panel is handled by the scene host width; only the left HUD rail remains in the camera inset.
   const closed = insets[insets.length - 1]!;
-  expect(closed.right).toBeLessThan(openRight);
+  expect(closed.right).toBe(openRight);
+  expect(closed.left).toBe(100);
   expect(calls.filter(c => c === 'focus:overview')).toHaveLength(1);
 });
 

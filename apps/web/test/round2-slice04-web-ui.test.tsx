@@ -109,7 +109,8 @@ describe('Round 2 Slice 4 — Web UI recovery & state-isolation hardening', () =
     await screen.findByText('Dừng phiên chưa được xác nhận.');
 
     const normalStopBtn = screen.getByRole('button', { name: 'Dừng phiên' }) as HTMLButtonElement;
-    const forceStopBtn = screen.getByRole('button', { name: 'Dừng phục hồi' }) as HTMLButtonElement;
+    fireEvent.click(screen.getByText('Tùy chọn phiên',{selector:'summary'}));
+    const forceStopBtn = screen.getByRole('button', { name: 'Dừng khi bị kẹt' }) as HTMLButtonElement;
     expect(normalStopBtn.disabled).toBe(true);
     expect(forceStopBtn.disabled).toBe(false);
 
@@ -248,7 +249,7 @@ describe('Round 2 Slice 4 — Web UI recovery & state-isolation hardening', () =
       />
     );
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Đối chiếu tin nhắn' })).toBeNull());
-    const textarea = screen.getByLabelText('Tin nhắn cho Conversation') as HTMLTextAreaElement;
+    const textarea = screen.getByLabelText('Tin nhắn cho trợ lý') as HTMLTextAreaElement;
     await waitFor(() => expect(textarea.disabled).toBe(false));
   });
 });

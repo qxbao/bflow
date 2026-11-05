@@ -66,7 +66,7 @@ test('office renders with zero CSP violations', async ({ page }) => {
   await page.getByRole('button', { name: 'Đăng ký dự án' }).click();
   await page.getByRole('link', { name: /thư viện.*Xem dự án/ }).click();
   // Toggle fast, before the first renderer can be ready: overlapping creations must not break the live one.
-  for (const name of ['3D', 'Classic', '3D', 'Classic', '3D'] as const) await page.getByRole('button', { name, exact: true }).click();
+  for (const name of ['3D', 'Web', '3D', 'Web', '3D'] as const) await page.getByRole('button', { name, exact: true }).click();
   const stage = page.getByLabel('Cảnh văn phòng');
   await expect(stage).toHaveAttribute('data-office-renderer', 'ready', { timeout: 20000 });
   const canvas = stage.locator('canvas');
@@ -91,7 +91,7 @@ test('office renders with zero CSP violations', async ({ page }) => {
   await probe.close();
   expect(colours).toBeGreaterThan(8);
   // Leaving and re-entering destroys and rebuilds the renderer on the same cached assets.
-  await page.getByRole('button', { name: 'Classic', exact: true }).click();
+  await page.getByRole('button', { name: 'Web', exact: true }).click();
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveCount(0);
   await page.getByRole('button', { name: '3D', exact: true }).click();
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-renderer', 'ready', { timeout: 20000 });
@@ -124,7 +124,7 @@ test('toggling the mode many times does not leak WebGL contexts', async ({ page 
   for (let i = 0; i < TOGGLES; i++) {
     await page.getByRole('button', { name: '3D' }).click();
     await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-renderer', 'ready', { timeout: 20000 });
-    await page.getByRole('button', { name: 'Classic', exact: true }).click();
+    await page.getByRole('button', { name: 'Web', exact: true }).click();
     await expect(page.getByLabel('Cảnh văn phòng')).toHaveCount(0);
   }
   const { created, alive } = await page.evaluate(() => {

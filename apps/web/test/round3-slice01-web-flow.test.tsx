@@ -313,7 +313,7 @@ describe('Round 3 Slice 1 — Web UI, SSE event loop, forms, routing & operation
     const skipBox = screen.getByLabelText(/Khởi tạo không dùng GitNexus/) as HTMLInputElement;
     expect(skipBox.disabled).toBe(false);
     fireEvent.click(skipBox);
-    fireEvent.click(screen.getByRole('button', { name: 'Khởi tạo / sửa GitNexus' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Chuẩn bị dự án' }));
 
     await screen.findByText('Đã hoàn tất');
     expect(refresh).toHaveBeenCalled();
@@ -868,7 +868,8 @@ describe('Round 3 Slice 1 — Web UI, SSE event loop, forms, routing & operation
       </MemoryRouter>,
     );
     expect((screen.getByRole('button', { name: 'Khởi động phiên' }) as HTMLButtonElement).disabled).toBe(true);
-    const forceBtn = screen.getByRole('button', { name: 'Dừng phục hồi' }) as HTMLButtonElement;
+    fireEvent.click(screen.getByText('Tùy chọn phiên',{selector:'summary'}));
+    const forceBtn = screen.getByRole('button', { name: 'Dừng khi bị kẹt' }) as HTMLButtonElement;
     expect(forceBtn.disabled).toBe(false);
     fireEvent.click(forceBtn);
     fireEvent.click(screen.getByRole('button', { name: 'Gửi yêu cầu dừng phiên' }));
@@ -920,7 +921,7 @@ describe('Round 3 Slice 1 — Web UI, SSE event loop, forms, routing & operation
         <ChatHistory api={new ApiClient()} projectId="p" sessionId="host" runId="run" revision={0} />
       </MemoryRouter>,
     );
-    const chatInput = await screen.findByLabelText<HTMLTextAreaElement>('Tin nhắn cho Conversation');
+    const chatInput = await screen.findByLabelText<HTMLTextAreaElement>('Tin nhắn cho trợ lý');
     await waitFor(() => expect(chatInput.disabled).toBe(false));
     fireEvent.change(chatInput, { target: { value: 'Tin nhắn bị đứt mạng trước khi tới host' } });
     fireEvent.click(screen.getByRole('button', { name: 'Gửi tin nhắn' }));
@@ -957,7 +958,7 @@ describe('Round 3 Slice 1 — Web UI, SSE event loop, forms, routing & operation
     const corruptUnlock = await screen.findByRole('button', { name: 'Mở khóa khung soạn tin' });
     fireEvent.click(corruptUnlock);
     await waitFor(() =>
-      expect((screen.getByLabelText('Tin nhắn cho Conversation') as HTMLTextAreaElement).disabled).toBe(false),
+      expect((screen.getByLabelText('Tin nhắn cho trợ lý') as HTMLTextAreaElement).disabled).toBe(false),
     );
   });
 
@@ -991,7 +992,7 @@ describe('Round 3 Slice 1 — Web UI, SSE event loop, forms, routing & operation
     });
 
     render(<ProjectConfiguration api={new ApiClient()} id="p" revision={0} />);
-    const devCli = await screen.findByLabelText<HTMLSelectElement>('Provider (developer)');
+    const devCli = await screen.findByLabelText<HTMLSelectElement>('Công cụ AI (developer)');
     expect(devCli.value).toBe('claude');
 
     // Per-role switch to agy strips effort from developer while preserving reviewer's effort
@@ -1005,7 +1006,7 @@ describe('Round 3 Slice 1 — Web UI, SSE event loop, forms, routing & operation
     expect(firstRoles[1]?.effort).toBe('medium');
 
     // Bulk applyAll to agy strips effort from every role
-    fireEvent.change(screen.getByLabelText('Áp dụng nhanh Provider'), { target: { value: 'agy' } });
+    fireEvent.change(screen.getByLabelText('Công cụ AI cho cả nhóm'), { target: { value: 'agy' } });
     fireEvent.click(screen.getByRole('button', { name: 'Áp dụng cho tất cả vai trò' }));
     fireEvent.click(screen.getByRole('button', { name: 'Lưu cấu hình' }));
     await waitFor(() => expect(savedBodies.length).toBe(2));

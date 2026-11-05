@@ -68,7 +68,7 @@ test('Classic | 3D switch, right rail with the decision badge, and refresh', () 
   render(<OfficeHud {...p} />);
   const group = screen.getByRole('group', { name: 'Chế độ hiển thị' });
   expect(within(group).getByRole('button', { name: '3D' }).getAttribute('aria-pressed')).toBe('true');
-  fireEvent.click(within(group).getByRole('button', { name: 'Classic' }));
+  fireEvent.click(within(group).getByRole('button', { name: 'Web' }));
   expect(p.onMode).toHaveBeenCalledWith('classic');
   fireEvent.click(within(group).getByRole('button', { name: '3D' }));
   expect(p.onMode).toHaveBeenCalledTimes(1);
@@ -86,7 +86,7 @@ test('camera buttons ask the scene for their zone and the overflow chip opens th
   const p = props({ overflow: 3 });
   render(<OfficeHud {...p} />);
   const cams = within(screen.getByRole('group', { name: 'Góc nhìn camera' }));
-  for (const [name, zone] of [['Toàn cảnh', 'overview'], ['Conversation', 'conversation'], ['Coordinator', 'coordinator'], ['Developer', 'developer'], ['QA', 'qa']] as const) {
+  for (const [name, zone] of [['Toàn cảnh', 'overview'], ['Trợ lý', 'conversation'], ['Điều phối', 'coordinator'], ['Lập trình', 'developer'], ['Kiểm tra', 'qa']] as const) {
     fireEvent.click(cams.getByRole('button', { name }));
     expect(p.onFocusZone).toHaveBeenLastCalledWith(zone);
   }

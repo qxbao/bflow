@@ -183,7 +183,7 @@ it('chat text is never an approval: "duyệt" goes only to the Director transcri
   fireEvent.change(input(),{target:{value:'duyệt'}});fireEvent.click(sendButton());
   await waitFor(()=>expect(state.posts).toHaveLength(1));
   expect(fetcher.mock.calls.filter(([,init])=>init?.method==='POST').map(([path])=>path)).toEqual(['/api/v1/projects/p/director/messages']);
-  expect(screen.getByText(/không phải là phê duyệt/)).toBeTruthy();
+  expect(screen.getByText(/không thay thế việc phê duyệt/)).toBeTruthy();
 });
 it('Enter sends, Shift+Enter and IME composition do not; the label keeps focus on the input',async()=>{
   const {state}=directorServer();render(open());await waitFor(()=>expect(input().disabled).toBe(false));
@@ -230,7 +230,7 @@ describe('Classic integration',()=>{
   it('Director layout hides the obsolete create_request form, the legacy chat blocker, and labels the infrastructure start separately',async()=>{
     await app('/projects/p',()=>view({presence:'absent'}));
     expect(await screen.findByRole('button',{name:'Khởi động phiên'})).toBeTruthy();
-    expect(screen.getByText(/giao việc bằng cách trò chuyện với Director/)).toBeTruthy();
+    expect(screen.getByText(/Nói với Director điều bạn muốn làm/)).toBeTruthy();
     expect(screen.queryByRole('button',{name:'Tạo công việc'})).toBeNull();
     expect(screen.queryByText(/Trò chuyện qua web chưa khả dụng/)).toBeNull();
     expect(screen.getByRole('button',{name:'Khởi động hạ tầng phiên'})).toBeTruthy();
@@ -240,7 +240,7 @@ describe('Classic integration',()=>{
     expect(await screen.findByText('Director trả lời')).toBeTruthy();
     expect(screen.getByLabelText('Tin nhắn cho Director')).toBeTruthy();
     expect(screen.getByRole('navigation',{name:/chỉ đọc/})).toBeTruthy();
-    expect(screen.queryByLabelText('Tin nhắn cho Conversation')).toBeNull();
+    expect(screen.queryByLabelText('Tin nhắn cho trợ lý')).toBeNull();
     expect(screen.getByRole('button',{name:'Khởi động phiên'})).toBeTruthy();
   });
   it('a first visit to a stopped Director project can launch from Overview and Chat without starting infrastructure first',async()=>{

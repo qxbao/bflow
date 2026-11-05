@@ -44,7 +44,7 @@ test('Classic: Director presence, launch picker, no-Desktop manual command, chat
   await shot(page, '01-classic-overview-director-absent');
 
   // Launch picker: provider choice at action time; an unavailable provider is labelled, not hidden.
-  await panel.getByRole('button', { name: 'Mở phiên Director' }).click();
+  await panel.getByRole('button', { name: 'Khởi động phiên' }).click();
   const providers = panel.getByRole('radiogroup', { name: 'Nhà cung cấp cho Director' });
   await expect(providers).toBeVisible();
   await expect(providers.getByText(/codex/i).first()).toBeVisible();
@@ -88,7 +88,7 @@ test('Classic: Director presence, launch picker, no-Desktop manual command, chat
   await page.goto(`${new URL(page.url()).origin}${base}`);
   const panel2 = page.getByRole('region', { name: 'Director', exact: true });
   await expect(panel2.getByText('Director chưa có mặt').first()).toBeVisible({ timeout: 15000 });
-  await panel2.getByRole('button', { name: 'Mở phiên Director' }).click();
+  await panel2.getByRole('button', { name: 'Khởi động phiên' }).click();
   await expect(panel2.getByText(/Không có phiên desktop/).first()).toBeVisible();
   await shot(page, '07-classic-launch-no-desktop');
   for (const width of [1280, 768, 390]) { await page.setViewportSize({ width, height: 900 }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); }

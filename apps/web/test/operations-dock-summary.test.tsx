@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { webcrypto } from 'node:crypto';
-import { cleanup, render, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { WebOperationSchema } from '@bflow/contracts/web';
 import { ApiClient } from '../src/api/client';
@@ -50,4 +50,19 @@ test('the error banner needs attention even with nothing tracked', async () => {
   localStorage.setItem('bflow:web:operations:p:unpaired:create', '{broken');
   respond(op('accepted')); mount();
   await waitFor(() => expect(seen?.attention).toBe(true));
+});
+
+
+test('compact chat receipts keep uncertain-result warnings visible and recovery available on demand', async () => {
+  seed(); respond(op('reconciliation_required'));
+  render(<MemoryRouter><Operations api={new ApiClient()} id="p" refresh={()=>{}} dock="compact"><Probe/></Operations></MemoryRouter>);
+  const warning=await screen.findByText(/Có thao tác cần kiểm tra/);
+  expect(warning.closest('details')).toBeNull();
+  expect(warning.textContent).toContain('Không tự gửi lại');
+  const receipts=screen.getByRole('region',{name:'Theo dõi thao tác'}).closest('details')!;
+  expect(receipts.open).toBe(false);
+  fireEvent.click(screen.getByText('Thao tác đã gửi (1)',{selector:'summary'}));
+  expect(receipts.open).toBe(true);
+  expect(screen.getByRole('region',{name:'Theo dõi thao tác'})).toBeTruthy();
+  expect(screen.getByRole('button',{name:'Đọc lại thao tác'})).toBeTruthy();
 });

@@ -155,11 +155,11 @@ export function DirectorSessionPanel({chatPath}:{chatPath:string}){
   const d=useDirector();
   if(!d.directorLayout)return null;
   return <section data-component="DirectorSessionPanel" aria-label="Director" className="panel my-3 min-w-0 border border-line bg-surface p-3.5 sm:p-4">
-    <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h2 className="m-0 text-base">Director</h2><Link className="font-data text-xs font-semibold" to={chatPath}>Trò chuyện với Director →</Link></div>
+    <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h2 className="m-0 text-base">Trợ lý dự án · Director</h2><Link className="font-data text-xs font-semibold" to={chatPath}>Trò chuyện với Director →</Link></div>
     <DirectorPresenceStatus/>
     <div className="mt-2.5">
       {(d.layout==='director'||d.layout==='not_started'||d.hinted)&&<DirectorLaunch label="Khởi động phiên"/>}
-      {d.layout==='not_started'&&<p className="my-1 text-sm text-muted">Chọn công cụ AI để mở terminal Director. Director sẽ tự khởi động hoặc nối lại hạ tầng phiên.</p>}
+      {d.layout==='not_started'&&<p className="my-1 text-sm text-muted">Chọn công cụ AI để bắt đầu. Director sẽ giúp bạn lập kế hoạch và giao việc cho nhóm.</p>}
       {d.hinted&&<p className="my-1 text-sm text-muted">Chưa đọc được trạng thái Director. Kiểm tra phiên hiện có trước khi xác nhận mở phiên thay thế.</p>}
     </div>
   </section>;
