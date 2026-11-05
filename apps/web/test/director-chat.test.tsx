@@ -10,8 +10,8 @@ import { DirectorChatControllerProvider } from '../src/features/director/chat-co
 import { Operations } from '../src/features/operations';
 import { directorServer, locks, message, readySession, sessionRead, view, at } from './director-fixtures';
 
-beforeEach(()=>{localStorage.clear();vi.stubGlobal('crypto',webcrypto);Object.defineProperty(navigator,'locks',{configurable:true,value:locks});});
-afterEach(()=>{cleanup();vi.unstubAllGlobals();vi.useRealTimers();});
+beforeEach(()=>{localStorage.clear();sessionStorage.clear();vi.stubGlobal('crypto',webcrypto);Object.defineProperty(navigator,'locks',{configurable:true,value:locks});});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();vi.unstubAllEnvs();vi.useRealTimers();});
 function open({revision=0,resetEpoch=0,session=sessionRead(),api=new ApiClient()}:{revision?:number;resetEpoch?:number;session?:ReturnType<typeof sessionRead>|{key:string;loading:boolean;error?:unknown;data?:never};api?:ApiClient}={}){
   return <MemoryRouter><Operations api={api} id="p" refresh={()=>{}} dock="external"><DirectorProvider api={api} projectId="p" session={session} revision={revision} resetEpoch={resetEpoch}><DirectorChatControllerProvider active><DirectorChat/></DirectorChatControllerProvider></DirectorProvider></Operations></MemoryRouter>;
 }
@@ -140,6 +140,19 @@ it('keeps the project chat draft when its route presentation unmounts and mounts
   fireEvent.click(screen.getByRole('button',{name:'Mở lại hội thoại'}));
   expect(input().value).toBe('Bản nháp tiếng Việt');expect(screen.getByRole<HTMLButtonElement>('button',{name:'Gửi tin nhắn'}).disabled).toBe(false);
 });
+it('restores an immersive draft after reload without resending a pending message',async()=>{
+  vi.stubEnv('VITE_BFLOW_IMMERSIVE_OFFICE','true');
+  const {state}=directorServer();
+  const first=render(open());await waitFor(()=>expect(input().disabled).toBe(false));
+  fireEvent.change(input(),{target:{value:'Bản nháp giữ qua tải lại'}});
+  const key=JSON.stringify(['bflow-director-chat','p']);
+  localStorage.setItem(key,JSON.stringify({version:2,messageId:'00000000-0000-4000-8000-000000000009',sessionId:'host'}));
+  first.unmount();render(open());
+  await waitFor(()=>expect(input().value).toBe('Bản nháp giữ qua tải lại'));
+  expect(screen.getByRole('button',{name:'Đối chiếu tin nhắn'})).toBeTruthy();
+  expect(screen.queryByRole('button',{name:'Gửi lại với cùng mã tin'})).toBeNull();
+  expect(state.posts).toHaveLength(0);
+});
 it('does not queue a second send while the first ACK is unresolved across a presentation switch',async()=>{
   let release:(value:undefined)=>void=()=>{},starts=0;
   directorServer({extra:async(_path,init)=>{if(init.method==='POST'){starts++;await new Promise<undefined>(resolve=>{release=resolve;});}return undefined;}});
@@ -151,6 +164,16 @@ it('does not queue a second send while the first ACK is unresolved across a pres
   expect(sendButton().disabled).toBe(true);fireEvent.click(sendButton());expect(starts).toBe(1);
   release(undefined);await waitFor(()=>expect(screen.getByRole('log',{name:'Tin nhắn với Director'}).textContent).toContain('Gửi đúng một lần'));
   expect(starts).toBe(1);expect(input().value).toBe('Gửi đúng một lần\n\nBản nháp mới');
+});
+it('same-tick duplicate submits create only one pending message',async()=>{
+  let release:(value:undefined)=>void=()=>{},starts=0;
+  const {state}=directorServer({extra:async(_path,init)=>{if(init.method==='POST'){starts++;state.posts.push({path:'/api/v1/projects/p/director/messages',body:JSON.parse(String(init.body))});await new Promise<undefined>(resolve=>{release=resolve;});}return undefined;}});
+  render(open());await waitFor(()=>expect(input().disabled).toBe(false));
+  fireEvent.change(input(),{target:{value:'Gửi một lần'}});
+  act(()=>{fireEvent.click(sendButton());fireEvent.click(sendButton());});
+  await waitFor(()=>expect(starts).toBe(1));
+  release(undefined);await waitFor(()=>expect(state.posts).toHaveLength(1));
+  expect(state.posts[0]!.body.content).toBe('Gửi một lần');
 });
 it('a definitive refusal of the resend keeps the pending ID and the composer locked to recovery',async()=>{
   let posts=0;const {state}=directorServer({extra:(path,init)=>{if(init.method!=='POST')return undefined;posts++;state.posts.push({path,body:JSON.parse(String(init.body))});

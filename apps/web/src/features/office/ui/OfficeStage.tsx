@@ -36,6 +36,8 @@ export function OfficeStage({ model, onSelect, links, control, excerpts: excerpt
   const preview = useRef<OfficeTarget | undefined>(undefined);
   const latest = useRef({ model, onSelect, createRenderer, immersive });
   latest.current = { model, onSelect, createRenderer, immersive };
+  const connector = useRef<SVGSVGElement | null>(null), connectorLine = useRef<SVGLineElement | null>(null), connectorDot = useRef<SVGCircleElement | null>(null);
+  const directorPoint = useRef<{ x: number; y: number } | undefined>(undefined), drawConnector = useRef<() => void>(() => {});
   const [notice, setNotice] = useState<string | undefined>(undefined);
   // The consumer owns the walked set (timeline contract): ids whose walk was handed to the renderer never walk again.
   const walked = useRef(new Set<string>());
@@ -48,6 +50,16 @@ export function OfficeStage({ model, onSelect, links, control, excerpts: excerpt
     let labelLayer: ReturnType<typeof createLabelLayer> | undefined;
     const abort = new AbortController();
     const visibility = (): void => renderer.current?.setPaused(document.hidden);
+    const updateConnector = (): void => {
+      const svg = connector.current, line = connectorLine.current, dot = connectorDot.current, point = directorPoint.current;
+      const panel = document.querySelector<HTMLElement>('.director-dialogue');
+      if (!svg || !line || !dot || !point || !panel || window.innerWidth < 768 || getComputedStyle(panel).display === 'none') { if (svg) svg.style.display = 'none'; return; }
+      const rect = el.getBoundingClientRect(), box = panel.getBoundingClientRect(), x1 = point.x + rect.left, y1 = point.y + rect.top, x2 = box.left, y2 = Math.max(box.top + 44, Math.min(box.bottom - 44, y1));
+      line.setAttribute('x1', String(x1)); line.setAttribute('y1', String(y1)); line.setAttribute('x2', String(x2)); line.setAttribute('y2', String(y2));
+      dot.setAttribute('cx', String(x1)); dot.setAttribute('cy', String(y1)); svg.style.display = '';
+    };
+    drawConnector.current = updateConnector;
+    const dialogueChange = (): void => updateConnector();
     const lose = (): void => {
       if (dead || failed) return;
       failed = true;
@@ -55,6 +67,7 @@ export function OfficeStage({ model, onSelect, links, control, excerpts: excerpt
       const lostRenderer = renderer.current;
       renderer.current = undefined;
       labelLayer?.destroy();
+      directorPoint.current = undefined; connector.current?.remove(); connector.current = null; connectorLine.current = null; connectorDot.current = null; updateConnector();
       // Notice first: a throwing destroy must still leave the visible list.
       setNotice(LOST);
       try { lostRenderer?.destroy(); } catch { /* the context is gone; nothing left to release */ }
@@ -64,9 +77,23 @@ export function OfficeStage({ model, onSelect, links, control, excerpts: excerpt
         if (dead || failed) { created.destroy(); return; }
         renderer.current = created;
         labelLayer = createLabelLayer(el);
+        if (latest.current.immersive) {
+          const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          svg.setAttribute('aria-hidden', 'true'); svg.setAttribute('width', '100vw'); svg.setAttribute('height', '100vh');
+          svg.style.cssText = 'position:fixed;inset:0;width:100vw;height:100vh;z-index:49;pointer-events:none;overflow:visible;display:none';
+          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line'), dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          line.setAttribute('stroke', 'var(--color-accent)'); line.setAttribute('stroke-width', '2'); line.setAttribute('stroke-dasharray', '5 5'); line.setAttribute('opacity', '.7');
+          dot.setAttribute('r', '5'); dot.setAttribute('fill', 'var(--color-accent)'); svg.append(line, dot); document.body.appendChild(svg);
+          connector.current = svg; connectorLine.current = line; connectorDot.current = dot;
+        }
         if (inset.current) created.setInset?.(inset.current);
         if (excerpts.current) created.setExcerpts?.(excerpts.current);
-        created.setLabelSink?.(labels => labelLayer?.update(labels));
+        created.setLabelSink?.(labels => {
+          labelLayer?.update(labels);
+          const director = labels.find(label => label.id === 'director');
+          directorPoint.current = director ? { x: director.x, y: director.y } : undefined;
+          if (director && document.querySelector('.director-dialogue')) updateConnector(); else connector.current?.style.setProperty('display', 'none');
+        });
         created.apply(latest.current.model, []);
         if (selected.current) { created.highlight?.(selected.current); created.focus?.(selected.current); }
         else if (preview.current) created.preview?.(preview.current);
@@ -75,11 +102,16 @@ export function OfficeStage({ model, onSelect, links, control, excerpts: excerpt
       })
       .catch(() => { if (!dead && !failed) setNotice(FAILED); });
     document.addEventListener('visibilitychange', visibility);
+    window.addEventListener('resize', dialogueChange);
+    window.addEventListener('bflow:director-dialogue-state', dialogueChange);
     return () => {
       dead = true;
       abort.abort();
       document.removeEventListener('visibilitychange', visibility);
+      window.removeEventListener('resize', dialogueChange);
+      window.removeEventListener('bflow:director-dialogue-state', dialogueChange);
       renderer.current?.setLabelSink?.(undefined);
+      directorPoint.current = undefined; connector.current?.remove(); connector.current = null; connectorLine.current = null; connectorDot.current = null; drawConnector.current = () => {};
       renderer.current?.destroy();
       renderer.current = undefined;
       labelLayer?.destroy();
@@ -90,7 +122,7 @@ export function OfficeStage({ model, onSelect, links, control, excerpts: excerpt
 
   useEffect(() => {
     if (!control) return;
-    control.current = { focusZone: zone => renderer.current?.focusZone?.(zone), setInset: i => { inset.current = i; renderer.current?.setInset?.(i); }, highlight: target => { selected.current = target; renderer.current?.highlight?.(target); }, preview: target => { preview.current = target; renderer.current?.preview?.(target); }, setInteracting: active => { interacting.current = active; renderer.current?.setInteracting?.(active); }, camera: action => renderer.current?.cameraControl?.(action), openList: () => root.current?.querySelector<HTMLElement>('section[aria-label] button')?.focus() };
+    control.current = { focusZone: zone => renderer.current?.focusZone?.(zone), setInset: i => { inset.current = i; renderer.current?.setInset?.(i); }, highlight: target => { selected.current = target; renderer.current?.highlight?.(target); }, preview: target => { preview.current = target; renderer.current?.preview?.(target); }, setInteracting: active => { interacting.current = active; renderer.current?.setInteracting?.(active); if (active) drawConnector.current(); else if (connector.current) connector.current.style.display = 'none'; }, camera: action => renderer.current?.cameraControl?.(action), openList: () => root.current?.querySelector<HTMLElement>('section[aria-label] button')?.focus() };
     return () => { control.current = null; };
   }, [control]);
 

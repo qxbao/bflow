@@ -16,6 +16,7 @@ export function DecisionInbox({ api, id, revision, refresh }: { api: ApiClient; 
   const selectedRunId = query.get('run') ?? '';
   const pending = result.data?.items.filter(item => item.status === 'pending') ?? [];
   const selected = result.data?.items.find(item => item.decisionId === selectedId && item.runId === selectedRunId);
+  const selectedUnavailable = Boolean(selectedId && selectedRunId && result.data && !selected);
   const [run, setRun] = useState<WebRunView>();
   const [runError, setRunError] = useState<unknown>();
   const [runLoading, setRunLoading] = useState(false);
@@ -53,12 +54,13 @@ export function DecisionInbox({ api, id, revision, refresh }: { api: ApiClient; 
 
   return <section className="mx-auto w-full max-w-4xl px-1 sm:px-4" data-component="DecisionInbox">
     <div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Hộp quyết định</div>
-    <h1 tabIndex={-1} className="mt-1">Cần bạn quyết định <span className="ml-2 inline-flex min-w-8 items-center justify-center rounded-full bg-brand px-2 py-1 text-sm text-on-brand" aria-label={`${pending.length} yêu cầu đang chờ`}>{pending.length}</span></h1>
+    <h1 tabIndex={-1} className="mt-1">Cần bạn quyết định <span className="ml-2 inline-flex min-w-8 items-center justify-center rounded-full bg-brand px-2 py-1 text-sm text-on-brand" aria-label={result.data?.nextCursor?`Ít nhất ${pending.length} yêu cầu đang chờ`:`${pending.length} yêu cầu đang chờ`}>{result.data?.nextCursor?'≥ ':''}{pending.length}</span></h1>
     <p className="max-w-2xl text-muted">Mở từng yêu cầu để đọc tài liệu và phiên bản trước khi chọn quyết định.</p>
     <LoadingState loading={result.loading} initial={!result.data} label="Đang tải yêu cầu…" />
     {Boolean(result.error) && <ErrorState stale={Boolean(result.data)} error={result.error} retry={refresh} />}
+    {selectedUnavailable && <p role="status" className="my-3 border-l-3 border-warning pl-3 text-sm">Không tìm thấy quyết định đã chọn trong danh sách hiện được tải. Quyết định có thể đã đổi trạng thái hoặc nằm ngoài giới hạn đọc; hãy đọc lại danh sách và kiểm tra công việc liên quan.{selectedRunId && <> <Link to={`/projects/${encodeURIComponent(id)}/runs/${encodeURIComponent(selectedRunId)}`}>Mở công việc liên quan →</Link></>}</p>}
     {result.data && (pending.length ? <ul className="m-0 grid list-none gap-3 p-0 sm:grid-cols-2">{pending.map(item => <li key={`${item.runId}:${item.decisionId}`}><button className="h-full min-h-28 w-full border border-line bg-surface p-4 text-left hover:border-accent" onClick={event => select(item, event.currentTarget)}><strong className="block text-base">{item.question}</strong><span className="mt-2 block text-sm text-muted">{item.kind === 'approval' ? 'Yêu cầu phê duyệt' : 'Cần chọn phương án'} · Phiên bản {item.expectedVersion.revision}</span><span className="mt-3 block text-sm">Đọc tài liệu và quyết định →</span></button></li>)}</ul> : <EmptyState title="Không có quyết định đang chờ"><p>Các yêu cầu cần bạn trả lời sẽ xuất hiện tại đây.</p></EmptyState>)}
-    {result.data?.nextCursor && <p className="mt-4 text-sm text-muted">Danh sách hiển thị {result.data.items.length} yêu cầu được tải từ dịch vụ. API hiện chưa cung cấp thao tác đọc trang tiếp theo.</p>}
+    {result.data?.nextCursor && <p className="mt-4 text-sm text-muted">Đang hiển thị ít nhất {pending.length} yêu cầu chờ trong {result.data.items.length} mục tải được. Danh sách đã chạm giới hạn dịch vụ; số đếm là cận dưới.</p>}
     <dialog ref={dialog} aria-labelledby="decision-inbox-title" className="m-auto max-h-[92dvh] w-[min(900px,calc(100vw-24px))] overflow-y-auto border border-line bg-surface p-0 shadow-2xl backdrop:bg-ink/60" onCancel={event => { event.preventDefault(); close(); }}>
       {selected && <div className="p-4 sm:p-7"><div className="flex items-start justify-between gap-4"><div><p className="m-0 font-data text-xs uppercase tracking-widest text-muted">Đang xem xét · Phiên bản {selected.expectedVersion.revision}</p><h2 id="decision-inbox-title" className="mt-1">{selected.question}</h2></div><button type="button" className="min-h-11" onClick={close}>Quay lại hộp thư</button></div>
         {runLoading && <LoadingState loading initial label="Đang xác nhận quyền quyết định…" />}

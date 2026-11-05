@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router';
 import { WebAgentViewSchema, WebProjectSessionSchema } from '@bflow/contracts/web';
 import { AgentDialogue } from '../src/features/office/ui/interaction/AgentDialogue';
 import { FirstVisit, replayFirstVisit } from '../src/features/office/ui/interaction/FirstVisit';
+import { DirectorDialogue } from '../src/features/office/ui/interaction/DirectorDialogue';
 import { OfficeNotifications } from '../src/features/office/ui/interaction/OfficeNotifications';
 import type { OfficeAgent, OfficeModel } from '../src/features/office/model/types';
 import { ApiClient } from '../src/api/client';
@@ -59,6 +60,12 @@ test('OfficeNotifications routes approvals to the inbox and clarifications to ov
   expect(onInbox).toHaveBeenCalledTimes(1);
   expect(onClarifications).toHaveBeenCalledTimes(1);
   expect(container.querySelector('[aria-live]')).toBeNull();
+});
+
+test('inactive Director dialogue has no backdrop or click target', () => {
+  const { container } = render(<DirectorDialogue active={false} onClose={vi.fn()}><p>Hidden transcript</p></DirectorDialogue>);
+  expect(container.querySelector('.fixed.inset-0.z-40')).toBeNull();
+  expect(container.querySelector('[aria-label="Hội thoại tại bàn Director"][aria-hidden="true"]')).toBeTruthy();
 });
 
 test('AgentDialogue reports unknown waiting authority and mounts technical evidence only on disclosure', async () => {

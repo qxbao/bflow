@@ -36,7 +36,7 @@ import { useAgentExcerpts } from './features/office/ui/useAgentExcerpts';
 import { TaskBoard } from './features/office/ui/interaction/TaskBoard';
 import { TaskDetail } from './features/office/ui/interaction/TaskDetail';
 import { DecisionInbox } from './features/office/ui/interaction/DecisionInbox';
-import { DecisionDraftProvider } from './features/office/ui/interaction/decision-drafts';
+import { DecisionDraftProvider, readDecisionDrafts, writeDecisionDrafts } from './features/office/ui/interaction/decision-drafts';
 import { AgentDialogue } from './features/office/ui/interaction/AgentDialogue';
 import { OfficeNotifications } from './features/office/ui/interaction/OfficeNotifications';
 import { FirstVisit, replayFirstVisit } from './features/office/ui/interaction/FirstVisit';
@@ -117,7 +117,8 @@ function ProjectContent({api,project,projects,revision,refresh,onPair,frame}:{ap
 }
 function ProjectSurfaces({api,project,projects,revision,refresh,onPair,frame,sessionRead,connection,events}:{api:ApiClient;project:WebProject;projects:WebProject[];revision:number;refresh:()=>void;onPair:(secret:string)=>Promise<void>;frame:Frame;sessionRead:{key:string;data?:WebProjectSession;error?:unknown;loading:boolean};connection:Connection;events:WebEvent[]}) {
   const id=project.projectId;
-  const [decisionDrafts,setDecisionDrafts]=useState<Record<string,DecisionDraft>>({});
+  const [decisionDrafts,setDecisionDrafts]=useState<Record<string,DecisionDraft>>(()=>readDecisionDrafts(id));
+  useEffect(()=>writeDecisionDrafts(id,decisionDrafts),[id,decisionDrafts]);
   const setDecisionDraft=(key:string,draft:DecisionDraft)=>setDecisionDrafts(old=>old[key]?.review===draft.review&&old[key]?.reason===draft.reason&&old[key]?.option===draft.option?old:{...old,[key]:draft});
   const [dialogueOpen,setDialogueOpen]=useState(false),[dialoguePath,setDialoguePath]=useState('');
   const location=useLocation(),projectBase=`/projects/${encodeURIComponent(id)}`;

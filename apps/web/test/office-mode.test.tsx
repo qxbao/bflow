@@ -4,13 +4,14 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { App } from '../src/app';
+import { isEscapeDismissal } from '../src/components/AppShell';
 import { ApiClient } from '../src/api/client';
 import { CommandStore } from '../src/api/commands';
 import { MODE_KEY, readMode, writeMode } from '../src/features/office/mode';
 import { decision,installApi,run,session } from './fixtures';
 const action={actionId:'decide',kind:'answer_decision' as const,enabled:true,expectedVersion:decision.expectedVersion};
 beforeEach(()=>{vi.stubGlobal('crypto',webcrypto);vi.stubGlobal('navigator',{onLine:true,locks:{request:async(_key:string,callback:()=>unknown)=>callback()}});localStorage.clear();sessionStorage.clear();});
-afterEach(()=>{cleanup();vi.unstubAllGlobals();localStorage.clear();sessionStorage.clear();});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();vi.unstubAllEnvs();localStorage.clear();sessionStorage.clear();});
 function app(path:string){return render(<MemoryRouter initialEntries={[path]}><App api={new ApiClient()}/></MemoryRouter>);}
 const readySession={...session,state:'ready',sessionId:'host-session'};
 
@@ -43,6 +44,15 @@ test('mode switch preserves in-memory decision draft',async()=>{
   fireEvent.click(screen.getByRole('button',{name:'Web'}));
   expect((screen.getByLabelText(/Lý do/) as HTMLTextAreaElement).value).toBe('Nháp trong bộ nhớ');
 });
+test('decision reason survives a reload within the same project tab',async()=>{
+  vi.stubEnv('VITE_BFLOW_IMMERSIVE_OFFICE','true');writeMode('classic');installApi({'/api/v1/projects/p/session':readySession,'/api/v1/projects/p/runs/run':{...run,availableActions:[action]}});
+  const first=app('/projects/p/runs/run');
+  fireEvent.click(await screen.findByRole('button',{name:'Xem xét gói'}));
+  fireEvent.change(screen.getByLabelText(/Lý do/),{target:{value:'Lý do cần giữ sau khi tải lại'}});
+  first.unmount();
+  app('/projects/p/runs/run');
+  expect((await screen.findByLabelText(/Lý do/) as HTMLTextAreaElement).value).toBe('Lý do cần giữ sau khi tải lại');
+});
 test('classic mode renders no visual chrome',async()=>{
   installApi({'/api/v1/projects/p/session':readySession});app('/projects/p/runs/run');
   await screen.findByRole('heading',{name:'Tìm sách nhanh hơn'});
@@ -72,6 +82,12 @@ test('Esc closes overlay and restores focus',async()=>{
   await waitFor(()=>expect(main.classList.contains('hidden')).toBe(true));
   await waitFor(()=>expect(document.activeElement).toBe(link));
 });
+test('Escape during Vietnamese IME composition does not close the visual panel',async()=>{
+  expect(isEscapeDismissal({key:'Escape',defaultPrevented:false,isComposing:true})).toBe(false);
+  expect(isEscapeDismissal({key:'Escape',defaultPrevented:true,isComposing:false})).toBe(false);
+  expect(isEscapeDismissal({key:'Escape',defaultPrevented:false,isComposing:false})).toBe(true);
+});
+
 test('page / is identical in both modes and offers no mode switch',async()=>{
   installApi();app('/');await screen.findByRole('button',{name:'Đăng ký dự án'});
   expect(screen.queryByRole('button',{name:'3D'})).toBeNull();

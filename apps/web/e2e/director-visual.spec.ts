@@ -160,6 +160,7 @@ test('Immersive flag: Director desk opens one persistent, editable in-scene dial
   expect(await page.evaluate(() => document.elementFromPoint(20, Math.floor(innerHeight / 2))?.getAttribute('aria-hidden'))).toBe('true');
   await expect(dialogue.getByText(/Chào bạn, tôi là Director/)).toBeVisible();
   const before = await call('inspect');
+  await dialogue.getByText('Gợi ý trò chuyện',{exact:true}).click();
   await dialogue.getByRole('button', { name: 'Hỏi tiến độ' }).click();
   await expect(dialogue.getByLabel('Tin nhắn cho Director')).toHaveValue(/Cho tôi biết tiến độ/);
   const after = await call('inspect');
@@ -167,9 +168,12 @@ test('Immersive flag: Director desk opens one persistent, editable in-scene dial
   expect(after.messages.filter((message: any) => message.author === 'user' && message.channel === 'web')).toHaveLength(before.messages.filter((message: any) => message.author === 'user' && message.channel === 'web').length);
   for (const viewport of [{ width: 375, height: 812 }, { width: 812, height: 375 }]) {
     await page.setViewportSize(viewport);
-    const input = await dialogue.getByLabel('Tin nhắn cho Director').boundingBox();
+    const editor=dialogue.getByLabel('Tin nhắn cho Director');
+    await editor.scrollIntoViewIfNeeded();
+    const input = await editor.boundingBox();
     expect(input).not.toBeNull();
     expect(input!.y + input!.height).toBeLessThanOrEqual(viewport.height);
+    expect(await editor.evaluate(element=>{const rect=element.getBoundingClientRect(),hit=document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2);return Boolean(hit&&(hit===element||element.contains(hit)));})).toBe(true);
   }
   await dialogue.getByRole('button', { name: 'Rời bàn Director' }).click();
   await expect(dialogue).toBeHidden();
@@ -187,4 +191,55 @@ test('Immersive flag: Director desk opens one persistent, editable in-scene dial
   await page.goBack();
   await expect(dialogue).toBeHidden();
   await expect(page.getByRole('region', { name: 'Trò chuyện với Director' })).toHaveCount(1);
+});
+
+test('short landscape recovery keeps transcript, launch/read controls, suggestions and recovery target reachable', async ({ page }) => {
+  test.skip(!process.env.VITE_BFLOW_IMMERSIVE_OFFICE, 'Requires a build with the immersive flag enabled.');
+  test.setTimeout(120000);
+  await call('configure', { presence: 'active', clearMessages: true, loseAckNext: true });
+  await openProject(page, await call('pair'), repository, /guides.*Xem dự án/);
+  await enterVisual(page);
+  await page.setViewportSize({ width: 812, height: 375 });
+  await mirror(page, /^Director: Đang hoạt động/);
+  const dialogue=page.getByRole('region',{name:'Hội thoại tại bàn Director'});
+  await expect(dialogue).toBeVisible();
+  await dialogue.getByLabel('Tin nhắn cho Director').fill('Kiểm tra khôi phục màn hình ngang');
+  await dialogue.getByRole('button',{name:'Gửi tin nhắn'}).click();
+  await expect(dialogue.getByRole('button',{name:'Đối chiếu tin nhắn'})).toBeFocused();
+  await expect(dialogue.getByText('Director · Trao đổi')).toBeVisible();
+  await expect(dialogue.getByText('Gợi ý trò chuyện',{exact:true})).toBeVisible();
+  await expect(dialogue.getByText(/không tự gửi lại/)).toBeVisible();
+  const targets=[dialogue.getByRole('button',{name:'Rời bàn Director'}),dialogue.getByRole('button',{name:'Đọc lại hội thoại'}),dialogue.getByRole('button',{name:'Khởi động phiên'}),dialogue.getByText('Gợi ý trò chuyện',{exact:true}),dialogue.getByRole('button',{name:'Đối chiếu tin nhắn'})];
+  await shot(page,'14-office3d-landscape-lost-ack');
+  for(const target of targets){
+    await expect(target).toBeVisible();
+    const box=await target.boundingBox();expect(box).not.toBeNull();expect(box!.x).toBeGreaterThanOrEqual(0);expect(box!.y).toBeGreaterThanOrEqual(0);expect(box!.x+box!.width).toBeLessThanOrEqual(812);expect(box!.y+box!.height).toBeLessThanOrEqual(375);
+    const hit=await target.evaluate(element=>{const rect=element.getBoundingClientRect(),hit=document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2);return {ok:Boolean(hit&&(hit===element||element.contains(hit))),target:element.getAttribute('aria-label')||element.textContent,hit:hit?.outerHTML.slice(0,120)};});
+    expect(hit.ok,`${hit.target} was obscured by ${hit.hit}`).toBe(true);
+  }
+  for(const viewport of [{width:375,height:812},{width:812,height:375},{width:768,height:900},{width:1099,height:900},{width:1100,height:900},{width:1440,height:900},{width:1920,height:1080}]){
+    await page.setViewportSize(viewport);await expect(dialogue).toBeVisible();
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`horizontal overflow at ${viewport.width}x${viewport.height}`).toBe(true);
+    for(const target of [targets[0]!,targets[1]!,targets[2]!,targets[4]!]){
+      await target.scrollIntoViewIfNeeded();await expect(target).toBeVisible();const box=await target.boundingBox();expect(box,`${viewport.width}x${viewport.height}`).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(0);expect(box!.y).toBeGreaterThanOrEqual(0);expect(box!.x+box!.width).toBeLessThanOrEqual(viewport.width);expect(box!.y+box!.height).toBeLessThanOrEqual(viewport.height);
+      const hit=await target.evaluate(element=>{const rect=element.getBoundingClientRect(),node=document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2);return Boolean(node&&(node===element||element.contains(node)));});
+      expect(hit,`${viewport.width}x${viewport.height}: ${await target.getAttribute('aria-label')||await target.textContent()}`).toBe(true);
+    }
+  }
+  await page.emulateMedia({reducedMotion:'reduce'});
+  await page.evaluate(()=>{document.documentElement.style.zoom='2';});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  const touch=await page.context().newCDPSession(page),summary=dialogue.getByText('Gợi ý trò chuyện',{exact:true}),summaryBox=await summary.boundingBox();
+  expect(summaryBox).not.toBeNull();
+  await touch.send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
+  const touchPoint={x:summaryBox!.x+summaryBox!.width/2,y:summaryBox!.y+summaryBox!.height/2};
+  await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[touchPoint]});
+  await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+  await expect(dialogue.locator('details.director-chat-suggestions')).toHaveAttribute('open','');
+  await touch.send('Emulation.setTouchEmulationEnabled',{enabled:false});await touch.detach();
+  const state=await call('inspect');
+  expect(state.messages.filter((message:any)=>message.author==='user'&&message.channel==='web')).toHaveLength(1);
+  expect(state.commands).toHaveLength(0);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
 });

@@ -62,6 +62,34 @@ dock are reachable from the scene (parity table in `test/office-parity.test.tsx`
 - **Capacity.** Up to 20 seated Developers; more show a "+n" chip that opens the unseated list. Rendering is on demand: at most 30 fps while something moves,
   8 fps while only idle clips run, nothing in a hidden tab; software renderers start in a low-quality tier (no shadows, pixel ratio 1).
 
+### Immersive interaction preview
+
+The in-scene interaction layer is a separate opt-in build feature. It stays off
+unless the Web bundle is built with `VITE_BFLOW_IMMERSIVE_OFFICE=true`; the
+normal Web/3D presentation remains the default. The flag gates the Director
+dialogue, task board, decision inbox, agent details, notices and first-visit
+guide. These surfaces use the existing routes, reads and mutation controls.
+The Director dialogue reuses the existing send/reconcile controller; a dotted
+desk connector appears only when the renderer projects the Director label on a
+wide screen. An offscreen desk, missing WebGL renderer or lost context uses the
+existing accessible list and does not imply a successful operation.
+
+With the flag enabled, unsent chat text and decision reasons/options are kept in
+per-project `sessionStorage` for the current tab. Restored decision snapshots
+are parsed with the exported `WebDecisionSchema`; malformed snapshots are
+discarded while valid bounded reason text is retained. The existing pending
+chat message ID and session metadata remain in their separate `localStorage`
+record. Reload only offers reconciliation for that ID; it never repeats a POST.
+Draft storage is not written by the default-off build.
+
+The task board preserves the established `search` and `phase` URL filters. The
+decision inbox identifies capped results as a lower bound and gives a recovery
+path when a deep-linked request is not in the loaded set. On short landscape
+screens the Director suggestions are in a compact disclosure, while the launch,
+read, composer and recovery controls remain available by scrolling. See the
+[phase5 report](docs/2026-11-05-immersive-office-task-5-report.md) for exact
+local browser evidence, viewport methods and remaining human/live gates.
+
 ### Measuring the scene
 
 `node apps/web/scripts/measure-office.mjs [--gl=auto|hardware|swiftshader] [--agents=30] [--toggles=20] [--out=file.json]` after a `pnpm --filter @bflow/web build`.
