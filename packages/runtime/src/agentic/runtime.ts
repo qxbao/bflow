@@ -546,13 +546,26 @@ export class AgenticWorkflowRuntime {
     }
     return result;
   }
-  /** R-B2-12: a run created by a v2 Conversation is read-only in a Director session (inspect, cancel and reconciliation only). */
-  private async assertDirectorWritable(run: RunRecord): Promise<void> {
-    if (!this.ports.director) return;
-    if (run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+  /** Mutating Director tools remain scoped to the run's original interaction session after token rotation or host restart. */
+  private async assertDirectorSession(run: RunRecord): Promise<void> {
     const manifest = SessionManifestSchema.parse(unwrap(await this.ports.panes.getManifest()));
     if (manifest.schemaVersion !== 3 || manifest.conversationSessionId !== run.delegation.sessionId)
       throw new AdmissionRejectedError("Cross-session Director mutation");
+  }
+  private async assertDirectorWritable(run: RunRecord): Promise<void> {
+    if (!this.ports.director) return;
+    if (run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+    await this.assertDirectorSession(run);
+  }
+  /** Authenticated Director tools retain read access across sessions, but cancellation/reconciliation require the owning session. */
+  async assertDirectorToolSession(input: { runId?: string; messageId?: string }): Promise<void> {
+    await this.journal.exclusive(async state => {
+      const message = input.messageId === undefined ? undefined : state.outbound.find(out => out.message.message_id === input.messageId)?.message ??
+        state.runs.flatMap(run => run.nativeDeliveries ?? []).find(item => item.message.message_id === input.messageId)?.message;
+      const runId = input.messageId === undefined ? input.runId : message?.run_id;
+      const run = state.runs.find(item => item.runId === runId);
+      if (run) await this.assertDirectorSession(run);
+    });
   }
   /** Tool-layer guard (Director principal): true when the run was created by a v2 Conversation. */
   async assertDirectorRunWritable(runId: string): Promise<void> {

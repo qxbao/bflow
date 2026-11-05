@@ -64,6 +64,12 @@ export class CoordinatorTools {
     const args = record(JsonValueSchema.parse(input));
     if (principal.role !== "coordinator" && !(principal.role === "developer" && name === "authorize_implementation"))
       throw new Error("Only Coordinator may invoke orchestration tools");
+    if (principal.principal === "director" && name !== "inspect") {
+      const runId = args.runId ?? args.run_id;
+      const messageId = name === "reconcile_delivery" ? args.messageId ?? args.message_id : undefined;
+      await this.runtime.assertDirectorToolSession({ ...(typeof runId === "string" ? { runId } : {}),
+        ...(typeof messageId === "string" ? { messageId } : {}) });
+    }
     if (principal.principal === "director" && !DIRECTOR_LEGACY_RUN_TOOLS.includes(name)) {
       const runId = args.runId ?? args.run_id;
       if (typeof runId === "string" && runId.trim() !== "") await this.runtime.assertDirectorRunWritable(runId);
