@@ -1,6 +1,6 @@
 # Immersive office — Task5 local evidence
 
-This report records implementation and evidence in the immersive-office worktree. The implementation baseline was `d1dd453dc15d52b8cd28324add694ab218435a4e` (`agent/web/immersive-office`). Final source is committed separately. The feature flag remains off by default.
+This report records implementation and evidence in the immersive-office worktree. The implementation baseline was `d1dd453dc15d52b8cd28324add694ab218435a4e` (`agent/web/immersive-office`). Core recovery work is committed as `23e23d1a`; the focused HUD fix is a separate follow-up commit. The feature flag remains off by default.
 
 ## Changes
 
@@ -27,9 +27,11 @@ VITE_BFLOW_IMMERSIVE_OFFICE=true BFLOW_WEB_TEST_BROWSER=/usr/bin/google-chrome p
 - The recovery scenario checks 375×812, 812×375, 768×900, 1099×900, 1100×900, 1440×900 and 1920×1080 for horizontal overflow and reachable close/read/launch/reconcile controls. It center-hit-tests those controls and the suggestion disclosure. Reduced motion uses Playwright media emulation. Touch uses Chrome DevTools Protocol touch emulation. “200% zoom” uses `document.documentElement.style.zoom = '2'`; it is a CSS zoom simulation, not physical browser zoom or a mobile keyboard test.
 - Screenshot: `apps/web/dist/test-results/task9/14-office3d-landscape-lost-ack.png` (ignored output).
 
+After the core commit, root's first broad flag-on run stopped after 9 failures. Triage found the real HUD/guide overlaps fixed in the follow-up; other failures involved old assertions for the now-modal review/card accessible name and a composer layout assertion. After the HUD fix, bounded Chrome checks passed: `office-a11y.spec.ts` **6/6**, `office-csp.spec.ts` **3/3**, and `office-recovery.spec.ts -g 'unknown_delivery|lost WebGL context'` **2/2**. The recovery/workflow E2E helper updates for the new modal/card are present but the full workflow scenarios have not been rerun. Root's final affected and Web package checks are pending.
+
 ## Performance measurement
 
-The parent ran `apps/web/scripts/measure-office.mjs` against this stable flag-on build with 30 fixture agents. Environment: Intel i5-12500 (12 threads), 15.3 GiB RAM, Linux `7.0.0-38`, Node `24.16.0`, Chrome `152.0.7977.82`, headless SwiftShader, viewport `1280×800`.
+The parent ran `apps/web/scripts/measure-office.mjs` against the stable flag-on build from `23e23d1a` with 30 fixture agents, before the HUD-only follow-up. The final HUD follow-up was not performance-retested. Environment: Intel i5-12500 (12 threads), 15.3 GiB RAM, Linux `7.0.0-38`, Node `24.16.0`, Chrome `152.0.7977.82`, headless SwiftShader, viewport `1280×800`. The ignored JSON output is `apps/web/dist/immersive-office-measurement.json`.
 
 | Measure | Result | Target / assessment |
 | --- | ---: | --- |
@@ -45,7 +47,7 @@ The full moving frame rate and TaskBoard response miss their targets. The fast b
 
 ## Remaining gates
 
-- The parent is running additional final flag-on browser recovery, accessibility and security suites against this stable build; their results will be recorded in a report-only update.
+- Full final root checks, the root-selected affected tests and the Web package suite are owned by the parent and will be reported in the integration handoff.
 - Full platform fault acceptance still requires explicit evidence for every required stopped/offline/stale/session-change/unknown-operation, asset-failure and WebGL-loss case against the final bundle. The two Task5 browser cases above do not close that whole matrix.
 - Manual physical browser zoom, mobile keyboard, assistive-technology and contrast review are not claimed here. No novice user study was run.
 - No live provider, Herdr workflow or active connection-fault campaign was run. The isolated worktree lacks `.bflow/config.yml`; no machine/provider configuration was changed. Historical live evidence is outside this branch’s acceptance.

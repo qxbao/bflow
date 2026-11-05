@@ -140,6 +140,16 @@
 .office-3d .office-panel h1 { font-size: 1.5rem; }
 .office-topbar { display: grid; grid-template-columns: minmax(0, 18rem) auto; gap: .75rem; align-items: start; }
 .office-topbar > [aria-label="Trạng thái văn phòng"] { grid-column: 1 / -1; justify-self: start; max-width: 100%; }
+.office-immersive .office-topbar { grid-template-columns: minmax(0, 18rem) minmax(0, 1fr); grid-template-rows: auto auto auto; }
+.office-immersive .office-topbar > [aria-label="Văn phòng Bflow"] { grid-column: 1; grid-row: 1; }
+.office-immersive .office-topbar > [aria-label="Thông báo văn phòng"] { grid-column: 1 / -1; grid-row: 2; justify-self: end; max-width: calc(100vw - 6.5rem); }
+.office-immersive .office-topbar > [aria-label="Chế độ hiển thị"] { grid-column: 2; grid-row: 1; justify-self: end; }
+.office-immersive .office-topbar > [aria-label="Trạng thái văn phòng"] { grid-column: 1 / -1; grid-row: 3; justify-self: start; max-width: 100%; }
+.office-immersive .office-topbar > [aria-label="Hướng dẫn lần đầu"],
+.office-immersive .office-topbar > .office-guide-replay { position: absolute; top: 40dvh; right: 0; width: min(20rem, calc(100vw - 6.5rem)); }
+.office-immersive .office-topbar > [aria-label="Hướng dẫn lần đầu"] { z-index: 1; }
+.office-immersive .office-topbar > .office-guide-replay { z-index: 2; }
+.office-topbar > .office-guide-replay { text-align: left; }
 .office-rail { left: .75rem; right: auto; top: 50%; transform: translateY(-42%); }
 .office-rail button { min-height: 44px; width: 72px; font-size: 11px; }
 .office-panel-open .office-quick-chat { display: none; }
@@ -171,6 +181,7 @@
 }
 @container office (max-width: 900px) {
   .office-topbar { grid-template-columns: minmax(0, 1fr) auto; }
+  .office-immersive .office-topbar { grid-template-columns: minmax(0, 1fr) auto; }
   .office-topbar section { max-width: 17rem; }
   .office-topbar [aria-label="Trạng thái văn phòng"] { font-size: .75rem; }
   .office-cameras button span { display: none; }
@@ -206,6 +217,8 @@
 
 .office-topbar > details { display: block; margin: 0; padding-block: 0; }
 .office-topbar > details summary { min-height: 40px; }
+.office-cameras details[open] > div { grid-template-columns: repeat(3, 2.75rem); }
+.office-cameras details[open] > div > button { min-width: 2.75rem; min-height: 2.75rem; padding-inline: .25rem; }
 @media (max-width: 1099px) { .office-panel-open [data-hud-bottom] > div:last-child { display: none; } }
 
 /* The opt-in interaction frame floats above the scene at every viewport width. Keep the legacy side panel rules untouched. */

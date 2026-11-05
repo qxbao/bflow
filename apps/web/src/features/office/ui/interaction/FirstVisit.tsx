@@ -20,7 +20,7 @@ export function FirstVisit({ projectId, active, onDirector, onTasks, onInbox }: 
   useEffect(() => { const replayGuide = (): void => setStep(0); const event = replayEvent(projectId); window.addEventListener(event, replayGuide); return () => window.removeEventListener(event, replayGuide); }, [projectId]);
   const save = (value: 'dismissed' | 'completed'): void => { try { localStorage.setItem(key, value); } catch { /* Private browsing can deny storage; the guide remains usable this visit. */ } setStep(null); };
   if (!active) return null;
-  if (step === null) return null;
+  if (step === null) return <button type="button" className="office-guide-replay pointer-events-auto min-h-9 rounded-lg border border-line bg-surface/90 px-3 py-1.5 text-xs backdrop-blur-md" onClick={() => replayFirstVisit(projectId)}>Xem lại hướng dẫn</button>;
   const current = STEPS[Math.min(step ?? 0, STEPS.length - 1)]!;
   const action = step === 0 ? onDirector : step === 1 ? onTasks : onInbox;
   return <section aria-label="Hướng dẫn lần đầu" data-component="FirstVisit" className="pointer-events-auto w-full max-w-sm rounded-xl border border-line bg-surface/95 p-3 shadow-lg backdrop-blur-md">

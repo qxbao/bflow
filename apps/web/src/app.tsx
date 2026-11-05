@@ -238,7 +238,7 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
       onFocusZone={focusZone} onAgentList={()=>openInspector({kind:'unseated'})}
       director={d.directorLayout?{canSend:d.chat.canSend,presenceLabel:presenceLabels[d.presence]}:undefined} onQueue={()=>openInspector({kind:'queue'})}
       notifications={immersive?<OfficeNotifications connection={connection} session={session} stale={stale} authRequired={authRequired} model={model} onInbox={()=>go(`${base}/review`)} onClarifications={frame.openOverview}/>:undefined}
-      firstVisit={immersive?<>{!frame.panelOpen&&!dialogueOpen&&<button type="button" className="pointer-events-auto min-h-9 rounded-lg border border-line bg-surface/90 px-3 py-1.5 text-xs backdrop-blur-md" onClick={()=>replayFirstVisit(id)}>Xem lại hướng dẫn</button>}<FirstVisit projectId={id} active={!frame.panelOpen&&!dialogueOpen} onDirector={()=>model?.director?select({kind:'director'}):go(`${base}/chat`)} onTasks={()=>go(`${base}/runs`)} onInbox={()=>go(`${base}/review`)}/></>:undefined}
+      firstVisit={immersive?<FirstVisit projectId={id} active={!frame.panelOpen&&!dialogueOpen} onDirector={()=>model?.director?select({kind:'director'}):go(`${base}/chat`)} onTasks={()=>go(`${base}/runs`)} onInbox={()=>go(`${base}/review`)}/>:undefined}
       onChatDraft={draft=>{openInspector(undefined);navigate(`${base}/chat`,{state:{draft}});}} dock={<OperationsDock/>} dockSummary={dockSummary} onDockHeight={frame.setDockPx}/>,frame.hud)}
   </>;
 }

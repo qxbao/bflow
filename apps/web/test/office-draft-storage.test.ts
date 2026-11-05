@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { afterEach, expect, test, vi } from 'vitest';
 import { decision } from './fixtures';
 import { decisionDraftKey, readDecisionDrafts, writeDecisionDrafts } from '../src/features/office/ui/interaction/decision-drafts';

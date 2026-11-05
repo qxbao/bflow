@@ -50,13 +50,14 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
   await expect.poll(async () => (await host.call('inspect')).commands.filter((c: any) => c.kind === 'answer_clarification' && c.intakeId === 'intake').length).toBe(1);
   await mirror(page, /Bảng nhiệm vụ/);
   await expect(page).toHaveURL(/\/runs$/);
-  await page.getByRole('link', { name: 'Tìm sách nhanh', exact: true }).first().click();
+  await page.getByRole('link', { name: /Tìm sách nhanh/ }).first().click();
   await expect(page).toHaveURL(/runs\/run$/);
   await page.getByRole('button', { name: 'Tên sách', exact: true }).click();
   await page.getByRole('button', { name: 'Gửi câu trả lời' }).click();
   await expect.poll(async () => (await host.call('inspect')).phase).toBe('reviewing');
 
   // Review is pinned to a version: a newer revision requires an explicit re-read and sends nothing.
+  if (await page.getByRole('button', { name: 'Mở nội dung cần quyết định' }).isVisible().catch(()=>false)) await page.getByRole('button', { name: 'Mở nội dung cần quyết định' }).click();
   await page.getByRole('button', { name: 'Xem xét gói' }).click();
   await host.call('configure', { revision: 2 });
   await expect(page.getByRole('button', { name: 'Đọc lại gói hiện hành' })).toBeVisible();
@@ -67,12 +68,14 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
   const other = await context.newPage();
   await other.goto(page.url());
   await expect(other.getByRole('button', { name: '3D', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  if (await other.getByRole('button', { name: 'Mở nội dung cần quyết định' }).isVisible().catch(()=>false)) await other.getByRole('button', { name: 'Mở nội dung cần quyết định' }).click();
   await other.getByRole('button', { name: 'Xem xét gói' }).click();
   await expect(page.getByRole('button', { name: 'Duyệt gói' })).toBeEnabled();
   await expect(other.getByRole('button', { name: 'Duyệt gói' })).toBeEnabled();
   await Promise.all([page, other].map(tab => tab.getByRole('button', { name: 'Duyệt gói' }).evaluate((b: HTMLButtonElement) => b.click())));
   await expect.poll(async () => (await host.call('inspect')).phase).toBe('blocked');
   await other.close();
+  if (await page.getByRole('button', { name: 'Quay lại công việc' }).isVisible().catch(()=>false)) await page.getByRole('button', { name: 'Quay lại công việc' }).click();
 
   // Resume follows availableActions; cancel needs a reason and the accepted state is not "stopped".
   await expect(page.getByRole('button', { name: 'Tiếp tục', exact: true })).toBeEnabled();
@@ -111,6 +114,7 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
   await host.call('configure', { phase: 'reviewing', revision: 3, cancelled: false });
   await openDock(page);
   await page.getByRole('button', { name: 'Bắt đầu thao tác mới: Quyết định gói', exact: true }).click();
+  if (await page.getByRole('button', { name: 'Mở nội dung cần quyết định' }).isVisible().catch(()=>false)) await page.getByRole('button', { name: 'Mở nội dung cần quyết định' }).click();
   await page.getByRole('button', { name: 'Xem xét gói' }).click();
   await page.getByLabel(/Lý do \(bắt buộc/).fill('Bổ sung tiêu chí hiệu năng');
   await page.getByRole('button', { name: 'Yêu cầu sửa', exact: true }).click();
