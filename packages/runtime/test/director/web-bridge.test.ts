@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -124,6 +124,25 @@ describe("Director Web bridge: chat", () => {
     // The Director's own refresh signals (chat / director invalidate) never wake director_wait as Runtime events.
     const quiet = (await f.endpoint.call(session.token, "director_wait", { cursor: woken.cursor, timeoutMs: 300 })) as { timedOut: boolean; runtimeEvents: unknown[] };
     expect(quiet).toMatchObject({ timedOut: true, runtimeEvents: [] });
+  });
+
+  it("publishes each chat message once when a message arrives between version and transcript reads", async () => {
+    const f = await setup();
+    await f.bridge.refresh();
+    const first = await f.endpoint.appendWebMessage({ messageId: randomUUID(), text: "first" });
+    const version = f.endpoint.version.bind(f.endpoint);
+    const secondId = randomUUID();
+    vi.spyOn(f.endpoint, "version").mockImplementationOnce(async () => {
+      const observed = await version();
+      await f.endpoint.appendWebMessage({ messageId: secondId, text: "second" });
+      return observed;
+    });
+    await f.bridge.refresh();
+    const ids = () => f.published.filter(event => event.type === "chat").flatMap(event => event.resourceIds);
+    expect(ids()).toEqual([first.messageId]);
+    await f.bridge.refresh();
+    expect(ids()).toEqual([first.messageId, secondId]);
+    expect((await f.endpoint.transcript()).map(message => message.text)).toEqual(["first", "second"]);
   });
 
   it("is idempotent per messageId and reports a conflict for a different payload", async () => {
