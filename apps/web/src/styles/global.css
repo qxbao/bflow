@@ -149,6 +149,8 @@
 .chat-toolbar h1 { margin: 0; }
 .chat-history { max-height: 16rem; overflow-y: auto; border-bottom: 1px solid var(--color-line); }
 .chat-thread { display: flex; flex-direction: column; height: max(32rem, calc(100dvh - 17rem)); min-height: 0; }
+.director-dialogue .chat-thread { height: 100%; min-height: 0; max-height: none; }
+.director-dialogue .chat-thread > [role="log"] { min-height: 0; }
 .chat-layout .chat-thread { overflow-y: auto; }
 .chat-thread > header { padding: 1.25rem; gap: .75rem; flex-shrink: 0; }
 .chat-layout .chat-thread > [role="log"] { min-height: min(8rem, 25dvh); }

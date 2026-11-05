@@ -22,6 +22,9 @@ import { Operations, OperationsDock, useOperationsDockSummary } from './features
 import type { OfficeFocusZone } from './features/office/model/types';
 import { Overview } from './features/overview';
 import { DirectorProvider, presenceLabels, useDirector } from './features/director/status';
+import { DirectorChat, DirectorChatControllerProvider } from './features/director/chat';
+import { DirectorDialogue } from './features/office/ui/DirectorDialogue';
+import { immersiveOfficeEnabled } from './features/office/immersive';
 import { DirectorInspector } from './features/office/ui/DirectorInspector';
 import { useUiMode, type UiMode } from './features/office/mode';
 import { OfficeFrame, OverviewOutlet } from './features/office/ui/OfficeFrame';
@@ -75,12 +78,12 @@ type Frame={mode:UiMode;setMode:(mode:UiMode)=>void;overviewOpen:boolean;panelOp
 export type Inspector={kind:'agent';instanceId:string}|{kind:'unseated'}|{kind:'cabinet'}|{kind:'server'}|{kind:'repair'}|{kind:'director'}|{kind:'queue'};
 function ProjectContent({api,project,projects,revision,refresh,onPair,frame}:{api:ApiClient;project:WebProject;projects:WebProject[];revision:number;refresh:()=>void;onPair:(secret:string)=>Promise<void>;frame:Frame}) {
   const id=project.projectId;
+  const chatRoute=Boolean(useMatch('/projects/:projectId/chat/*'));
   const [connection,setConnection]=useState<Connection>('connecting'),[events,setEvents]=useState<WebEvent[]>([]);
   const hadDisconnect=useRef(false);
   // An SSE reset (or a reconnect after a gap) restarts Director transcript cursors from the latest page.
   const [resetEpoch,setResetEpoch]=useState(0);
   const session=useRead(`session:${id}`,()=>api.sessionView(id),revision);
-  const sessionInactive=Boolean(session.data && !session.error && ['stopped','unavailable'].includes(session.data.state));
   const wasNotReady=useRef(false),[reconnectEpoch,setReconnectEpoch]=useState(0);
   useEffect(()=>{
     const state=session.data?.state;
@@ -102,10 +105,25 @@ function ProjectContent({api,project,projects,revision,refresh,onPair,frame}:{ap
     return()=>{close();clearTimeout(timer);window.removeEventListener('online',online);};
   },[id,refresh,reconnectEpoch]);
   useEffect(()=>{if(connection==='connected')return;const poll=setInterval(refresh,15000);return()=>clearInterval(poll);},[connection,refresh]);
-  const mark=<div className="flex flex-wrap items-center gap-3"><span className="font-semibold text-ink">{project.displayName}</span><ConnectionBanner state={connection} inactive={sessionInactive}/></div>;
-  const visual=frame.mode==='visual',chatRoute=Boolean(useMatch('/projects/:projectId/chat/*'));
+  return <Operations api={api} id={id} revision={revision} refresh={refresh} dock={frame.mode==='visual'?'external':chatRoute?'compact':'inline'}><DirectorProvider api={api} projectId={id} session={session} revision={revision} resetEpoch={resetEpoch}><ProjectSurfaces api={api} project={project} projects={projects} revision={revision} refresh={refresh} onPair={onPair} frame={frame} sessionRead={session} connection={connection} events={events}/></DirectorProvider></Operations>;
+}
+function ProjectSurfaces({api,project,projects,revision,refresh,onPair,frame,sessionRead,connection,events}:{api:ApiClient;project:WebProject;projects:WebProject[];revision:number;refresh:()=>void;onPair:(secret:string)=>Promise<void>;frame:Frame;sessionRead:{key:string;data?:WebProjectSession;error?:unknown;loading:boolean};connection:Connection;events:WebEvent[]}) {
+  const id=project.projectId;
+  const [dialogueOpen,setDialogueOpen]=useState(false);
+  const composerRoute=Boolean(useMatch({path:'/projects/:projectId/chat',end:true}));
+  const immersive=immersiveOfficeEnabled()&&frame.mode==='visual';
+  useEffect(()=>{if(!dialogueOpen)return;const key=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();setDialogueOpen(false);}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[dialogueOpen]);
   const list=<ul className="m-0 list-none p-0">{[['runs','Công việc'],['chat','Trò chuyện'],['agents','Nhân viên'],['review','Cần bạn quyết định'],['issues','Cần xử lý'],['settings','Cài đặt dự án']].map(([path,title])=><li key={path} className="border-t border-line py-2 first:border-t-0"><Link to={`/projects/${encodeURIComponent(id)}/${path}`}>{title}</Link></li>)}</ul>;
-  return <Operations api={api} id={id} revision={revision} refresh={refresh} dock={visual?'external':chatRoute?'compact':'inline'}><DirectorProvider api={api} projectId={id} session={session} revision={revision} resetEpoch={resetEpoch}>{!visual && <div className="mb-4 flex min-h-11 flex-wrap items-center justify-between gap-3 border-b border-line pb-2.5 font-data text-sm">{mark}<div className="flex flex-wrap items-center gap-2"><ModeSwitch mode={frame.mode} onChange={frame.setMode}/><button className="min-w-28" onClick={refresh}>Tải lại dữ liệu</button></div></div>}<OfficeFrame mode={frame.mode} overview={<Overview api={api} project={project} session={session} revision={revision} refresh={refresh} events={events}/>} overviewOpen={frame.overviewOpen} panelOpen={frame.panelOpen}><Routes><Route index element={<OverviewOutlet/>}/><Route path="runs" element={<Runs api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="runs/:runId" element={<RunRoute api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat/:runId" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="agents" element={<AgentsPage api={api} id={id} revision={revision}/>}/><Route path="issues" element={<IssuesPage/>}/><Route path="issues/:issueId" element={<IssueDetail/>}/><Route path="review" element={<Review api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="settings" element={<Settings api={api} project={project} refresh={refresh}/>}/><Route path="*" element={<EmptyState title="Không tìm thấy trang"><Link to={`/projects/${encodeURIComponent(id)}`}>Về tổng quan dự án</Link></EmptyState>}/></Routes></OfficeFrame>{visual && <VisualOffice api={api} project={project} projects={projects} onPair={onPair} session={session.data} connection={connection} revision={revision} refresh={refresh} list={list} frame={frame}/>}</DirectorProvider></Operations>;
+  const mark=<div className="flex flex-wrap items-center gap-3"><span className="font-semibold text-ink">{project.displayName}</span><ConnectionBanner state={connection} inactive={Boolean(sessionRead.data&&!sessionRead.error&&['stopped','unavailable'].includes(sessionRead.data.state))}/></div>;
+  const leaveDialogue=()=>setDialogueOpen(false);
+  return <DirectorChatControllerProvider active={composerRoute||dialogueOpen}>
+    {frame.mode!=='visual'&&<div className="mb-4 flex min-h-11 flex-wrap items-center justify-between gap-3 border-b border-line pb-2.5 font-data text-sm">{mark}<div className="flex flex-wrap items-center gap-2"><ModeSwitch mode={frame.mode} onChange={frame.setMode}/><button className="min-w-28" onClick={refresh}>Tải lại dữ liệu</button></div></div>}
+    <OfficeFrame mode={frame.mode} overview={<Overview api={api} project={project} session={sessionRead} revision={revision} refresh={refresh} events={events}/>} overviewOpen={frame.overviewOpen} panelOpen={frame.panelOpen}>
+      <Routes><Route index element={<OverviewOutlet/>}/><Route path="runs" element={<Runs api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="runs/:runId" element={<RunRoute api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat/:runId" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="agents" element={<AgentsPage api={api} id={id} revision={revision}/>}/><Route path="issues" element={<IssuesPage/>}/><Route path="issues/:issueId" element={<IssueDetail/>}/><Route path="review" element={<Review api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="settings" element={<Settings api={api} project={project} refresh={refresh}/>}/><Route path="*" element={<EmptyState title="Không tìm thấy trang"><Link to={`/projects/${encodeURIComponent(id)}`}>Về tổng quan dự án</Link></EmptyState>}/></Routes>
+    </OfficeFrame>
+    {frame.mode==='visual'&&<VisualOffice api={api} project={project} projects={projects} onPair={onPair} session={sessionRead.data} connection={connection} revision={revision} refresh={refresh} list={list} frame={frame} onDirectorDialogue={()=>setDialogueOpen(true)} onLeaveDialogue={leaveDialogue}/>}
+    {dialogueOpen&&frame.mode==='visual'&&frame.host&&createPortal(<DirectorDialogue active onClose={leaveDialogue}><DirectorChat immersive={immersive} /></DirectorDialogue>,frame.host)}
+  </DirectorChatControllerProvider>;
 }
 function RunRoute({api,id,revision,refresh}:{api:ApiClient;id:string;revision:number;refresh:()=>void}) { const {runId=''}=useParams();return <RunView key={runId} api={api} id={id} runId={runId} revision={revision} refresh={refresh}/>; }
 
@@ -113,7 +131,7 @@ function RunRoute({api,id,revision,refresh}:{api:ApiClient;id:string;revision:nu
  * Rendered only in visual mode, so Classic issues no extra reads. Portals the scene into the full-screen stage node, the floating HUD into
  * the HUD node and any inspector into the panel; all from one model. Read-only: the HUD only navigates and hands a chat draft to the chat page.
  */
-function VisualOffice({api,project,projects,onPair,session,connection,revision,refresh,list,frame}:{api:ApiClient;project:WebProject;projects:WebProject[];onPair:(secret:string)=>Promise<void>;session:WebProjectSession|undefined;connection:Connection;revision:number;refresh:()=>void;list:ReactNode;frame:Frame}) {
+function VisualOffice({api,project,projects,onPair,session,connection,revision,refresh,list,frame,onDirectorDialogue,onLeaveDialogue}:{api:ApiClient;project:WebProject;projects:WebProject[];onPair:(secret:string)=>Promise<void>;session:WebProjectSession|undefined;connection:Connection;revision:number;refresh:()=>void;list:ReactNode;frame:Frame;onDirectorDialogue:()=>void;onLeaveDialogue:()=>void}) {
   const id=project.projectId,base=`/projects/${encodeURIComponent(id)}`,navigate=useNavigate();
   // The Director desk and queue board read the shared Director state (Task 5) as a projection; the scene and model never call the API.
   const d=useDirector();
@@ -162,12 +180,14 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
   },[model,inspector,openInspector]);
   // Runs after OfficeFrame restored the opener, so the HUD (not a vanished control) ends up focused.
   useEffect(()=>{if(refocusHud.current && !frame.panelOpen){refocusHud.current=false;frame.hud?.focus();}},[frame.panelOpen,frame.hud]);
-  const go=(path:string)=>{openInspector(undefined);navigate(path);};
+  const go=(path:string)=>{onLeaveDialogue();openInspector(undefined);navigate(path);};
   const select=(target:OfficeTarget)=>{
+    onLeaveDialogue();
     // Before the camera moves: centre the selection in what the panel leaves visible.
     control.current?.setInset(insetFor(true));
     if(target.kind==='agent'){openInspector({kind:'agent',instanceId:target.instanceId});return;}
-    if(target.kind==='director'||target.kind==='queue'){openInspector({kind:target.kind});return;}
+    if(target.kind==='director'){if(immersiveOfficeEnabled()){onDirectorDialogue();return;}openInspector({kind:'director'});return;}
+    if(target.kind==='queue'){openInspector({kind:'queue'});return;}
     switch(target.object){
       case 'counter':go(`${base}/chat`);break;
       case 'board':go(`${base}/runs`);break;

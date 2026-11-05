@@ -1,18 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { webcrypto } from 'node:crypto';
+import { useState } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { ApiClient } from '../src/api/client';
 import { DirectorProvider, useDirector } from '../src/features/director/status';
 import { DirectorChat } from '../src/features/director/chat';
+import { DirectorChatControllerProvider } from '../src/features/director/chat-controller';
 import { Operations } from '../src/features/operations';
 import { directorServer, locks, message, readySession, sessionRead, view, at } from './director-fixtures';
 
 beforeEach(()=>{localStorage.clear();vi.stubGlobal('crypto',webcrypto);Object.defineProperty(navigator,'locks',{configurable:true,value:locks});});
 afterEach(()=>{cleanup();vi.unstubAllGlobals();vi.useRealTimers();});
 function open({revision=0,resetEpoch=0,session=sessionRead(),api=new ApiClient()}:{revision?:number;resetEpoch?:number;session?:ReturnType<typeof sessionRead>|{key:string;loading:boolean;error?:unknown;data?:never};api?:ApiClient}={}){
-  return <MemoryRouter><Operations api={api} id="p" refresh={()=>{}} dock="external"><DirectorProvider api={api} projectId="p" session={session} revision={revision} resetEpoch={resetEpoch}><DirectorChat/></DirectorProvider></Operations></MemoryRouter>;
+  return <MemoryRouter><Operations api={api} id="p" refresh={()=>{}} dock="external"><DirectorProvider api={api} projectId="p" session={session} revision={revision} resetEpoch={resetEpoch}><DirectorChatControllerProvider active><DirectorChat/></DirectorChatControllerProvider></DirectorProvider></Operations></MemoryRouter>;
 }
+function SwitchableChat(){const [open,setOpen]=useState(true);return <><button onClick={()=>setOpen(false)}>Rời hội thoại</button>{open?<DirectorChat/>:<button onClick={()=>setOpen(true)}>Mở lại hội thoại</button>}</>;}
+function SwitchableHandoffChat(){const [open,setOpen]=useState(true);return <><button onClick={()=>setOpen(false)}>Rời hội thoại</button>{open?<DirectorChat/>:<><DirectorChat initialDraft="Bản nháp mới" handoffKey="handoff-next"/><button onClick={()=>setOpen(true)}>Quay lại hội thoại</button></>}</>};
+function openSwitchable(api=new ApiClient()){return <MemoryRouter><Operations api={api} id="p" refresh={()=>{}} dock="external"><DirectorProvider api={api} projectId="p" session={sessionRead()} revision={0} resetEpoch={0}><DirectorChatControllerProvider active><SwitchableChat/></DirectorChatControllerProvider></DirectorProvider></Operations></MemoryRouter>;}
 const input=()=>screen.getByLabelText<HTMLTextAreaElement>('Tin nhắn cho Director');
 const sendButton=()=>screen.getByRole<HTMLButtonElement>('button',{name:'Gửi tin nhắn'});
 
@@ -129,6 +134,24 @@ it('a lost ACK never auto-resends; focus moves to recovery; resend appears only 
   expect(await screen.findByText('Câu hỏi')).toBeTruthy();
   await waitFor(()=>expect(input().disabled).toBe(false));
 });
+it('keeps the project chat draft when its route presentation unmounts and mounts again',async()=>{
+  directorServer();render(openSwitchable());await waitFor(()=>expect(input().disabled).toBe(false));
+  fireEvent.change(input(),{target:{value:'Bản nháp tiếng Việt'}});fireEvent.click(screen.getByRole('button',{name:'Rời hội thoại'}));
+  fireEvent.click(screen.getByRole('button',{name:'Mở lại hội thoại'}));
+  expect(input().value).toBe('Bản nháp tiếng Việt');expect(screen.getByRole<HTMLButtonElement>('button',{name:'Gửi tin nhắn'}).disabled).toBe(false);
+});
+it('does not queue a second send while the first ACK is unresolved across a presentation switch',async()=>{
+  let release:(value:undefined)=>void=()=>{},starts=0;
+  directorServer({extra:async(_path,init)=>{if(init.method==='POST'){starts++;await new Promise<undefined>(resolve=>{release=resolve;});}return undefined;}});
+  const api=new ApiClient();
+  render(<MemoryRouter><Operations api={api} id="p" refresh={()=>{}} dock="external"><DirectorProvider api={api} projectId="p" session={sessionRead()} revision={0} resetEpoch={0}><DirectorChatControllerProvider active><SwitchableHandoffChat/></DirectorChatControllerProvider></DirectorProvider></Operations></MemoryRouter>);await waitFor(()=>expect(input().disabled).toBe(false));
+  fireEvent.change(input(),{target:{value:'Gửi đúng một lần'}});fireEvent.click(sendButton());
+  await waitFor(()=>expect(starts).toBe(1));fireEvent.click(screen.getByRole('button',{name:'Rời hội thoại'}));
+  fireEvent.click(screen.getByRole('button',{name:'Quay lại hội thoại'}));
+  expect(sendButton().disabled).toBe(true);fireEvent.click(sendButton());expect(starts).toBe(1);
+  release(undefined);await waitFor(()=>expect(screen.getByRole('log',{name:'Tin nhắn với Director'}).textContent).toContain('Gửi đúng một lần'));
+  expect(starts).toBe(1);expect(input().value).toBe('Gửi đúng một lần\n\nBản nháp mới');
+});
 it('a definitive refusal of the resend keeps the pending ID and the composer locked to recovery',async()=>{
   let posts=0;const {state}=directorServer({extra:(path,init)=>{if(init.method!=='POST')return undefined;posts++;state.posts.push({path,body:JSON.parse(String(init.body))});
     if(posts===1)throw new TypeError('lost');return Response.json({apiVersion:1,code:'session_required',message:'x',retryable:false,correlationId:'t'},{status:401});}});
@@ -176,7 +199,7 @@ it('reconcile observes the transcript for the original ID without posting',async
   fireEvent.change(input(),{target:{value:'Đã tới host'}});fireEvent.click(sendButton());
   await screen.findByText(/Chưa xác định được kết quả gửi/);
   fireEvent.click(screen.getByRole('button',{name:'Đối chiếu tin nhắn'}));
-  expect(await screen.findByText(/Đã tìm thấy tin nhắn gốc/)).toBeTruthy();expect(state.posts).toHaveLength(1);
+  expect(await screen.findByText(/Đã tìm thấy tin nhắn gốc/)).toBeTruthy();expect(state.posts).toHaveLength(1);expect(input().value).toBe('');
 });
 it('chat text is never an approval: "duyệt" goes only to the Director transcript',async()=>{
   const {state,fetcher}=directorServer();render(open());await waitFor(()=>expect(input().disabled).toBe(false));
