@@ -73,6 +73,9 @@ describe("Agy Director supervised NDJSON", () => {
     const first = new DirectorNdjsonSupervisor(options); supervisors.push(first); await first.start();
     const second = new DirectorNdjsonSupervisor(options); supervisors.push(second);
     await expect(second.start()).rejects.toThrow(/already running/i);
+    await second.stop();
+    const third = new DirectorNdjsonSupervisor(options); supervisors.push(third);
+    await expect(third.start()).rejects.toThrow(/already running/i);
     expect(await lines(f.log)).toHaveLength(1);
   });
 

@@ -36,6 +36,7 @@ export class DirectorNdjsonSupervisor {
   #process: ChildProcessWithoutNullStreams | undefined;
   #status: DirectorNdjsonStatus = "new";
   #marker: string;
+  #ownsMarker = false;
   #generation = randomUUID();
   #conversationId: string | undefined;
   #resolveTurn: ((success: boolean) => void) | undefined;
@@ -60,6 +61,7 @@ export class DirectorNdjsonSupervisor {
       const file = await open(this.#marker, "wx", 0o600);
       try { await file.writeFile(JSON.stringify({ version: 1, generation: this.#generation, status: "starting", pid: process.pid })); }
       finally { await file.close(); }
+      this.#ownsMarker = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
         let previous = "Director supervisor already running or unreconciled";
@@ -96,6 +98,7 @@ export class DirectorNdjsonSupervisor {
       if (this.status() !== "uncertain") {
         this.#setStatus("stopped");
         await rm(this.#marker, { force: true });
+        this.#ownsMarker = false;
       }
       throw error;
     }
@@ -107,6 +110,7 @@ export class DirectorNdjsonSupervisor {
   }
 
   async stop(): Promise<void> {
+    if (!this.#ownsMarker) return;
     const wasUncertain = this.#status === "uncertain" || this.#status === "sending";
     if (this.#process && this.#process.exitCode === null) this.#process.kill("SIGTERM");
     this.#process = undefined;
@@ -115,6 +119,7 @@ export class DirectorNdjsonSupervisor {
     if (wasUncertain) { this.#setStatus("uncertain"); return; }
     this.#setStatus("stopped");
     await rm(this.#marker, { force: true });
+    this.#ownsMarker = false;
   }
 
   async #send(prompt: string): Promise<void> {
