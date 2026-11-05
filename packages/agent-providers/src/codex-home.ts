@@ -140,9 +140,9 @@ function sanitizeProviderTable(table: Record<string, unknown>): Record<string, u
 }
 
 /**
- * Provider auth helpers are user programs that resolve credentials from the user's real HOME
- * (for example `~/.runsystem/api-key`). The private process HOME would hide them, so the
- * private config runs the same command with only HOME restored to the source process home.
+ * Provider auth helpers are user programs that may resolve credentials from the user's real HOME.
+ * The private process HOME would hide them, so the private config runs the same command
+ * with only HOME restored to the source process home.
  */
 function withSourceHome(provider: Record<string, unknown>, sourceProcessHome: string | undefined): Record<string, unknown> {
   const auth = provider["auth"];

@@ -1720,7 +1720,7 @@ rl.on("line", line => {
   });
 
   it("creates a sanitized 0700/0600 private CODEX_HOME when auth is isolatable and strips global instructions, hooks, plugins and mcp_servers", async () => {
-    const sourceProcessHome = join(baseDir, "runsystem-operator-home");
+    const sourceProcessHome = join(baseDir, "custom-provider-operator-home");
     const sourceCodexHome = join(sourceProcessHome, ".codex");
     const stateDir = join(baseDir, "codex-private-state");
     await mkdir(join(sourceCodexHome, "skills", "global-skill"), { recursive: true, mode: 0o700 });
@@ -1729,15 +1729,15 @@ rl.on("line", line => {
     await writeFile(join(sourceCodexHome, "config.toml"), [
       'model = "gpt-5.4"',
       'review_model = "gpt-5.4-mini"',
-      'model_provider = "runsystem"',
+      'model_provider = "custom_gateway"',
       'model_reasoning_effort = "high"',
       "",
-      "[model_providers.runsystem]",
-      'name = "RunSystem"',
+      "[model_providers.custom_gateway]",
+      'name = "Custom Gateway"',
       'base_url = "https://api.example.com/v1"',
       'wire_api = "responses"',
       "",
-      "[model_providers.runsystem.auth]",
+      "[model_providers.custom_gateway.auth]",
       'command = "/usr/local/bin/codex-token"',
       "",
       '[plugins."bflow-superpowers@bflow-superpowers"]',
@@ -1750,7 +1750,7 @@ rl.on("line", line => {
       'SessionStart = [{ hooks = [{ type = "command", command = "/usr/bin/true" }] }]',
       ""
     ].join("\n"), { mode: 0o600 });
-    // Even if a stale chatgpt auth.json exists alongside runsystem auth, it must NOT be copied.
+    // Even if a stale chatgpt auth.json exists alongside custom provider auth, it must NOT be copied.
     await writeFile(join(sourceCodexHome, "auth.json"), JSON.stringify({
       auth_mode: "chatgpt",
       tokens: { refresh_token: "must-not-copy" }
@@ -1773,7 +1773,7 @@ rl.on("line", line => {
     const sanitizedText = await readFile(sanitizedConfigPath, "utf8");
     expect(sanitizedText).toContain("gpt-5.4");
     expect(sanitizedText).toContain("gpt-5.4-mini");
-    expect(sanitizedText).toContain("runsystem");
+    expect(sanitizedText).toContain("custom_gateway");
     expect(sanitizedText).toContain("/usr/local/bin/codex-token");
     expect(sanitizedText).not.toContain("bflow-superpowers");
     expect(sanitizedText).not.toContain("gitnexus");

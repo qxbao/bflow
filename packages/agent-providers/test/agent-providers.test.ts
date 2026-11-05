@@ -2993,18 +2993,18 @@ describe("@bflow/agent-providers", () => {
       expect(await readFile(join(home, "config.toml"), "utf8")).toBe(config);
     });
 
-    it("succeeds in checkHealth and prepareLaunch for a private CODEX_HOME without auth.json when codex login status exits 1", async () => {
+    it.each(["custom_gateway", "alternate_proxy"])("succeeds in checkHealth and prepareLaunch for custom provider %s without auth.json when codex login status exits 1", async providerId => {
       const { preparePrivateCodexHome } = await import("../src/codex-home.js");
       const sourceHome = await freshCodexHome({
         "config.toml": [
           'model = "gpt-5.4"',
-          'model_provider = "runsystem"',
+          `model_provider = "${providerId}"`,
           "model_context_window = 1000000",
           "model_auto_compact_token_limit = 900000",
-          '[model_providers.runsystem]',
-          'name = "Runsystem"',
+          `[model_providers.${providerId}]`,
+          'name = "Custom Gateway"',
           'base_url = "https://codex.example/v1"',
-          '[model_providers.runsystem.auth]',
+          `[model_providers.${providerId}.auth]`,
           'command = "/usr/local/bin/codex-token"',
           ""
         ].join("\n"),
@@ -3013,7 +3013,7 @@ describe("@bflow/agent-providers", () => {
           tokens: { refresh_token: "rt_rotating_secret" }
         })
       });
-      const preparedStateDir = join(testBaseDir, "private-codex-state");
+      const preparedStateDir = join(testBaseDir, `private-codex-state-${providerId}`);
       await mkdir(preparedStateDir, { recursive: true, mode: 0o700 });
       const trustedRoot = join(testBaseDir, "repo with space");
       const prepared = await preparePrivateCodexHome(preparedStateDir, sourceHome, testBaseDir, {}, { trustedProjects: [trustedRoot, "relative/ignored"] });
@@ -3025,10 +3025,12 @@ describe("@bflow/agent-providers", () => {
       expect(privateConfig).toContain(`[projects."${trustedRoot}"]`);
       expect(privateConfig).toContain('trust_level = "trusted"');
       expect(privateConfig).not.toContain("relative/ignored");
-      // The user's auth helper resolves its credential from the real HOME (e.g. ~/.runsystem/api-key);
+      // The user's auth helper resolves its credential from the real HOME;
       // the private process HOME must not hide it, so the command runs with the source HOME restored.
       const { parse } = await import("smol-toml");
-      const auth = (parse(privateConfig) as any).model_providers.runsystem.auth;
+      const parsedConfig = parse(privateConfig);
+      expect(parsedConfig.model_provider).toBe(providerId);
+      const auth = (parsedConfig as any).model_providers[providerId].auth;
       expect(auth.command).toBe("/usr/bin/env");
       expect(auth.args).toEqual([`HOME=${testBaseDir}`, "/usr/local/bin/codex-token"]);
       // Herdr types the launch into an interactive shell whose HOME is this private directory. Without a
