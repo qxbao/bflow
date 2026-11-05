@@ -775,6 +775,27 @@ describe("P30 dynamic Developer launches end to end", () => {
     ]));
   });
 
+  it("releases an unused launch after a proven pre-spawn allocation timeout and permits retry", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"] });
+    const run = host.herdr.run.bind(host.herdr);
+    let refused = false;
+    vi.spyOn(host.herdr, "run").mockImplementation(async invocation => {
+      if (!refused && invocation.args[0] === "worktree" && invocation.args[1] === "create") {
+        refused = true;
+        return { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: false,
+          cause: "Operation budget expired before worktree creation" };
+      }
+      return run(invocation);
+    });
+    expect(await host.panes.allocateDeveloper(allocation("run-1-t1"))).toMatchObject({ ok: false,
+      error: { code: "timeout", retrySafety: "not_started" } });
+    expect(host.herdr.startCalls()).toHaveLength(0);
+    expect(host.herdr.panes.size).toBe(0);
+    expect(gatewayControl.registrations.size).toBe(0);
+    expect((await host.panes.allocateDeveloper(allocation("run-1-t1"))).ok).toBe(true);
+    expect(host.herdr.startCalls()).toHaveLength(1);
+  });
+
   it.each(["conflict", "transport_unavailable"] as const)("retains an allocation refused after native start while %s cleanup is unconfirmed", async code => {
     const host = await buildHost({ mcpServiceIds: ["svc-search"] });
     const prepare = vi.spyOn(host.service, "prepareDeveloper");
@@ -826,7 +847,10 @@ describe("P30 dynamic Developer launches end to end", () => {
     expect(gatewayControl.registrations.size).toBe(0);
   });
 
-  it("retains an uncertain allocation without a manifest target instead of inferring the native process stopped", async () => {
+  it.each([
+    { code: "transport_unavailable", retryable: true, message: "unrecorded native start uncertainty" },
+    { code: "timeout", retryable: true, retrySafety: "observation_only", message: "unrecorded native start uncertainty" }
+  ] satisfies ContractError[])("retains an uncertain $code allocation without a manifest target instead of inferring the native process stopped", async error => {
     const host = await buildHost({ mcpServiceIds: ["svc-search"] });
     const allocate = host.rolePanes.allocateDeveloper.bind(host.rolePanes);
     vi.spyOn(host.rolePanes, "allocateDeveloper").mockImplementationOnce(async (...args) => {
@@ -835,7 +859,7 @@ describe("P30 dynamic Developer launches end to end", () => {
       const loaded = await host.store.load(SESSION);
       if (!loaded.ok || !loaded.value) throw new Error("missing fixture manifest");
       await host.store.save({ ...loaded.value, panes: loaded.value.panes.filter(pane => pane.bindingId !== allocated.value.bindingId) });
-      return { ok: false, error: { code: "transport_unavailable", retryable: true, message: "unrecorded native start uncertainty" } };
+      return { ok: false, error };
     });
     expect(await host.panes.allocateDeveloper(allocation("run-1-t1"))).toMatchObject({ ok: false,
       error: { code: "conflict", retryable: true, details: { stage: "developer_cleanup" } } });

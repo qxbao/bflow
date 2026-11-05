@@ -167,6 +167,8 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
           const candidates = manifest.panes.filter(pane => pane.role === "developer" && pane.metadata?.taskId === taskId);
           const target = candidates.find(pane => pane.metadata?.launchId === obligation.launchId &&
             (obligation.paneId === undefined || pane.paneId === obligation.paneId));
+          // With no retained binding, an explicit not_started timeout leaves no native launch to reconcile.
+          const notStarted = obligation.allocationFailure?.code === "timeout" && obligation.allocationFailure.retrySafety === "not_started";
           if (target) {
             obligation.paneId ??= target.paneId;
             // Pane Manager releases the active task binding first. Do not close a replacement while an older obligation remains.
@@ -174,7 +176,7 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
             if (releaseTarget?.bindingId !== target.bindingId)
               return cleanupError(taskId, "another allocation now owns this task; reconcile the exact retained pane before release");
           } else if (obligation.paneId !== undefined || candidates.length > 0 || obligation.allocationFailure &&
-              !["conflict", "validation"].includes(obligation.allocationFailure.code)) {
+              !["conflict", "validation"].includes(obligation.allocationFailure.code) && !notStarted) {
             return cleanupError(taskId, "the exact launch awaiting cleanup has no verified pane-stop observation");
           }
         }
