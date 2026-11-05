@@ -129,7 +129,7 @@ async function measure(browser, host) {
   await page.getByRole('button', { name: 'Đăng ký dự án' }).click();
   await page.getByRole('link', { name: /Xem dự án/ }).click();
   const stage = page.getByLabel('Cảnh văn phòng');
-  const enter = async () => { await page.getByRole('button', { name: 'Trực quan', exact: true }).click(); await stage.waitFor(); await page.waitForFunction(() => document.querySelector('[aria-label="Cảnh văn phòng"]')?.getAttribute('data-office-renderer') === 'ready', null, { timeout: 60000 }); };
+  const enter = async () => { await page.getByRole('button', { name: '3D', exact: true }).click(); await stage.waitFor(); await page.waitForFunction(() => document.querySelector('[aria-label="Cảnh văn phòng"]')?.getAttribute('data-office-renderer') === 'ready', null, { timeout: 60000 }); };
   const leave = async () => { await page.getByRole('button', { name: 'Classic', exact: true }).click(); await stage.waitFor({ state: 'detached' }); };
   const t = () => page.evaluate(() => performance.now());
   const data = async () => page.evaluate(() => ({ frames: window.__m.frames.slice(), long: window.__m.long.slice() }));

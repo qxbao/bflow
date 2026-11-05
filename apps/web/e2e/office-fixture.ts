@@ -45,7 +45,7 @@ export async function openProject(page: Page, pairing: string, repository: strin
 }
 /** Switches to the 3D mode with the Classic top-bar switch and waits for the scene. */
 export async function enterVisual(page: Page, scene = true): Promise<void> {
-  await page.getByRole('button', { name: 'Trực quan', exact: true }).click();
+  await page.getByRole('button', { name: '3D', exact: true }).click();
   await expect(page.getByRole('button', { name: '3D', exact: true })).toHaveAttribute('aria-pressed', 'true');
   if (scene) await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-renderer', 'ready', { timeout: 20000 });
 }

@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
 export type UiMode='classic'|'visual';
+export const UI_MODE_OPTIONS:readonly (readonly [UiMode,string])[]=[['classic','Classic'],['visual','3D']];
 /** Deliberately outside the `bflow:web:operations:` prefix: CommandStore.records() treats malformed keys there as corruption. */
 export const MODE_KEY='bflow:ui:mode';
 export function readMode():UiMode {
