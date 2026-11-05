@@ -1763,9 +1763,12 @@ export class RolePaneManager {
         const args = [...startArgs, "--timeout", String(remaining.value), ...providerArgs];
         return ok(await this.#runHerdr(args, { ...options, timeoutMs: remaining.value }));
       };
+      const supervisedDeveloper = spec.topologyRole === "developer" && launch?.env.BFLOW_PROCESS_SCOPE_ID !== undefined;
       let recordedDynamicProfileIntent = false;
       const clearUnstartedProfileIntent = async (): Promise<void> => {
-        if (!recordedDynamicProfileIntent) return;
+        // Scoped panes retain their exact cleanup obligation even when native startup was not confirmed.
+        // Only releaseDeveloper/closeCancelledDeveloper may remove it after proving closure or absence.
+        if (!recordedDynamicProfileIntent || supervisedDeveloper) return;
         const current = await this.#store.load(this.#config.sessionId, options);
         if (!current.ok || !current.value) return;
         const entry = current.value.panes.find(item => item.paneId === pane.paneId);
@@ -1780,10 +1783,10 @@ export class RolePaneManager {
         );
         recordedDynamicProfileIntent = false;
       };
-      if (request.roleProfile) {
+      if (request.roleProfile || supervisedDeveloper) {
         const stored = await this.#store.load(this.#config.sessionId, options);
         if (!stored.ok) return stored;
-        if (!stored.value) return notFoundError("Session manifest is required for profile launch");
+        if (!stored.value) return notFoundError("Session manifest is required for profile or supervised launch");
         const intent = this.#buildAndValidateBinding({ spec, agentName, agentKind,
           agentInfo: { ...pane, name: agentName, agent: agentKind, agentStatus: "unknown", revision: pane.revision },
           request: { ...request, metadata: { ...request.metadata, ...launchMetadata, launchIntent: true } } });
@@ -3108,6 +3111,8 @@ export class RolePaneManager {
       // The same allocation whose pane vanished (e.g. with an earlier host generation) runs no provider process; drop it so
       // Runtime can reallocate the task instead of colliding with its stale binding or a reused Herdr pane ID.
       if (existingTaskDeveloper) {
+        if (existingTaskDeveloper.metadata?.["processScopeId"] !== undefined && existingTaskDeveloper.metadata?.["launchIntent"] === true)
+          return conflictError(`Supervised Developer '${existingTaskDeveloper.agentId}' has an unresolved launch intent in pane '${existingTaskDeveloper.paneId}'; confirm closure before allocating again`);
         const health = await this.inspectRoleHealth(existingTaskDeveloper.bindingId, options);
         if (health.ok && (!health.value.paneExists || !health.value.occupantMatches)) {
           if (
