@@ -1,4 +1,7 @@
 import type { JsonValue } from "@bflow/contracts";
+import { fileURLToPath } from 'node:url';
+import { restoreDirectorMachineEnvironment } from './director-machine-environment.js';
+import { environmentProcessRunner } from './environment-process.js';
 import { CLI_EXIT_CODES } from "./types.js";
 
 export type DirectorProvider = "claude" | "codex" | "agy";
@@ -80,6 +83,13 @@ export async function defaultDirectorDeps(cwd: string): Promise<DirectorCommandD
     cwd,
     identify: async dir => (await import("./repository.js")).identifyRepository(dir),
     ensureUp: async dir => {
+      const machineEnvironment=restoreDirectorMachineEnvironment(process.env);
+      if(machineEnvironment){
+        const result=await environmentProcessRunner.run({executable:process.execPath,args:[fileURLToPath(new URL('./bin.js',import.meta.url)),'up','--json'],
+          cwd:dir,env:machineEnvironment,mode:'capture'});
+        if(result.exitCode!==0)throw Error('Không khởi động được Runtime bằng môi trường máy của phiên Director. Chạy bflow doctor để xem chẩn đoán.');
+        return;
+      }
       const { EnvironmentLifecycle } = await import("./environment.js");
       const lifecycle = new EnvironmentLifecycle(dir, { onProgress: m => { process.stderr.write(`${m}\n`); } });
       const status = await lifecycle.status();

@@ -315,3 +315,11 @@ describe("D-CD-01 HTTP routes", () => {
     }
   });
 });
+
+it('accepts an optional Director profile and rejects injected paths, environment and malformed profile names',()=>{
+ expect(WebDirectorLaunchRequestSchema.parse({...launchRequest,profileName:'personal'})).toMatchObject({profileName:'personal'});
+ for(const profileName of ['', '../personal','a/b','x;touch p','x\nY','a'.repeat(129)])expect(WebDirectorLaunchRequestSchema.safeParse({...launchRequest,profileName}).success).toBe(false);
+ const option={provider:'codex',state:'available',manualCommand:'codex',profiles:[{name:'personal',state:'available'}]};
+ expect(WebDirectorLaunchOptionSchema.parse(option)).toEqual(option);
+ expect(WebDirectorLaunchOptionSchema.safeParse({...option,profiles:[{name:'personal',state:'available',HOME:'/secret'}]}).success).toBe(false);
+});

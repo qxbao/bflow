@@ -2,7 +2,7 @@ import { WebHttpContracts, WebCommandSchema, type WebCommand, type WebDirectorLa
 import { ApiClient, ApiError, projectPath } from './client';
 export type InteractionBody = WebCommand extends infer C ? C extends WebCommand ? Omit<C,'apiVersion'|'projectId'|'commandId'> : never : never;
 /** `director_launch` carries only the provider choice; the server derives argv/cwd/env. */
-export type DirectorLaunchBody = {kind:'director_launch';provider:WebDirectorLaunchRequest['provider'];replaceActive:boolean};
+export type DirectorLaunchBody = {kind:'director_launch';provider:WebDirectorLaunchRequest['provider'];profileName?:string;replaceActive:boolean};
 export type CommandBody = InteractionBody | {kind:'session_start'|'session_stop';force?:boolean} | DirectorLaunchBody;
 const RECORD_KINDS:readonly string[]=['create_request','revise_request','answer_clarification','answer_decision','resume','cancel','session_start','session_stop','director_launch','issue_retry','issue_dismiss'];
 export async function execute(api:ApiClient, command:WebCommand) {
@@ -32,7 +32,7 @@ export async function executeLifecycle(api:ApiClient,project:string,id:string,ki
 /** Launch effect is uncertain by nature: the same operation ID replays only as an observation (server-side), never a second window. */
 export async function executeDirectorLaunch(api:ApiClient,project:string,id:string,body:DirectorLaunchBody){
   const route=WebHttpContracts.launchDirector;
-  const request=route.body.parse({apiVersion:1,operationId:id,provider:body.provider,replaceActive:body.replaceActive});
+  const request=route.body.parse({apiVersion:1,operationId:id,provider:body.provider,...(body.profileName!==undefined?{profileName:body.profileName}:{}),replaceActive:body.replaceActive});
   const value=await api.request(`${projectPath(project)}/director/launch`,route.response,'POST',request,50000);
   return check(value,project,id,'director_launch');
 }
@@ -80,7 +80,7 @@ export class CommandStore {
     if(this.busy.has(slot))throw new Error('Thao tác đang được tiếp nhận.');
     this.busy.add(slot);
     const run=async()=>{
-      if(body.kind==='director_launch')WebHttpContracts.launchDirector.body.parse({apiVersion:1,operationId:crypto.randomUUID(),provider:body.provider,replaceActive:body.replaceActive});
+      if(body.kind==='director_launch')WebHttpContracts.launchDirector.body.parse({apiVersion:1,operationId:crypto.randomUUID(),provider:body.provider,...(body.profileName!==undefined?{profileName:body.profileName}:{}),replaceActive:body.replaceActive});
       else if(body.kind!=='session_start' && body.kind!=='session_stop')WebCommandSchema.parse({...body,apiVersion:1,projectId:this.projectId,commandId:crypto.randomUUID()});
       const digest=await fingerprint(body),existing=this.records().find(r=>r.slot===slot);
       if(existing){

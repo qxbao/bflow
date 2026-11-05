@@ -285,3 +285,14 @@ it('uses the Director cold-start layout when a stopped host has an old up v2 man
  expect(await services.director.readView(project.projectId,browser())).toMatchObject({ok:true,value:{layout:'not_started',snapshot:{director:{presence:'absent'}}}});
  expect(await readFile(path,'utf8')).toBe(before);
 });
+
+it('passes the selected profile to the private plan and returns its name without the environment',async()=>{
+ const {project}=await repository();const seen:{env?:Record<string,string>;count:number}={count:0};
+ const build=vi.fn(async(_project,provider,deps)=>({provider,profileName:deps.profileName,cwd:project.canonicalPath,argv:['private-helper'],manualCommand:'ai-isolator run codex --name personal',env:{TOKEN:SECRET}}));
+ const launch=vi.fn(async()=>({mode:'manual_command',manualCommand:'ai-isolator run codex --name personal',launchedAt:now()}));
+ const services=createWebInteractionServices({principalId:'ledger',resolveProject:async()=>project},{sessionId:async()=> 'host-1',director:{build:build as never,launch:launch as never,
+  readPresence:async()=> 'host_stopped',deps:launchDeps(project.canonicalPath,seen)}});
+ const result=await services.director.launch(project.projectId,{provider:'codex',profileName:'personal',replaceActive:false},browser());
+ expect(build).toHaveBeenCalledWith(expect.anything(),'codex',expect.objectContaining({profileName:'personal'}));
+ expect(result).toMatchObject({ok:true,value:{provider:'codex',profileName:'personal'}});expect(JSON.stringify(result)).not.toContain(SECRET);
+});

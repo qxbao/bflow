@@ -823,3 +823,13 @@ Lệnh Web so sánh mã build theo nội dung CLI, Local Server, các package v�
 - Server từ bản cũ chưa hỗ trợ thay thế: lệnh báo rõ cần Ctrl-C cửa sổ Web cũ một lần rồi chạy lại `bflow web`; không âm thầm nối vào bản cũ.
 
 Mỗi server giữ một snapshot giao diện riêng để việc build lại trên đĩa không trộn frontend mới với backend cũ. Mã `Bản Web` hiện trong terminal và trang Cài đặt dự án để đối chiếu. Đây là nhận diện bản build, không phải bằng chứng về chất lượng workflow hay trạng thái task.
+
+### Profile ai-isolator cho Director
+
+Trong Web, mở **Khởi động phiên**, chọn nhà cung cấp rồi chọn **Profile ai-isolator**.
+CLI tương đương: `bflow open --provider codex --profile personal`.
+Danh sách chỉ đọc những profile đã có trên máy; tên profile được kiểm tra bằng contract và profile được Runtime resolver xác thực lại trước khi mở terminal. Không tìm thấy profile hoặc backend chưa sẵn sàng thì từ chối; không chuyển ngầm sang native.
+
+Director chạy qua `ai-isolator run <provider> --name <profile> -- ...` để dùng đúng HOME/XDG, đăng nhập và backend của profile. Bflow giữ riêng các selector máy để lệnh khởi động Runtime vẫn đọc đúng setup/Gateway; không đưa thông tin xác thực vào argv hay biên nhận Web. `profileName` tham gia fingerprint của thao tác, nên dùng lại một operation ID cho profile khác bị từ chối.
+
+Adapter này hỗ trợ Codex và Claude Code theo giao diện của ai-isolator 0.4.4 đã kiểm tra trên máy; Agy vẫn dùng lựa chọn native. Kiểm tra thực tế với wrapper 0.4.4, profile dùng thử và CLI giả xác nhận HOME/XDG cùng ngữ cảnh máy; đó không phải bằng chứng chạy Director/provider hay workflow SDLC thật.
