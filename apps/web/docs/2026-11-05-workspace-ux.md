@@ -50,3 +50,19 @@ Baseline bc2b89f2 = origin/main; chứa P24 8dbb056. Baseline Web: 51 files, 542
 - Chat giữ diện tích ngay cả khi đã có nhiều thao tác: lịch sử kết quả thu gọn theo nhu cầu; cảnh báo kết quả chưa rõ nằm ngoài phần thu gọn. Reviewer độc lập xác nhận không đổi xử lý lệnh.
 - Kiểm tra mất ACK/khởi động lại, quyết định xung đột giữa hai tab, hết hạn phiên, mất WebGL, CSP, nội dung HTML/SVG độc hại và rò rỉ context đều đạt trong bộ browser cục bộ.
 - Ảnh và log cục bộ nằm trong apps/web/dist (không commit). Preview tại http://127.0.0.1:4320 phục vụ build từ worktree này.
+
+## Review trước khi đưa lên main
+
+Review độc lập bổ sung phát hiện một lỗi chặn: lịch sử Chat mở trên màn hình thấp hoặc thông báo đối chiếu dài có thể đẩy nút Gửi/khôi phục ra khỏi vùng bị cắt. Đã tái hiện trên Chrome trước khi sửa. Khung hội thoại nay cho phép cuộn khi nội dung vượt chiều cao, giữ kích thước header và vùng đọc tối thiểu; không đổi quyền hay logic gửi/đối chiếu.
+
+Thêm hai browser regression: lịch sử mở ở 375/768×650 giữ nút Gửi tiếp cận được; dữ liệu khôi phục hỏng ở 375×650 và 375×812 trong cả Web/3D vẫn cuộn theo focus, hit-test được nút đối chiếu và không tự gửi tin. Reviewer kiểm tra độc lập lại lỗi và xác nhận bản sửa.
+
+Kiểm tra toàn repository dùng TMPDIR=/tmp: thư mục tạm kế thừa của môi trường ai-isolator nằm dưới một ancestor có quyền ghi nhóm, bị kiểm tra quyền của provider từ chối đúng thiết kế. Bộ provider 147 bài đạt với thư mục tạm an toàn; không nới kiểm tra quyền hoặc sửa module provider để né lỗi môi trường.
+
+### Kết quả trước push
+
+- Build, dependency graph, typecheck toàn workspace: đạt; Web unit/component **543/543** đạt.
+- Browser production/Local Server: **39 đạt, 1 bỏ qua** (bài live provider/Herdr). Bao gồm hai regression mới về nút Gửi và đối chiếu tin nhắn trên màn hình thấp; không nới timeout hoặc bỏ assertion để đạt.
+- Kiểm tra mở rộng toàn repository **không được tuyên bố hoàn tất hoặc xanh**. Đợt song song đầu có timeout do tải máy và một số fixture bị biến môi trường agent ảnh hưởng. Đã chạy tiếp các file chưa đạt/chưa chạy với 3 workers, TMPDIR=/tmp và bỏ các biến selector/profile của agent khỏi môi trường child test; các file integration-host-notices, park-unpark, integration-p19-conflicts-reviews, host-recovery, director-web-host và iso-engine đạt trong lần kiểm tra lại. Giữ kết quả/log từng đợt, không sửa các module hoặc cấu hình test liên quan.
+- Một lỗi xác định còn lại: packages/runtime/test/platform/flow04-platform-gateway-trust.test.ts:203, devNative.ok trả false. Chạy riêng trên main nguyên bản bc2b89f2 trong checkout gốc, cùng môi trường sạch, tái hiện đúng lỗi này (1 failed, 2 passed). Runtime, agent-providers và test này không thay đổi trong diff Web. Đây là giới hạn baseline; không tính là blocker mới của bản Web và không che bằng sửa assertion.
+- Review độc lập kết luận không có blocker nguồn khác trong bản Web. Kiểm tra mobile dock tùy biến của reviewer chưa kết luận nên không được dùng làm bằng chứng đạt; bộ browser office-recovery hiện có vẫn đạt.
