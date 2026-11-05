@@ -40,7 +40,7 @@ export function ChatPage({api,id,revision,refresh}:{api:ApiClient;id:string;revi
         {runs.data && <div className="px-3"><Pagination label="Phân trang danh sách trò chuyện" page={pagination.page} first={pagination.first} previous={pagination.previous} next={runs.data.nextCursor?()=>pagination.next(runs.data!.nextCursor!):undefined} busy={runs.loading || Boolean(runs.error)}/></div>}
       </nav>
       <div className="min-w-0">
-        {runId?<><Link className="block border-b border-line px-4 py-2 font-data text-sm lg:hidden" to={{pathname:base,search:location.search}}>← Danh sách trò chuyện</Link><Thread key={runId} api={api} id={id} runId={runId} revision={revision} refresh={refresh} draft={draft} readOnly={director}/></>:director?<DirectorChat {...(draft?{initialDraft:draft}:{})}/>:<div className="p-6"><EmptyState title="Chọn một công việc"><p>Mở lịch sử và chọn công việc bạn muốn trao đổi.</p>{draft&&<p className="whitespace-pre-wrap border-l-3 border-line pl-3 text-sm">Bản nháp chưa gửi: {draft}</p>}</EmptyState></div>}
+        {runId?<><Link className="block border-b border-line px-4 py-2 font-data text-sm lg:hidden" to={{pathname:base,search:location.search}}>← Danh sách trò chuyện</Link><Thread key={runId} api={api} id={id} runId={runId} revision={revision} refresh={refresh} draft={draft} readOnly={director}/></>:director?<DirectorChat handoffKey={location.key} {...(draft?{initialDraft:draft}:{})}/>:<div className="p-6"><EmptyState title="Chọn một công việc"><p>Mở lịch sử và chọn công việc bạn muốn trao đổi.</p>{draft&&<p className="whitespace-pre-wrap border-l-3 border-line pl-3 text-sm">Bản nháp chưa gửi: {draft}</p>}</EmptyState></div>}
       </div>
     </div>
   </>;

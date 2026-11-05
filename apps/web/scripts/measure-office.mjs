@@ -2,7 +2,7 @@
 // V8.6 repeatable measurement of the 3D office in real Chrome. Not part of any default test run.
 //
 //   pnpm --filter @bflow/web build
-//   node apps/web/scripts/measure-office.mjs [--gl=auto|hardware|swiftshader] [--agents=30] [--toggles=20] [--out=file.json]
+//   node apps/web/scripts/measure-office.mjs [--gl=auto|hardware|swiftshader] [--agents=30] [--toggles=20] [--assets=/abs/web/dist/client] [--cli=/abs/cli] [--out=file.json]
 //
 // It reports numbers only; it asserts nothing and loosens nothing. The budget comparison is printed beside each number.
 // `--gl=auto` tries hardware GL first (headed when a display exists) and falls back to SwiftShader; the report says which one ran.
@@ -18,12 +18,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const web = resolve(here, '..');
 const arg = (name, fallback) => process.argv.find(a => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 const GL = arg('gl', 'auto'), AGENTS = Number(arg('agents', '30')), TOGGLES = Number(arg('toggles', '20')), OUT = arg('out', '');
+const ASSETS = resolve(arg('assets', join(web, 'dist/client'))), CLI = resolve(arg('cli', resolve(web, '../cli')));
 const BROWSER = process.env.BFLOW_WEB_TEST_BROWSER;
-const BUDGET = { chunkGzipKiB: 250, assetsMiB: 4, movingFps: 30, idleFps: 8, hiddenFrames: 0, longTaskMs: 50 };
+const BUDGET = { chunkGzipKiB: 250, assetsMiB: 4, movingFps: 30, inputResponseMs: 100, idleFps: 8, hiddenFrames: 0, longTaskMs: 50, liveGlContexts: 1 };
 
 // ---- static: chunk and asset sizes ----
 async function sizes() {
-  const dist = join(web, 'dist/client');
+  const dist = ASSETS;
   const files = await readdir(join(dist, 'assets'));
   const out = { chunks: [], assets: [] };
   for (const f of files.filter(f => f.endsWith('.js'))) {
@@ -41,7 +42,7 @@ async function sizes() {
 
 // ---- the acceptance host (same stdin/IPC pattern as e2e/acceptance-fixture.ts) ----
 async function startHost() {
-  const child = spawn(process.execPath, ['--input-type=module'], { cwd: resolve(web, '../cli'), env: { ...process.env, W09_ASSETS: join(web, 'dist/client') }, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
+  const child = spawn(process.execPath, ['--input-type=module'], { cwd: CLI, env: { ...process.env, W09_ASSETS: ASSETS }, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
   child.stdin.end(await readFile(join(web, 'e2e/acceptance-host.mjs'), 'utf8'));
   const ready = await new Promise((accept, reject) => {
     const timer = setTimeout(() => reject(new Error('host did not start')), 15000);
@@ -64,6 +65,16 @@ function workforce(projectId, total) {
 const INIT = () => {
   const w = window;
   w.__m = { frames: [], long: [], gl: [] };
+  w.__m.taskBoardResponse = [];
+  w.addEventListener('click', event => {
+    const action = event.target.closest('button, a');
+    if (!action || action.textContent.trim() !== 'Công việc') return;
+    const started = event.timeStamp;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const board = document.querySelector('[data-component="TaskBoard"],[data-component="Runs"]');
+      if (board && board.getClientRects().length) w.__m.taskBoardResponse.push({ ms: performance.now() - started, surface: board.matches('[data-component="TaskBoard"]') ? 'TaskBoard' : 'Runs' });
+    }));
+  }, true);
   // A frame is a clear of the default framebuffer: shadow maps and other targets are bound to a render target and do not count.
   const proto = w.WebGL2RenderingContext?.prototype;
   if (proto) {
@@ -130,7 +141,7 @@ async function measure(browser, host) {
   await page.getByRole('link', { name: /Xem dự án/ }).click();
   const stage = page.getByLabel('Cảnh văn phòng');
   const enter = async () => { await page.getByRole('button', { name: '3D', exact: true }).click(); await stage.waitFor(); await page.waitForFunction(() => document.querySelector('[aria-label="Cảnh văn phòng"]')?.getAttribute('data-office-renderer') === 'ready', null, { timeout: 60000 }); };
-  const leave = async () => { await page.getByRole('button', { name: 'Classic', exact: true }).click(); await stage.waitFor({ state: 'detached' }); };
+  const leave = async () => { await page.getByRole('button', { name: 'Web', exact: true }).click(); await stage.waitFor({ state: 'detached' }); };
   const t = () => page.evaluate(() => performance.now());
   const data = async () => page.evaluate(() => ({ frames: window.__m.frames.slice(), long: window.__m.long.slice() }));
   const result = { agentsRequested: AGENTS };
@@ -138,6 +149,9 @@ async function measure(browser, host) {
   // Scene load.
   const t0 = await t();
   await enter();
+  const sceneOpenLiveGlContexts = await page.evaluate(() => window.__m.gl.filter(g => !g.isContextLost()).length);
+  const tutorial = page.getByRole('region', { name: 'Hướng dẫn lần đầu' });
+  if (await tutorial.count()) await tutorial.getByRole('button', { name: 'Bỏ qua' }).click();
   await page.waitForTimeout(1500);
   const t1 = await t();
   result.seatedMirrorAgents = await page.getByLabel('Bản văn bản của văn phòng').getByRole('button', { name: /Mức tin cậy/ }).count();
@@ -145,12 +159,15 @@ async function measure(browser, host) {
   result.sceneLoad = { ...summarize(loadData.frames, t0, t1, loadData.long), note: 'click on 3D until 1.5 s after ready; includes GLB parse and shader compile' };
 
   // Moving: the camera presets ease for a fixed time; cycle them back to back.
-  const cams = ['Developer', 'Coordinator', 'QA', 'Conversation', 'Toàn cảnh'];
+  const cams = [/^Lập trình$/, /^Điều phối$/, /^Kiểm tra$/, /^(Trợ lý|Director)$/, /^Toàn cảnh$/];
+  const cameraButtons = page.getByRole('group', { name: 'Góc nhìn camera' });
   const m0 = await t();
-  for (let i = 0; i < 10; i++) { await page.getByRole('group', { name: 'Góc nhìn camera' }).getByRole('button', { name: cams[i % cams.length], exact: true }).click(); await page.waitForTimeout(750); }
+  for (let i = 0; i < 10; i++) { await cameraButtons.getByRole('button', { name: cams[i % cams.length] }).click(); await page.waitForTimeout(750); }
   const m1 = await t();
   const moveData = await data();
   result.moving = summarize(moveData.frames, m0, m1, moveData.long);
+  result.moving.note = 'fpsOverWindow is the sustained wall-window rate across all frames and gaps; fpsWhileRunning/fpsFastBursts exclude gaps and are diagnostics only.';
+  result.sceneOpenLiveGlContexts = sceneOpenLiveGlContexts;
 
   // Idle: agents with a running clip, nothing else changes.
   await page.waitForTimeout(1500);
@@ -174,7 +191,23 @@ async function measure(browser, host) {
   const all = await data();
   result.longTasksAfterLoad = { count: all.long.filter(l => l.start >= t1).length, durationsMs: all.long.filter(l => l.start >= t1).map(l => +l.duration.toFixed(1)) };
 
-  // Click-to-response: pick an agent through the mirror and time until the inspector shows.
+  // Task surface input response: event timestamp through two animation frames to visible TaskBoard or classic Runs surface.
+  const boardResponse = await page.evaluate(() => window.__m.taskBoardResponse.length);
+  const boardButton = page.getByRole('button', { name: 'Công việc', exact: true });
+  const boardLink = page.getByRole('link', { name: 'Công việc', exact: true });
+  if (await boardButton.count()) await boardButton.first().click();
+  else if (await boardLink.count()) await boardLink.first().click();
+  else throw new Error('Cannot measure task response: no Công việc navigation button or link.');
+  await page.locator('[data-component="TaskBoard"],[data-component="Runs"]').waitFor({ state: 'visible' });
+  await page.waitForFunction(n => window.__m.taskBoardResponse.length > n, boardResponse);
+  const taskResponse = await page.evaluate(() => window.__m.taskBoardResponse.at(-1));
+  result.taskNavigationSurface = taskResponse.surface;
+  result.actualTaskBoard = taskResponse.surface === 'TaskBoard';
+  result.taskBoardInputResponseMs = +taskResponse.ms.toFixed(1);
+  const closePanel = page.getByRole('button', { name: 'Đóng bảng' });
+  if (await closePanel.count()) await closePanel.click();
+
+  // Click-to-response: pick an agent through the mirror and time until the inspector shows (end-to-end Playwright timing).
   const clickTimes = [];
   for (let i = 0; i < 5; i++) {
     const s = await t();
@@ -185,14 +218,16 @@ async function measure(browser, host) {
     await page.keyboard.press('Escape');
     await page.locator('#main').waitFor({ state: 'hidden' });
   }
-  result.inspectorOpenMs = clickTimes;
+  result.inspectorOpenEndToEndMs = clickTimes;
 
   // Mode toggles and heap.
   await leave();
   const series = [{ toggles: 0, heapMiB: await heap(), liveGlContexts: await page.evaluate(() => window.__m.gl.filter(g => !g.isContextLost()).length) }];
   for (let n = 1; n <= TOGGLES; n++) {
-    await enter(); await page.waitForTimeout(400); await leave();
-    if (n % 5 === 0) series.push({ toggles: n, heapMiB: await heap(), liveGlContexts: await page.evaluate(() => window.__m.gl.filter(g => !g.isContextLost()).length) });
+    await enter(); await page.waitForTimeout(400);
+    const liveGlContextsOpen = await page.evaluate(() => window.__m.gl.filter(g => !g.isContextLost()).length);
+    await leave();
+    if (n % 5 === 0) series.push({ toggles: n, heapMiB: await heap(), liveGlContextsOpen, liveGlContexts: await page.evaluate(() => window.__m.gl.filter(g => !g.isContextLost()).length) });
   }
   result.toggleHeap = { series, note: 'used JS heap after forced GC, scene closed; the first sample already includes one full visit' };
   await context.close();
@@ -200,10 +235,12 @@ async function measure(browser, host) {
 }
 
 const host = await startHost();
+let launched;
 try {
-  const report = { when: new Date().toISOString(), node: process.version, budgets: BUDGET, sizes: await sizes() };
+  const os = await (await import('node:os')).default;
+  const report = { when: new Date().toISOString(), environment: { cpu: os.cpus()[0]?.model ?? 'unknown', logicalCpus: os.cpus().length, totalRamGiB: +(os.totalmem() / 1073741824).toFixed(1), platform: `${os.platform()} ${os.release()} (${os.arch()})`, node: process.version, viewport: '1280x800', assetsPath: ASSETS, cliPath: CLI }, budgets: BUDGET, sizes: await sizes() };
   let mode = GL === 'swiftshader' ? 'swiftshader' : 'hardware';
-  let launched = await launch(mode);
+  launched = await launch(mode);
   let name = await rendererName(launched.browser);
   report.glAttempts = [{ mode, headless: launched.headless, renderer: name, software: software(name) }];
   if (GL === 'auto' && software(name)) {
@@ -216,20 +253,24 @@ try {
   report.gl = { ran: mode, headless: launched.headless, renderer: name, software: software(name), hardwareGpuUsed: !software(name) };
   report.browserVersion = launched.browser.version();
   report.run = await measure(launched.browser, host);
-  await launched.browser.close();
   const verdict = (ok) => ok ? 'within' : 'OVER';
   const r = report.run;
+  const activeContexts = [...r.toggleHeap.series.map(x => x.liveGlContextsOpen ?? 0), r.sceneOpenLiveGlContexts];
+  r.toggleHeap.maxLiveGlContexts = Math.max(...activeContexts);
   report.vsBudget = {
     graphicsChunkGzipKiB: `${report.sizes.graphicsChunkGzipKiB} of ${BUDGET.chunkGzipKiB}: ${verdict(report.sizes.graphicsChunkGzipKiB < BUDGET.chunkGzipKiB)}`,
     assetsTotalMiB: `${report.sizes.assetsTotalMiB} of ${BUDGET.assetsMiB}: ${verdict(report.sizes.assetsTotalMiB < BUDGET.assetsMiB)}`,
-    movingFps: `${r.moving.fpsOverWindow} over the whole window (target ${BUDGET.movingFps}, cap ${BUDGET.movingFps}): ${verdict(r.moving.fpsOverWindow >= BUDGET.movingFps && r.moving.fpsOverWindow <= BUDGET.movingFps)}`,
-    movingFpsBurstAdvisory: `advisory only, not a verdict: ${r.moving.fpsFastBursts} fps over consecutive moving frames (${Math.round(r.moving.fastFrameShare * 100)}% of frame gaps), median gap ${r.moving.medianGapMs} ms`,
+    movingFps: `${r.moving.fpsOverWindow} sustained fps over the whole window (target >=${BUDGET.movingFps}): ${verdict(r.moving.fpsOverWindow >= BUDGET.movingFps)}`,
+    inputResponseMs: `${r.taskBoardInputResponseMs} ms on ${r.taskNavigationSurface} (target <=${BUDGET.inputResponseMs}): ${verdict(r.taskBoardInputResponseMs <= BUDGET.inputResponseMs)}`,
+    movingFpsBurstAdvisory: `diagnostic only, not a verdict: ${r.moving.fpsFastBursts} fps over consecutive active frames (${Math.round(r.moving.fastFrameShare * 100)}% of frame gaps); filtered bursts do not establish sustained target`,
     idleFpsOverWindow: `${r.idle.fpsOverWindow} (max ${BUDGET.idleFps}; the 8 fps timer is the cap, so this is the same on any GPU): ${verdict(r.idle.fpsOverWindow <= BUDGET.idleFps)}`,
     hiddenFrames: `${r.hidden.frames} (max ${BUDGET.hiddenFrames}): ${verdict(r.hidden.frames === 0)}`,
     sceneLoadLongTask: `longest ${r.sceneLoad.longestMs} ms in ${r.sceneLoad.longTasks} long task(s) while entering 3D (max ${BUDGET.longTaskMs} ms): ${verdict(r.sceneLoad.longestMs <= BUDGET.longTaskMs)}`,
     longTasks: `after load ${r.longTasksAfterLoad.count}; moving ${r.moving.longTasks}; idle ${r.idle.longTasks} (each over ${BUDGET.longTaskMs} ms by definition): ${verdict(r.longTasksAfterLoad.count === 0)}`,
+    sceneOpenLiveGlContexts: `${r.sceneOpenLiveGlContexts} (target <=${BUDGET.liveGlContexts})`,
+    maxLiveGlContexts: `${r.toggleHeap.maxLiveGlContexts} across initial scene and sampled open scenes during toggles (target <=${BUDGET.liveGlContexts})`,
   };
   const text = JSON.stringify(report, null, 2);
   if (OUT) await writeFile(OUT, text + '\n');
   console.log(text);
-} finally { host.close(); }
+} finally { await launched?.browser.close(); host.close(); }

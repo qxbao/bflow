@@ -22,10 +22,15 @@ async function openRun(page: Page, pairing = host.pairing): Promise<string> {
   const base = await openProject(page, pairing);
   await enterVisual(page);
   await mirror(page, /Bảng nhiệm vụ/);
-  await page.getByRole('link', { name: 'Tìm sách nhanh', exact: true }).first().click();
+  await page.getByRole('link', { name: /Tìm sách nhanh/ }).first().click();
   await expect(page).toHaveURL(/runs\/run$/);
-  await expect(page.getByRole('button', { name: 'Xem xét gói' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Mở nội dung cần quyết định' }).or(page.getByRole('button', { name: 'Xem xét gói' }))).toBeVisible();
   return base;
+}
+async function openDecision(page: Page): Promise<void> {
+  const entry = page.getByRole('button', { name: 'Mở nội dung cần quyết định' });
+  if (await entry.isVisible().catch(() => false)) await entry.click();
+  await expect(page.getByRole('button', { name: 'Xem xét gói' })).toBeVisible();
 }
 
 test('3D AC08 response lost after commit, Local Server restart mid-operation and browser close keep one effect per intent', async ({ browser }) => {
@@ -34,9 +39,10 @@ test('3D AC08 response lost after commit, Local Server restart mid-operation and
   const base = await openRun(page);
   let dropped = 0;
   await page.route('**/api/v1/projects/*/commands', async route => { const response = await route.fetch(); dropped++; expect(response.status()).toBe(202); await route.abort('connectionreset'); }, { times: 1 });
-  await page.getByRole('button', { name: 'Xem xét gói' }).click(); await page.getByRole('button', { name: 'Duyệt gói' }).click();
+  await openDecision(page);await page.getByRole('button', { name: 'Xem xét gói' }).click(); await page.getByRole('button', { name: 'Duyệt gói' }).click();
   await expect.poll(() => dropped).toBe(1);
   await expect.poll(async () => (await host.call('inspect')).effects.filter((k: string) => k === 'answer_decision').length).toBe(1);
+  await page.getByRole('button', { name: 'Quay lại công việc' }).click();
   await openDock(page);
   await expect(page.getByText(/Mất phản hồi|Chưa xác định kết quả|Đã áp dụng thao tác/).first()).toBeVisible();
   await page.reload();
@@ -82,7 +88,7 @@ test('3D AC08/AC05 two tabs with conflicting decisions commit exactly one; the o
   await openRun(a);
   const b = await context.newPage(); await b.goto(a.url());
   await expect(b.getByRole('button', { name: '3D', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  for (const tab of [a, b]) await tab.getByRole('button', { name: 'Xem xét gói' }).click();
+  for (const tab of [a, b]) { await openDecision(tab); await tab.getByRole('button', { name: 'Xem xét gói' }).click(); }
   await b.getByLabel(/Lý do \(bắt buộc/).fill('Thiếu tiêu chí hiệu năng');
   await Promise.all([a.getByRole('button', { name: 'Duyệt gói' }).evaluate((el: HTMLButtonElement) => el.click()), b.getByRole('button', { name: 'Từ chối' }).evaluate((el: HTMLButtonElement) => el.click())]);
   await stableCount(async () => (await host.call('inspect')).effects.length, 1, 2400);
@@ -90,6 +96,7 @@ test('3D AC08/AC05 two tabs with conflicting decisions commit exactly one; the o
   expect(state.effects).toEqual(['answer_decision']);
   expect(state.commands.map((c: any) => c.outcome)).toHaveLength(1);
   const winner = state.decisionOutcome === 'approved' ? a : b, loser = winner === a ? b : a;
+  for (const tab of [a,b]) if (await tab.getByRole('button',{name:'Quay lại công việc'}).isVisible().catch(()=>false)) await tab.getByRole('button',{name:'Quay lại công việc'}).click();
   await openDock(winner); await openDock(loser);
   await expect(winner.getByText(/Đã áp dụng thao tác|Mất phản hồi/).first()).toBeVisible();
   await expect(winner.getByText(`Quyết định gói: ${state.decisionOutcome === 'approved' ? 'Duyệt' : 'Từ chối'}`).first()).toBeVisible();
@@ -136,7 +143,7 @@ test('3D unknown_delivery shows a "chưa xác định" label and offers no resen
   await expect(page.getByLabel('Trạng thái văn phòng')).toContainText('chưa rõ');
   // Nothing in the page claims the work arrived, and no resend is offered.
   await mirrorAgent.focus(); await page.keyboard.press('Enter');
-  await expect(page.getByText('Chưa rõ đã tới nơi').first()).toBeVisible();
+  await expect(page.getByText(/Chưa xác định việc đã tới/).first()).toBeVisible();
   await expect(page.getByRole('button', { name: /Gửi lại/ })).toHaveCount(0);
   expect(pageErrors).toEqual([]);
 });

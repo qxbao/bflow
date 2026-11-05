@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router';
 import type { WebRunView } from '@bflow/contracts/web';
 import { ApiClient } from '../api/client';
 import { useRead } from './data';
-import { DecisionReview, type DecisionDraft } from './decisions';
+import { DecisionReview } from './decisions';
 import { phases } from '../components/StatusBadge';
 import { EmptyState } from '../components/EmptyState';
 import { ErrorState } from '../components/ErrorState';
@@ -12,14 +12,16 @@ import { Pagination } from '../components/Pagination';
 import { ActionConfirmation } from '../components/ActionConfirmation';
 import { FieldLabel } from '../components/FieldHelp';
 import { localPage } from './pagination';
+import { useDecisionDraftStore, decisionDraftKey } from './office/ui/interaction/decision-drafts';
 
 export function Review({api,id,revision,refresh}:{api:ApiClient;id:string;revision:number;refresh:()=>void}) {
   const result=useRead(`review:${id}`,()=>api.decisions(id),revision);
-  const [query,setQuery]=useSearchParams(),[drafts,setDrafts]=useState<Record<string,DecisionDraft>>({}),[pending,setPending]=useState<URLSearchParams>(),[draftEpoch,setDraftEpoch]=useState(0);
+  const [query,setQuery]=useSearchParams(),[pending,setPending]=useState<URLSearchParams>(),[draftEpoch,setDraftEpoch]=useState(0);
+  const {drafts,setDraft}=useDecisionDraftStore();
   const status=query.get('status')??'';
   const items=result.data?.items??[],filtered=items.filter(item=>!status || item.status===status);
   const pagination=localPage(filtered,query.get('page'),10);
-  const dirty=pagination.items.some(item=>{const draft=drafts[JSON.stringify([item.runId,item.decisionId])];return Boolean(draft?.review && (draft.reason || draft.option));});
+  const dirty=pagination.items.some(item=>{const draft=drafts[decisionDraftKey(item.runId,item.decisionId)];return Boolean(draft?.review && (draft.reason || draft.option));});
   const runIds=[...new Set(pagination.items.map(item=>item.runId))];
   const cachedRuns=useRef(new Map<string,{runId:string;value:WebRunView|undefined;error:unknown}>()),cachedProject=useRef(id);
   if(cachedProject.current!==id){cachedProject.current=id;cachedRuns.current.clear();}
@@ -33,11 +35,11 @@ export function Review({api,id,revision,refresh}:{api:ApiClient;id:string;revisi
     <LoadingState loading={result.loading} initial={!result.data} label="Đang tải yêu cầu…"/>
     {Boolean(result.error) && <><ErrorState stale={Boolean(result.data)} error={result.error} retry={refresh}/><Link to={`/projects/${encodeURIComponent(id)}/runs`}>Xem theo từng công việc</Link></>}
     {Boolean(runs.error) && pagination.items.length>0 && <ErrorState stale={Boolean(runs.data)} error={runs.error} retry={refresh}/>}
-    {pending && <ActionConfirmation title="Rời nội dung quyết định chưa gửi?" onBack={()=>setPending(undefined)}><p>Lý do hoặc phương án đang nhập sẽ bị bỏ khi chuyển trang hoặc bộ lọc.</p><button onClick={()=>{setDrafts(old=>Object.fromEntries(Object.entries(old).filter(([key])=>!pagination.items.some(item=>key===JSON.stringify([item.runId,item.decisionId])))));setDraftEpoch(value=>value+1);setQuery(pending);setPending(undefined);}}>Bỏ nội dung và tiếp tục</button></ActionConfirmation>}
+    {pending && <ActionConfirmation title="Rời nội dung quyết định chưa gửi?" onBack={()=>setPending(undefined)}><p>Lý do hoặc phương án đang nhập sẽ bị bỏ khi chuyển trang hoặc bộ lọc.</p><button onClick={()=>{pagination.items.forEach(item=>setDraft(decisionDraftKey(item.runId,item.decisionId),{review:undefined,reason:'',option:''}));setDraftEpoch(value=>value+1);setQuery(pending);setPending(undefined);}}>Bỏ nội dung và tiếp tục</button></ActionConfirmation>}
     {result.data && (pagination.items.length?<div>{pagination.items.map(decision=>{
       const observation=runs.data?.find(item=>item.runId===decision.runId)??(runs.loading?cachedRuns.current.get(decision.runId):undefined),run=observation?.value;
-      const key=JSON.stringify([decision.runId,decision.decisionId]);
-      return <section key={`${decision.runId}:${decision.decisionId}:${draftEpoch}`} className="mb-5"><>{Boolean(observation?.error) && <ErrorState error={observation?.error} retry={refresh}/>}<DecisionReview draft={drafts[key]} onDraftChange={next=>setDrafts(old=>{const previous=old[key];return previous?.review===next.review && previous?.reason===next.reason && previous?.option===next.option?old:{...old,[key]:next};})} api={api} id={id} decision={decision} actions={run?.availableActions??[]} fresh={!result.loading && !result.error && !runs.loading && !runs.error && !observation?.error && run?.currentRunId===decision.runId} refreshing={(result.loading || runs.loading) && !result.error && !runs.error && !observation?.error && run?.currentRunId===decision.runId} refresh={refresh}/></><Link className="mt-2 inline-block text-sm" to={`/projects/${encodeURIComponent(id)}/runs/${encodeURIComponent(decision.runId)}`}>Xem ngữ cảnh công việc →</Link></section>;
+      const key=decisionDraftKey(decision.runId,decision.decisionId);
+      return <section key={`${decision.runId}:${decision.decisionId}:${draftEpoch}`} className="mb-5"><>{Boolean(observation?.error) && <ErrorState error={observation?.error} retry={refresh}/>}<DecisionReview draft={drafts[key]} onDraftChange={next=>setDraft(key,next)} api={api} id={id} decision={decision} actions={run?.availableActions??[]} fresh={!result.loading && !result.error && !runs.loading && !runs.error && !observation?.error && run?.currentRunId===decision.runId} refreshing={(result.loading || runs.loading) && !result.error && !runs.error && !observation?.error && run?.currentRunId===decision.runId} refresh={refresh}/></><Link className="mt-2 inline-block text-sm" to={`/projects/${encodeURIComponent(id)}/runs/${encodeURIComponent(decision.runId)}`}>Xem ngữ cảnh công việc →</Link></section>;
     })}</div>:<EmptyState title={status?'Không có yêu cầu phù hợp':'Không có quyết định đang chờ'}><p>{status?'Thử trạng thái khác để xem các yêu cầu đã tải.':'Các gói cần xem xét sẽ được cập nhật khi phiên dự án công bố.'}</p></EmptyState>)}
     {filtered.length>10 && <Pagination label="Phân trang yêu cầu" page={pagination.page} previous={pagination.page>1?()=>page(pagination.page-1):undefined} next={pagination.page<pagination.pages?()=>page(pagination.page+1):undefined} busy={result.loading || Boolean(result.error) || Boolean(pending)} summary={`${filtered.length} yêu cầu đã tải`}/>}
     <details><summary>Về danh sách này</summary><p className="text-sm text-muted">Danh sách có thể chưa gồm toàn bộ lịch sử. <Link to={`/projects/${encodeURIComponent(id)}/runs`}>Xem theo từng công việc</Link>.</p></details>

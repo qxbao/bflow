@@ -153,8 +153,8 @@ export function easeCamera(from: Camera, to: Camera, t: number): Camera {
 export class CameraMove {
   private startAt = 0;
   constructor(readonly from: Camera, readonly to: Camera, now: number, private readonly reduced: boolean) { this.startAt = now; }
-  at(now: number): { camera: Camera; done: boolean } {
-    if (this.reduced) return { camera: this.to, done: true };
+  at(now: number, reducedNow = false): { camera: Camera; done: boolean } {
+    if (this.reduced || reducedNow) return { camera: this.to, done: true };
     const t = (now - this.startAt) / FOCUS_MS;
     return { camera: easeCamera(this.from, this.to, t), done: t >= 1 };
   }

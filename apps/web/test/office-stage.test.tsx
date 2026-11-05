@@ -16,7 +16,7 @@ const model = (over: Partial<OfficeModel> = {}): OfficeModel => ({
   ], ...over,
 });
 
-interface Fake extends OfficeRenderer { apply: ReturnType<typeof vi.fn>; setPaused: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> }
+interface Fake extends OfficeRenderer { apply: ReturnType<typeof vi.fn>; setPaused: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn>; setLabelSink: ReturnType<typeof vi.fn> }
 let fakes: Fake[];
 let lost: (() => void) | undefined;
 const factory: CreateRenderer = async (_host, _select, _signal, onLost) => {
@@ -28,7 +28,7 @@ const factory: CreateRenderer = async (_host, _select, _signal, onLost) => {
 const newFake = (): Fake => {
   let paused = false;
   const fake: Fake = {
-    apply: vi.fn((_m: OfficeModel, cues: VisualCue[]) => (paused ? [] : cues.filter(c => c.kind === 'walk').map(c => c.handoffId))),
+    apply: vi.fn((_m: OfficeModel, cues: VisualCue[]) => (paused ? [] : cues.filter(c => c.kind === 'walk').map(c => c.handoffId))), setLabelSink: vi.fn(),
     setPaused: vi.fn((p: boolean) => { paused = p; }), destroy: vi.fn(),
   };
   return fake;
@@ -39,9 +39,20 @@ const lastCues = (f: Fake): VisualCue[] => f.apply.mock.calls.at(-1)?.[1] as Vis
 const reduce = (on: boolean): void => { vi.stubGlobal('matchMedia', (q: string) => ({ matches: on && q.includes('reduce'), media: q, addEventListener() {}, removeEventListener() {} })); };
 
 beforeEach(() => { fakes = []; lost = undefined; reduce(false); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); Object.defineProperty(document, 'hidden', { configurable: true, value: false }); });
+afterEach(() => { cleanup(); document.querySelector('.director-dialogue.test-anchor')?.remove(); vi.unstubAllGlobals(); vi.useRealTimers(); Object.defineProperty(document, 'hidden', { configurable: true, value: false }); });
 
 describe('OfficeStage lifecycle', () => {
+  test('projects the Director anchor imperatively from the existing world label', async () => {
+    const panel=document.createElement('section');panel.className='director-dialogue test-anchor';document.body.appendChild(panel);
+    render(<OfficeStage model={model()} onSelect={noop} immersive createRenderer={factory}/>);
+    await settle();
+    const labels=fakes[0]!.setLabelSink.mock.calls[0]?.[0] as ((items:{id:string;kind:'agent';text:string;x:number;y:number}[])=>void)|undefined;
+    expect(labels).toBeTypeOf('function');
+    act(()=>labels!([{id:'director',kind:'agent',text:'Director',x:300,y:180}]));
+    const connector=document.querySelector<SVGSVGElement>('body > svg');expect(connector).not.toBeNull();expect(connector!.style.display).toBe('');
+    panel.style.display='none';act(()=>window.dispatchEvent(new Event('bflow:director-dialogue-state')));
+    expect(connector!.style.display).toBe('none');
+  });
   test('context loss falls back without unmounting drafts', async () => {
     function Panel() { const [v, set] = useState(''); return <div><textarea aria-label="Nháp" value={v} onChange={e => set(e.target.value)} /><OfficeStage model={model()} onSelect={noop} createRenderer={factory} /></div>; }
     render(<Panel />);
@@ -162,6 +173,26 @@ describe('OfficeStage cues', () => {
 });
 
 describe('AccessibleOffice mirror', () => {
+  test('selection and interaction made before renderer readiness replay after the latest model applies', async () => {
+    let resolve!: (r: OfficeRenderer) => void;
+    const late: CreateRenderer = () => new Promise<OfficeRenderer>(r => { resolve = r; });
+    const control: { current: import('../src/features/office/ui/OfficeStage').StageControl | null } = { current: null };
+    const picked = vi.fn();
+    render(<OfficeStage model={model()} onSelect={picked} control={control} immersive createRenderer={late} />);
+    const mailbox = screen.getByRole('button', { name: /Hộp thư/ });
+    mailbox.focus();
+    await userEvent.keyboard('{Enter}');
+    control.current!.setInteracting?.(true);
+    const fake = newFake();
+    fake.highlight = vi.fn(); fake.focus = vi.fn(); fake.setInteracting = vi.fn();
+    await act(async () => { resolve(fake); await Promise.resolve(); });
+    expect(picked).toHaveBeenCalledWith({ kind: 'object', object: 'mailbox' });
+    expect(fake.apply.mock.invocationCallOrder[0]).toBeLessThan((fake.highlight as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!);
+    expect(fake.highlight).toHaveBeenCalledWith({ kind: 'object', object: 'mailbox' });
+    expect(fake.focus).toHaveBeenCalledWith({ kind: 'object', object: 'mailbox' });
+    expect(fake.setInteracting).toHaveBeenCalledWith(true);
+  });
+
   test('stays reachable while the canvas is healthy and objects are real buttons', async () => {
     const picked: OfficeTarget[] = [];
     render(<OfficeStage model={model({ pendingDecisions: 2 })} onSelect={t => picked.push(t)} createRenderer={factory} />);

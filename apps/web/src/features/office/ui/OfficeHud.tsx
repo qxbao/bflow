@@ -72,6 +72,12 @@ export interface OfficeHudProps {
   mode: UiMode;
   onMode: (mode: UiMode) => void;
   panelOpen: boolean;
+  immersive?: boolean;
+  /** Optional stable compact status slot for the opt-in immersive presentation. */
+  notifications?: ReactNode;
+  /** Three-step onboarding and its persistent replay control. */
+  firstVisit?: ReactNode;
+  onCameraControl?: (action: 'left' | 'right' | 'up' | 'down' | 'zoom-in' | 'zoom-out') => void;
   /** Seatless Developers, for the "+n" chip. */
   overflow: number;
   onOverview: () => void;
@@ -158,6 +164,8 @@ export function OfficeHud(p: OfficeHudProps) {
           </> : <p className="m-0 mt-0.5 font-data text-xs text-muted">Chưa có công việc đang chạy</p>}
         </div>
       </section>
+      {p.immersive && p.notifications}
+      {p.immersive && p.firstVisit}
       <div role="group" aria-label="Chế độ hiển thị" className={`pointer-events-auto inline-flex overflow-hidden ${panel}`}>
         {(['classic', 'visual'] as const).map(value => <button type="button" key={value} aria-pressed={p.mode === value} className="min-w-14 rounded-none border-0 px-3 font-data text-xs aria-pressed:bg-accent aria-pressed:text-surface lg:min-w-16" onClick={() => { if (p.mode !== value) p.onMode(value); }}>{value === 'classic' ? 'Web' : '3D'}</button>)}
       </div>
@@ -187,6 +195,7 @@ export function OfficeHud(p: OfficeHudProps) {
       <div className={`flex flex-col items-stretch gap-2 ${p.panelOpen ? '' : 'md:flex-row md:items-end'} ${hideOnPhone}`}>
         <div role="group" aria-label="Góc nhìn camera" className={`office-cameras pointer-events-auto flex flex-wrap gap-1 self-start p-1 ${panel}`}>
           {cams.map(([zone, icon, label]) => <button type="button" key={zone} aria-label={label} title={label} className={camButton} onClick={() => { if (zone === 'overview') setDockOpen(false); p.onFocusZone(zone); }}><Icon name={icon}/><span className="max-sm:hidden">{label}</span></button>)}
+          {p.immersive&&<details className="relative"><summary className={`${camButton} cursor-pointer list-none ${panel}`} aria-label="Điều khiển camera">Camera</summary><div className={`absolute bottom-full left-0 z-30 mb-1 grid grid-cols-3 gap-1 p-1 ${panel}`}><span/><button type="button" aria-label="Di chuyển góc nhìn lên" onClick={()=>p.onCameraControl?.('up')}>↑</button><span/><button type="button" aria-label="Di chuyển góc nhìn sang trái" onClick={()=>p.onCameraControl?.('left')}>←</button><button type="button" aria-label="Thu nhỏ" onClick={()=>p.onCameraControl?.('zoom-out')}>−</button><button type="button" aria-label="Di chuyển góc nhìn sang phải" onClick={()=>p.onCameraControl?.('right')}>→</button><span/><button type="button" aria-label="Phóng to" onClick={()=>p.onCameraControl?.('zoom-in')}>+</button><span/><button type="button" aria-label="Di chuyển góc nhìn xuống" onClick={()=>p.onCameraControl?.('down')}>↓</button></div></details>}
           {p.overflow > 0 && <button type="button" className={`${camButton} text-accent`} aria-label={`Còn ${p.overflow} lập trình viên chưa hiện trong cảnh. Mở danh sách nhân viên`} title="Mở danh sách nhân viên" onClick={p.onAgentList}>+{p.overflow}</button>}
         </div>
         <form onSubmit={submit} className={`office-quick-chat pointer-events-auto m-0 flex min-w-0 flex-1 items-center gap-2 py-1 pr-1 pl-3 md:mx-auto md:w-full md:max-w-xl ${panel}`}>

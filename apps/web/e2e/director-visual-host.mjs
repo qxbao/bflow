@@ -11,7 +11,7 @@ const scratch=await mkdtemp(join(tmpdir(),'bflow-t9-')),repository=join(scratch,
 const now=()=>new Date().toISOString(),ok=value=>({ok:true,value});
 const unavailable=async()=>({ok:false,error:{code:'transport_unavailable',retryable:true,message:'Fixture capability unavailable'}});
 const RUN='run-guides',SESSION='conv-1';
-let presence='absent',terminal=true,sequence=0,launches=0;
+let presence='absent',terminal=true,sequence=0,launches=0,loseAck=false;
 const messages=[],commands=[];
 const issueAt='2026-11-04T08:00:00.000Z';
 const issues=[
@@ -35,7 +35,7 @@ const COMMAND="cd '/repo/guides' && BFLOW_DIRECTOR_PROVIDER=claude 'claude' '/bf
 const director={
  readView:async projectId=>ok({apiVersion:1,projectId,layout:'director',sessionId:SESSION,snapshot:snapshot(),transcriptSeq:messages.length,cliCaptureMayBeIncomplete:false,observedAt:now()}),
  messages:async(_id,cursor)=>ok(page(cursor)),
- send:async input=>{const m=append('user','web',input.content,input.messageId);
+ send:async input=>{const m=append('user','web',input.content,input.messageId);if(loseAck){loseAck=false;throw new TypeError('scripted ACK loss after commit');}
   setTimeout(()=>{append('director','cli',`Đã nhận: “${input.content.slice(0,80)}”. Mình sẽ lập kế hoạch và báo lại.`);},400);return ok(m);},
  issues:async(_id,cursor)=>{const offset=cursor?Number(cursor.slice(1)):0;return ok({apiVersion:1,items:issues.slice(offset,offset+100)});},
  launchOptions:async projectId=>ok({apiVersion:1,projectId,terminal:terminal?{available:true}:{available:false,reason:'Không có phiên desktop để mở cửa sổ terminal'},
@@ -67,7 +67,7 @@ const server=await createLocalWebServer({host:'127.0.0.1',port:0,stateDirectory:
 process.on('message',async message=>{
  try{
   if(message.kind==='inspect')process.send({requestId:message.requestId,value:{commands,launches,presence,messages,issues}});
-  else if(message.kind==='configure'){if(message.terminal!==undefined)terminal=message.terminal;if(message.presence)presence=message.presence;sequence++;process.send({requestId:message.requestId,value:true});}
+  else if(message.kind==='configure'){if(message.terminal!==undefined)terminal=message.terminal;if(message.presence)presence=message.presence;if(message.clearMessages)messages.splice(0);if(message.loseAckNext)loseAck=true;sequence++;process.send({requestId:message.requestId,value:true});}
   else if(message.kind==='pair')process.send({requestId:message.requestId,value:server.origin+'/#bootstrap='+await server.issueBootstrap()});
   else if(message.kind==='close'){await server.close();await rm(scratch,{recursive:true,force:true});process.exit(0);}
  }catch(error){process.send({requestId:message.requestId,error:String(error)});}

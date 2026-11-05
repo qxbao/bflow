@@ -1,6 +1,6 @@
 # Kế hoạch văn phòng 3D tương tác như game
 
-Trạng thái: đề xuất cho giai đoạn tiếp theo, chưa triển khai. Bản sửa UX hiện tại vẫn dùng bảng chi tiết; tài liệu này mô tả cách thay dần bảng đó bằng trải nghiệm trong văn phòng.
+Trạng thái: phase1–4 source đã triển khai phía sau feature flag opt-in, có kiểm thử package-local. Phase5 có bằng chứng browser cục bộ cho các đường tương tác được nêu trong [báo cáo Task5](2026-11-05-immersive-office-task-5-report.md); đây chưa phải chấp nhận live/provider hoặc nghiên cứu người dùng. Bản UI 3D ổn định vẫn mặc định.
 
 ## Trải nghiệm hướng tới
 
@@ -70,3 +70,13 @@ Không ép người dùng di chuyển nhân vật chỉ để thực hiện thao
 - [ ] Chạy một workflow thật có provider/Herdr sau khi các kiểm tra cục bộ đạt, rồi chiến dịch lỗi kết nối. Phân biệt rõ kết quả UI giả lập với bằng chứng workflow thật.
 
 **Điểm duyệt tiếp theo:** duyệt nguyên mẫu tương tác ở giai đoạn 1 và 2 trước khi đầu tư vào nhân vật điều khiển được, âm thanh, hoặc thay đổi mô hình camera lớn hơn. Chưa ước lượng lịch cố định trước nguyên mẫu vì phần xử lý cảm ứng, văn bản dài và hỗ trợ bàn phím có thể quyết định lại cách bố trí cảnh.
+
+### Evidence log — Task5, 2026-11-05
+
+- Feature flag kiểm tra bằng build `VITE_BFLOW_IMMERSIVE_OFFICE=true`; không thay đổi cấu hình máy hoặc provider. Build mặc định không bật interaction layer.
+- Chrome thật và Local Server scripted backend kiểm tra Director dialogue, lost ACK sau commit, một hiệu ứng duy nhất, đối chiếu bằng ID gốc, nội dung trạng thái, gợi ý dạng disclosure và khả năng thao tác các nút đóng/đọc/khởi động/đối chiếu.
+- Ma trận viewport 375×812, 812×375, 768×900, 1099×900, 1100×900, 1440×900 và 1920×1080: không tràn ngang; hit-test các nút cốt lõi. Touch dùng Chrome DevTools Protocol emulation; reduced motion dùng Playwright media emulation.
+- Mục zoom 200% dùng `document.documentElement.style.zoom = '2'` như mô phỏng CSS; không phải browser zoom phần cứng hay kiểm tra bàn phím di động thật. Ảnh landscape: `dist/test-results/task9/14-office3d-landscape-lost-ack.png` (ignored).
+- Đo trên build trước HUD-fix (`23e23d1a`) bằng headless SwiftShader: 5.44 fps toàn cửa sổ khi di chuyển (mục tiêu30 fps: chưa đạt), phản hồi TaskBoard207 ms (mục tiêu100 ms: chưa đạt), 1 WebGL context đang mở/0 sau đóng; heap sau GC `8.33/8.96/9.34/9.44/9.47 MiB` ở 0/5/10/15/20 lần vào/ra (đoạn cuối tăng nhẹ, không chứng minh không rò rỉ). Chi tiết máy và lệnh ở [báo cáo Task5](2026-11-05-immersive-office-task-5-report.md); HUD-fix chưa được đo lại, cổng performance và mở mặc định vẫn đóng.
+- Kiểm tra sau HUD-fix: `office-a11y`6/6, `office-csp`3/3, lost-ACK landscape2/2, unknown-delivery/lost-WebGL2/2. Browser workflow/mod/modal helper changes chưa được chạy toàn bộ; affected selector và Web package suite đang thuộc parent.
+- Còn pending: browser fault matrix cuối cùng cho stopped/offline/stale/session-changed/unknown operation và asset failure; kiểm tra thủ công bằng browser zoom/keyboard/AT/độ tương phản; 5 người mới dùng; live provider/Herdr và chiến dịch lỗi kết nối. Không suy diễn các bằng chứng này từ fixture hoặc lịch sử nhánh khác.
