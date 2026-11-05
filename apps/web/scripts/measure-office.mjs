@@ -67,12 +67,12 @@ const INIT = () => {
   w.__m = { frames: [], long: [], gl: [] };
   w.__m.taskBoardResponse = [];
   w.addEventListener('click', event => {
-    const button = event.target.closest('button');
-    if (!button || button.textContent.trim() !== 'Công việc') return;
+    const action = event.target.closest('button, a');
+    if (!action || action.textContent.trim() !== 'Công việc') return;
     const started = event.timeStamp;
     requestAnimationFrame(() => requestAnimationFrame(() => {
-      const board = document.querySelector('[data-component="TaskBoard"]');
-      if (board && board.getClientRects().length) w.__m.taskBoardResponse.push(performance.now() - started);
+      const board = document.querySelector('[data-component="TaskBoard"],[data-component="Runs"]');
+      if (board && board.getClientRects().length) w.__m.taskBoardResponse.push({ ms: performance.now() - started, surface: board.matches('[data-component="TaskBoard"]') ? 'TaskBoard' : 'Runs' });
     }));
   }, true);
   // A frame is a clear of the default framebuffer: shadow maps and other targets are bound to a render target and do not count.
@@ -191,13 +191,21 @@ async function measure(browser, host) {
   const all = await data();
   result.longTasksAfterLoad = { count: all.long.filter(l => l.start >= t1).length, durationsMs: all.long.filter(l => l.start >= t1).map(l => +l.duration.toFixed(1)) };
 
-  // TaskBoard input response: event timestamp through two animation frames to visible board (excludes Playwright/IPC round-trip).
+  // Task surface input response: event timestamp through two animation frames to visible TaskBoard or classic Runs surface.
   const boardResponse = await page.evaluate(() => window.__m.taskBoardResponse.length);
-  await page.getByRole('button', { name: 'Công việc', exact: true }).click();
-  await page.locator('[data-component="TaskBoard"]').waitFor({ state: 'visible' });
+  const boardButton = page.getByRole('button', { name: 'Công việc', exact: true });
+  const boardLink = page.getByRole('link', { name: 'Công việc', exact: true });
+  if (await boardButton.count()) await boardButton.first().click();
+  else if (await boardLink.count()) await boardLink.first().click();
+  else throw new Error('Cannot measure task response: no Công việc navigation button or link.');
+  await page.locator('[data-component="TaskBoard"],[data-component="Runs"]').waitFor({ state: 'visible' });
   await page.waitForFunction(n => window.__m.taskBoardResponse.length > n, boardResponse);
-  result.taskBoardInputResponseMs = +(await page.evaluate(() => window.__m.taskBoardResponse.at(-1))).toFixed(1);
-  await enter();
+  const taskResponse = await page.evaluate(() => window.__m.taskBoardResponse.at(-1));
+  result.taskNavigationSurface = taskResponse.surface;
+  result.actualTaskBoard = taskResponse.surface === 'TaskBoard';
+  result.taskBoardInputResponseMs = +taskResponse.ms.toFixed(1);
+  const closePanel = page.getByRole('button', { name: 'Đóng bảng' });
+  if (await closePanel.count()) await closePanel.click();
 
   // Click-to-response: pick an agent through the mirror and time until the inspector shows (end-to-end Playwright timing).
   const clickTimes = [];
@@ -227,11 +235,12 @@ async function measure(browser, host) {
 }
 
 const host = await startHost();
+let launched;
 try {
   const os = await (await import('node:os')).default;
   const report = { when: new Date().toISOString(), environment: { cpu: os.cpus()[0]?.model ?? 'unknown', logicalCpus: os.cpus().length, totalRamGiB: +(os.totalmem() / 1073741824).toFixed(1), platform: `${os.platform()} ${os.release()} (${os.arch()})`, node: process.version, viewport: '1280x800', assetsPath: ASSETS, cliPath: CLI }, budgets: BUDGET, sizes: await sizes() };
   let mode = GL === 'swiftshader' ? 'swiftshader' : 'hardware';
-  let launched = await launch(mode);
+  launched = await launch(mode);
   let name = await rendererName(launched.browser);
   report.glAttempts = [{ mode, headless: launched.headless, renderer: name, software: software(name) }];
   if (GL === 'auto' && software(name)) {
@@ -244,7 +253,6 @@ try {
   report.gl = { ran: mode, headless: launched.headless, renderer: name, software: software(name), hardwareGpuUsed: !software(name) };
   report.browserVersion = launched.browser.version();
   report.run = await measure(launched.browser, host);
-  await launched.browser.close();
   const verdict = (ok) => ok ? 'within' : 'OVER';
   const r = report.run;
   const activeContexts = [...r.toggleHeap.series.map(x => x.liveGlContextsOpen ?? 0), r.sceneOpenLiveGlContexts];
@@ -253,7 +261,7 @@ try {
     graphicsChunkGzipKiB: `${report.sizes.graphicsChunkGzipKiB} of ${BUDGET.chunkGzipKiB}: ${verdict(report.sizes.graphicsChunkGzipKiB < BUDGET.chunkGzipKiB)}`,
     assetsTotalMiB: `${report.sizes.assetsTotalMiB} of ${BUDGET.assetsMiB}: ${verdict(report.sizes.assetsTotalMiB < BUDGET.assetsMiB)}`,
     movingFps: `${r.moving.fpsOverWindow} sustained fps over the whole window (target >=${BUDGET.movingFps}): ${verdict(r.moving.fpsOverWindow >= BUDGET.movingFps)}`,
-    inputResponseMs: `${r.taskBoardInputResponseMs} ms (target <=${BUDGET.inputResponseMs}; click event to visible TaskBoard after two animation frames)`,
+    inputResponseMs: `${r.taskBoardInputResponseMs} ms on ${r.taskNavigationSurface} (target <=${BUDGET.inputResponseMs}): ${verdict(r.taskBoardInputResponseMs <= BUDGET.inputResponseMs)}`,
     movingFpsBurstAdvisory: `diagnostic only, not a verdict: ${r.moving.fpsFastBursts} fps over consecutive active frames (${Math.round(r.moving.fastFrameShare * 100)}% of frame gaps); filtered bursts do not establish sustained target`,
     idleFpsOverWindow: `${r.idle.fpsOverWindow} (max ${BUDGET.idleFps}; the 8 fps timer is the cap, so this is the same on any GPU): ${verdict(r.idle.fpsOverWindow <= BUDGET.idleFps)}`,
     hiddenFrames: `${r.hidden.frames} (max ${BUDGET.hiddenFrames}): ${verdict(r.hidden.frames === 0)}`,
@@ -265,4 +273,4 @@ try {
   const text = JSON.stringify(report, null, 2);
   if (OUT) await writeFile(OUT, text + '\n');
   console.log(text);
-} finally { host.close(); }
+} finally { await launched?.browser.close(); host.close(); }
