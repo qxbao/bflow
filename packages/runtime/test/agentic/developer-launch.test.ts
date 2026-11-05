@@ -325,7 +325,7 @@ describe("P30 dynamic Developer launches end to end", () => {
   async function buildHost(options: { provider?: "claude" | "codex" | "agy"; runner?: ProviderCommandRunner; gateway?: boolean; maxCapacity?: number; mcpServiceIds?: string[];
     failoverProfiles?: boolean;
     /** When true (default) the started provider reports every registration reachable, as its SessionStart hook would. */
-    reportReachability?: boolean; startupTimeoutMs?: number; delayedNativeSession?: boolean } = {}) {
+    assertProcessScope?: () => Promise<void>; reportReachability?: boolean; startupTimeoutMs?: number; delayedNativeSession?: boolean } = {}) {
     // The runtime prepares the task worktree before allocating its Developer; preflight requires it to exist.
     for (const taskId of ["run-1-t1", "run-1-t2", "run-1-legacy"]) await mkdir(worktree(taskId), { recursive: true, mode: 0o700 });
     const hostDirectory = join(baseDir, "host");
@@ -429,6 +429,7 @@ describe("P30 dynamic Developer launches end to end", () => {
     const panes = withDeveloperLaunches(rolePanes, {
       allocate: request => session.allocateDeveloper(request.taskId, request.worktreePath, request.runId, request.candidate, request.continuationId),
       release: taskId => session.releaseDeveloper(taskId),
+      ...(options.assertProcessScope ? { assertProcessScope: options.assertProcessScope } : {}),
       reachability: (launchId, paneId) => session.developerReachability(launchId, paneId)
     }, { startupTimeoutMs: options.startupTimeoutMs ?? 30_000, now: clock.now,
       refreshBinding: async (paneId, callOptions) => {
@@ -876,6 +877,86 @@ describe("P30 dynamic Developer launches end to end", () => {
     expect(host.session.status().status.launches).toEqual([expect.objectContaining({ launchId, state: "released" })]);
     await expect(stat(launchProbePath(host.probeDirectory, launchId))).rejects.toMatchObject({ code: "ENOENT" });
     expect((await journalEntries(host.journal)).map(entry => entry.kind)).toEqual(["intent", "released"]);
+  });
+
+  it("fails closed with shell supervision diagnostics despite healthy native startup", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"], assertProcessScope: async () => {
+      throw new Error("Developer has no started, authenticated process-scope witness");
+    } });
+    const failed = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(failed).toMatchObject({ ok: false, error: { code: "validation", retryable: false,
+      message: expect.stringContaining("shell startup may have bypassed the supervised provider") } });
+    expect(host.herdr.startCalls()).toHaveLength(1);
+    expect(gatewayControl.registrations.size).toBe(0);
+  });
+
+  it.each(["conflict", "transport_unavailable"] as const)("retains failed startup cleanup after %s until the same pane closes", async code => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"], reportReachability: false });
+    await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    const paneId = startedPane(host.herdr, 0), launchId = startedLaunch(host.herdr, 0);
+    await writeLaunchReachability(host.reachabilityDirectory, launchId, paneId, reportFor("unauthorized"));
+    const close = vi.spyOn(host.rolePanes, "releaseDeveloper").mockResolvedValueOnce({ ok: false,
+      error: { code, retryable: true, message: "close not confirmed" } });
+    const blocked = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(blocked).toMatchObject({ ok: false, error: { code: "conflict", retryable: true, details: { stage: "developer_cleanup" } } });
+    expect(blocked.ok || blocked.error.message).not.toContain("were released");
+    expect(host.herdr.panes.has(paneId)).toBe(true);
+    expect(gatewayControl.registrations.size).toBe(1);
+    expect(host.session.status().status.launches).toEqual([expect.objectContaining({ launchId, state: "intent" })]);
+    // A repaired probe cannot revive a launch already rejected by the security gate.
+    await writeLaunchReachability(host.reachabilityDirectory, launchId, paneId, reportFor("ok"));
+    expect(await host.panes.allocateDeveloper(allocation("run-1-t1"))).toMatchObject({ ok: false,
+      error: { code: "validation", retryable: false, message: expect.stringContaining("unauthorized") } });
+    expect(close).toHaveBeenCalledTimes(2);
+    expect(host.herdr.startCalls()).toHaveLength(1);
+    expect(host.herdr.panes.has(paneId)).toBe(false);
+    expect(gatewayControl.registrations.size).toBe(0);
+  });
+
+  it("retains cleanup when launch revocation fails after the pane closes", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"], reportReachability: false });
+    await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    const paneId = startedPane(host.herdr, 0), launchId = startedLaunch(host.herdr, 0);
+    await writeLaunchReachability(host.reachabilityDirectory, launchId, paneId, reportFor("unauthorized"));
+    vi.spyOn(host.session, "releaseDeveloper").mockRejectedValueOnce(new Error("revocation unavailable"));
+    expect(await host.panes.allocateDeveloper(allocation("run-1-t1"))).toMatchObject({ ok: false,
+      error: { code: "conflict", retryable: true, details: { stage: "developer_cleanup" } } });
+    expect(host.herdr.panes.has(paneId)).toBe(false);
+    expect(gatewayControl.registrations.size).toBe(1);
+    expect(await host.panes.allocateDeveloper(allocation("run-1-t1"))).toMatchObject({ ok: false,
+      error: { code: "validation", retryable: false } });
+    expect(host.herdr.startCalls()).toHaveLength(1);
+    expect(gatewayControl.registrations.size).toBe(0);
+  });
+
+  it("does not forget a failed explicit release or start a replacement writer", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"] });
+    const allocated = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(allocated.ok).toBe(true);
+    vi.spyOn(host.rolePanes, "releaseDeveloper").mockResolvedValueOnce({ ok: false,
+      error: { code: "transport_unavailable", retryable: true, message: "close unknown" } });
+    expect((await host.panes.releaseDeveloper({ taskId: "run-1-t1", closePane: false, removeWorktree: false })).ok).toBe(false);
+    expect(gatewayControl.registrations.size).toBe(1);
+    if (!allocated.ok) return;
+    expect(await host.panes.inspectRoleHealth(allocated.value.paneId)).toMatchObject({ ok: true, value: { readyForPrompt: false } });
+    expect((await host.panes.allocateDeveloper(allocation("run-1-t1"))).ok).toBe(false);
+    expect(host.herdr.startCalls()).toHaveLength(1);
+  });
+
+  it("blocks a fresh wrapper from revoking a retained allocation before pane reconciliation", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"], reportReachability: false });
+    await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    const prepare = vi.spyOn(host.service, "prepareDeveloper");
+    const restored = withDeveloperLaunches(host.rolePanes, {
+      allocate: request => host.session.allocateDeveloper(request.taskId, request.worktreePath, request.runId),
+      release: taskId => host.session.releaseDeveloper(taskId),
+      reachability: (launchId, paneId) => host.session.developerReachability(launchId, paneId)
+    });
+    expect(await restored.allocateDeveloper(allocation("run-1-t1"))).toMatchObject({ ok: false,
+      error: { code: "conflict", retryable: true, details: { stage: "developer_cleanup" } } });
+    expect(prepare).not.toHaveBeenCalled();
+    expect(host.herdr.startCalls()).toHaveLength(1);
+    expect(gatewayControl.registrations.size).toBe(1);
   });
 
   it("fails a Developer that never proves reachability within the startup timeout, releasing its launch and pane", async () => {
