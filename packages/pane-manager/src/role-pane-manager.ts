@@ -59,6 +59,7 @@ import type {
 } from "./types.js";
 import type { AgentLaunchProfile } from "./types.js";
 import { checkLaunchProfile } from "./launch-profile.js";
+import { prepareSupervisedShell } from "./supervised-shell.js";
 import { balanceOwnedTab } from "./layout.js";
 import { readBuiltinRolePrompt } from "./role-prompts.js";
 import { buildProviderRoleLaunch } from "./provider-launch.js";
@@ -1745,8 +1746,22 @@ export class RolePaneManager {
         // Shell readiness, prompt validation and acknowledged busy waits consume the lifecycle budget.
         const budget = launchBudget();
         if (!budget.ok) return budget;
-        const args = [...startArgs, "--timeout", String(budget.value), ...providerArgs];
-        return ok(await this.#runHerdr(args, { ...options, timeoutMs: budget.value }));
+        if (launch?.env.BFLOW_PROCESS_SCOPE_ID !== undefined) {
+          const bootstrapped = await prepareSupervisedShell({ launch, pane, processes: processInfo,
+            timeoutMs: budget.value, ...(options?.signal ? { signal: options.signal } : {}),
+            run: (args, timeoutMs) => this.#runHerdr(args, { ...options, timeoutMs }),
+            observe: async () => {
+              const currentPane = await this.#runHerdr(["pane", "get", request.paneId], { ...options, timeoutMs: budget.value });
+              const currentProcesses = await this.#runHerdr(["pane", "process-info", "--pane", request.paneId], { ...options, timeoutMs: budget.value });
+              if (currentPane.failure || currentProcesses.failure) throw new Error("Cannot confirm supervised shell");
+              return { pane: parsePaneInfoResult(currentPane), processes: parsePaneProcessInfoResult(currentProcesses) };
+            } });
+          if (!bootstrapped.ok) return bootstrapped;
+        }
+        const remaining = launchBudget();
+        if (!remaining.ok) return remaining;
+        const args = [...startArgs, "--timeout", String(remaining.value), ...providerArgs];
+        return ok(await this.#runHerdr(args, { ...options, timeoutMs: remaining.value }));
       };
       let recordedDynamicProfileIntent = false;
       const clearUnstartedProfileIntent = async (): Promise<void> => {

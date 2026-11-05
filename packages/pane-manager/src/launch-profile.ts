@@ -1,3 +1,4 @@
+import { supervisedShellProblem } from "./supervised-shell.js";
 import type { AgentLaunchProfile } from "./types.js";
 import { AGENT_LAUNCH_PROVIDERS } from "./types.js";
 
@@ -56,5 +57,6 @@ export function checkLaunchProfile(launch: AgentLaunchProfile, agentKind: string
       return { message: `Launch env value for '${key}' must be a string without NUL or newline` };
     }
   }
-  return undefined;
+  const scopeProblem = supervisedShellProblem(launch);
+  return scopeProblem ? { message: scopeProblem } : undefined;
 }
