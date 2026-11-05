@@ -172,6 +172,23 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     expect(manifest.panes.find(binding => binding.role === "architect")?.paneId).toBe(pane.pane_id);
     expect(starts(runner)).toHaveLength(5);
   });
+  linuxIt("preserves an agent-name collision without calling it an interactive dialog or cleaning up", async () => {
+    await lifecycle().up();
+    const session = runner.session(input.repository.sessionName);
+    session.panes.find(pane => pane.name === "planner")!.agent = "claude";
+    const file = join(dir, `.bflow/state/panes/${input.repository.sessionName}.manifest.json`);
+    const stored = JSON.parse(await readFile(file, "utf8"));
+    stored.status = "degraded";
+    await writeFile(file, JSON.stringify(stored));
+    const before = structuredClone(session.panes);
+    let message = "";
+    try { await lifecycle().up(); } catch (error) { message = String(error); }
+    expect(message).toContain("unowned or incompatible");
+    expect(message).not.toContain("interactive startup dialog");
+    expect(message).toContain("agent-name collision");
+    expect(session.panes).toEqual(before);
+    expect(host.quiesce).not.toHaveBeenCalled();
+  });
   linuxIt("rejects a foreign durable manifest without dispatching P13 commands", async () => {
     await lifecycle().up();
     const file = join(dir, `.bflow/state/panes/${input.repository.sessionName}.manifest.json`);
@@ -362,6 +379,32 @@ describe("P30 platform readiness in up", () => {
     expect(started).toHaveLength(5);
     expect(started.every(pane => pane.env?.["BFLOW_TEST_SECRET"] === "must-not-leak")).toBe(true);
     expect(host.prepare).toHaveBeenCalledTimes(1);
+  });
+
+  linuxIt.each(["up", "down"] as const)("recovers restored Codex terminals through lifecycle from a %s manifest without duplicate launches", async status => {
+    const input = withProviders(() => "codex");
+    const host = hostWith(await roleLaunchesFor(input));
+    const environment = () => new EnvironmentLifecycle(dir, { runner, openIntegration: async composition =>
+      openPaneManagerEnvironment(composition, runner, async () => host, undefined, socketFor) });
+    const initial = await environment().up();
+    const file = join(dir, `.bflow/state/panes/${input.repository.sessionName}.manifest.json`);
+    await writeFile(file, JSON.stringify({ ...initial, status }));
+    const session = runner.session(input.repository.sessionName);
+    const oldIds = initial.panes.filter(pane => pane.permanent).map(pane => pane.paneId);
+    for (const pane of session.panes.filter(pane => oldIds.includes(pane.pane_id))) {
+      pane.terminal_id = `restored-${pane.terminal_id}`;
+      delete pane.env;
+    }
+    const recovered = await environment().up();
+    expect(recovered.status).toBe("up");
+    expect(recovered.panes.filter(pane => pane.permanent)).toHaveLength(5);
+    expect(recovered.panes.every(pane => !oldIds.includes(pane.paneId))).toBe(true);
+    const current = session.panes.filter(pane => recovered.panes.some(binding => binding.paneId === pane.pane_id));
+    expect(current).toHaveLength(5);
+    expect(current.every(pane => pane.env?.BFLOW_TEST_SECRET === "must-not-leak")).toBe(true);
+    expect(starts()).toHaveLength(10);
+    await environment().up();
+    expect(starts()).toHaveLength(10);
   });
 
   linuxIt("retains env-bearing platform panes across unresolved and resolved startup-dialog retries", async () => {

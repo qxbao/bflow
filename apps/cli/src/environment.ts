@@ -903,8 +903,14 @@ export class EnvironmentLifecycle {
         startupError.contractError.code === "conflict" && startupDetails !== null && typeof startupDetails === "object" &&
         !Array.isArray(startupDetails) && startupDetails.sessionId === repository.sessionName &&
         typeof startupDetails.paneId === "string" && typeof startupDetails.reason === "string";
-      if (preserveStartupDialog)
-        cleanupOutcome = "was not attempted because an interactive startup dialog requires a choice; session and panes were preserved";
+      if (preserveStartupDialog) {
+        const reason = startupDetails.reason;
+        cleanupOutcome = reason === "unowned_agent_name_collision"
+          ? "was not attempted because an agent-name collision requires ownership reconciliation; session and panes were preserved"
+          : reason === "restored_terminal_not_ready"
+            ? "was not attempted because a restored role is still working or not ready; session and panes were preserved"
+            : "was not attempted because an interactive startup dialog requires a choice; session and panes were preserved";
+      }
       if (startupError !== undefined && cleanupEligible && !preserveStartupDialog) {
         try {
           if (roleDispatchAttempted && startupError instanceof EnvironmentError && ["timeout", "cancelled", "unknown_delivery"].includes(startupError.contractError.code)) {

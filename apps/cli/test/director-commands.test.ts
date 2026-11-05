@@ -82,6 +82,19 @@ describe("director start", () => {
     expect(body.fix).toContain("bflow director start");
     expect(body.fix).not.toContain("bflow init");
   });
+  it.each([
+    "Permanent role 'planner' cannot use agent name 'planner': unowned or incompatible agent in pane 'w3:p34'. No topology changes were made. Inspect bflow doctor; configure a different role agentName before retrying bflow up.",
+    "Native session changed for planner in pane 'w3:p34'; refusing to adopt or close it.",
+    "Restored terminal for planner is working; preserve its work before retrying bflow up."
+  ])("preserves topology recovery guidance instead of suggesting init: %s", async message => {
+    const { deps, out, ownerCall } = make({ ensureUp: async () => { throw new Error(message); } });
+    expect(await runDirectorCommand(parse(["start", "--json"]), deps)).toBe(1);
+    const body = JSON.parse(out[0]!);
+    expect(body.fix).toContain("bflow doctor");
+    expect(body.fix).toContain("bflow up");
+    expect(body.fix).not.toContain("bflow init");
+    expect(ownerCall).not.toHaveBeenCalled();
+  });
   it.each(["EPERM", "EACCES"])("gives a usable Director launch command for a denied Unix socket (%s)", async code => {
     const { deps, out, ownerCall } = make({ env: { BFLOW_DIRECTOR_PROVIDER: "codex" }, ensureUp: async () => {
       throw new Error(`Agentic host exited during startup (exit code 1): Host Unix socket permission denied (listen ${code}); see /repo/host.log`);

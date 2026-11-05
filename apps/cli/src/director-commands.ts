@@ -114,6 +114,8 @@ function startFix(message: string, provider: DirectorProvider): string {
     return `Phiên agent bị sandbox hoặc quyền hệ điều hành chặn Unix socket của Bflow. Mở terminal thường và chạy \`bflow open --provider ${provider}\` để mở lại Director; kiểm tra quyền thư mục socket nếu lỗi vẫn còn. Không cần chạy lại doctor cho lỗi quyền socket này.`;
   if (/Persisted host (?:(?:layout|platform|policy) differs|execution sources differ)/.test(message))
     return "Chạy `bflow down` để dừng và đối soát host cũ, rồi chạy `bflow director start --json` để mở lại Director với cấu hình hiện tại. Giữ nguyên .bflow và lịch sử workflow; không cần chạy lại init.";
+  if (/Permanent role .*cannot use agent name|Native session changed|Restored terminal for/.test(message))
+    return "Chạy `bflow doctor` và kiểm tra đúng phiên Herdr/pane nêu trong lỗi; giữ lại công việc của agent. Xử lý xung đột tên hoặc chờ vai trò khôi phục sẵn sàng, rồi chạy `bflow up` và thử lại Director. Không xóa .bflow.";
   if (/Not a Git working repository/i.test(message)) return "Chạy lệnh trong một kho Git (hoặc `git init`), rồi thử lại.";
   if (/Host unavailable|Foreign host/i.test(message)) return "Chạy `bflow up` trong kho này để khởi động host, rồi thử lại.";
   if (/config|cấu hình|init/i.test(message)) return "Chạy `bflow init` trong kho này rồi thử lại.";

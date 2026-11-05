@@ -255,7 +255,17 @@ không bao giờ được role mang env nhận nuôi.
 Trước khi tạo workspace/tab/pane hoặc ghi launch intent mới, startup đối chiếu tên role với
 agent Herdr hiện có. Tên bị chiếm mà không có binding phù hợp (pane, provider, terminal và native
 session nếu đã ghi nhận) trả về `conflict` kèm đúng session/pane và hướng dẫn `bflow doctor`, giữ
-nguyên manifest. Nhãn workspace trùng tên project không chứng minh quyền đóng pane cũ. Khi đổi
+nguyên manifest. Nếu Herdr khôi phục cùng pane dưới terminal ID mới, chỉ bộ tên/provider/workspace/tab/pane
+và native session đã ghi nhận khớp hoàn toàn mới xác nhận quyền sở hữu. Vai trò phải đang `idle`/`done`
+và sẵn sàng tương tác; Bflow kiểm tra lại danh tính/trạng thái trước khi cấp pane thay thế và đóng terminal cũ. Launch mang env
+luôn tạo pane mới vì `codex resume` hoặc provider resume không chứng minh shell đã giữ env cũ, kể cả khi
+`launchId` không đổi. Shell được khôi phục mà không có native agent xác nhận thì được giữ lại và role
+nhận pane mới có env. Trước khi đóng role cũ, `replacementLaunchIntent` lưu binding của pane thay thế
+trong metadata của binding cũ; kiểm tra lại native identity/readiness sau cấp pane. Nếu role vừa bận,
+startup giữ cả hai pane và dùng lại đúng pane thay thế khi thử lại, không split thêm. Shutdown cũng
+đối soát terminal và shell của receipt này trước khi đóng nó. Test hồi quy bao gồm startup từ manifest `up`/`down`, shell không còn agent,
+phiên native không khớp, role đang làm việc và startup lặp lại không tạo agent trùng.
+Nhãn workspace trùng tên project không chứng minh quyền đóng pane cũ. Khi đổi
 launch env, pane đã bị agent khác chiếm cũng được giữ nguyên; chủ phiên phải xử lý xung đột
 hoặc chọn tên role khác rồi thử lại. Legacy discovery không mang env vẫn chỉ nhận agent khỏe,
 đúng provider và tab của role. Bằng chứng: source và test fake runner trong
