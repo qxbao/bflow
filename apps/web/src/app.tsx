@@ -10,7 +10,7 @@ import { ConnectionBanner } from './components/ConnectionBanner';
 import { ErrorState } from './components/ErrorState';
 import { EmptyState } from './components/EmptyState';
 import { Projects } from './features/projects';
-import { Runs, RunView } from './features/runs';
+import { Runs } from './features/runs';
 import { ChatPage } from './features/chat/page';
 import { AgentsPage } from './features/agents';
 import { Review } from './features/review';
@@ -33,6 +33,11 @@ import { OfficeStage, type StageControl } from './features/office/ui/OfficeStage
 import { OfficeHud, currentRun } from './features/office/ui/OfficeHud';
 import { useOfficeModel } from './features/office/ui/useOfficeModel';
 import { useAgentExcerpts } from './features/office/ui/useAgentExcerpts';
+import { TaskBoard } from './features/office/ui/interaction/TaskBoard';
+import { TaskDetail } from './features/office/ui/interaction/TaskDetail';
+import { DecisionInbox } from './features/office/ui/interaction/DecisionInbox';
+import { DecisionDraftProvider } from './features/office/ui/interaction/decision-drafts';
+import type { DecisionDraft } from './features/decisions';
 import { AgentInspector, AgentList, handoffEvidence } from './features/office/ui/AgentInspector';
 import { CabinetInspector, ServerInspector, runEvidence } from './features/office/ui/ObjectInspector';
 import type { OfficeDirectorInput, OfficeTarget } from './features/office/model/types';
@@ -71,7 +76,7 @@ function Project({api,projects,projectsLoading,projectsError,revision,refresh,on
   const openOverview=useCallback(()=>{setInspector(undefined);setOverviewOpen(true);if(!isIndex)navigate(base);},[isIndex,navigate,base]);
   // Inspectors live in the panel on the index path: opening one leaves any page route and the overview.
   const openInspector=useCallback((next:Inspector|undefined)=>{if(next){setOverviewOpen(false);if(!isIndex)navigate(base);}setInspector(next);},[isIndex,navigate,base]);
-  return <AppShell projects={projects} projectId={projectId} visual={visual?{panelOpen,closable,dockPx,inspectorRef:setInspectorHost,onClose:close,onOverview:showOverview,hudRef:setHud,stageRef:setHost}:undefined}>{project?<ProjectContent key={projectId} api={api} project={project} projects={projects} revision={revision} refresh={refresh} onPair={onPair} frame={{mode,setMode,overviewOpen,panelOpen,hud,host,openOverview,closePanels:close,dockPx,setDockPx,inspector,openInspector,inspectorHost}}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell>;
+  return <AppShell projects={projects} projectId={projectId} visual={visual?{panelOpen,closable,immersive:immersiveOfficeEnabled(),dockPx,inspectorRef:setInspectorHost,onClose:close,onOverview:showOverview,hudRef:setHud,stageRef:setHost}:undefined}>{project?<ProjectContent key={projectId} api={api} project={project} projects={projects} revision={revision} refresh={refresh} onPair={onPair} frame={{mode,setMode,overviewOpen,panelOpen,hud,host,openOverview,closePanels:close,dockPx,setDockPx,inspector,openInspector,inspectorHost}}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell>;
 }
 type Frame={mode:UiMode;setMode:(mode:UiMode)=>void;overviewOpen:boolean;panelOpen:boolean;hud:HTMLElement|null;host:HTMLElement|null;openOverview:()=>void;closePanels:()=>void;dockPx:number;setDockPx:(px:number)=>void;inspector:Inspector|undefined;openInspector:(next:Inspector|undefined)=>void;inspectorHost:HTMLElement|null};
 /** What the overlay panel shows in 3D besides pages: local state, never a route. */
@@ -109,6 +114,8 @@ function ProjectContent({api,project,projects,revision,refresh,onPair,frame}:{ap
 }
 function ProjectSurfaces({api,project,projects,revision,refresh,onPair,frame,sessionRead,connection,events}:{api:ApiClient;project:WebProject;projects:WebProject[];revision:number;refresh:()=>void;onPair:(secret:string)=>Promise<void>;frame:Frame;sessionRead:{key:string;data?:WebProjectSession;error?:unknown;loading:boolean};connection:Connection;events:WebEvent[]}) {
   const id=project.projectId;
+  const [decisionDrafts,setDecisionDrafts]=useState<Record<string,DecisionDraft>>({});
+  const setDecisionDraft=(key:string,draft:DecisionDraft)=>setDecisionDrafts(old=>old[key]?.review===draft.review&&old[key]?.reason===draft.reason&&old[key]?.option===draft.option?old:{...old,[key]:draft});
   const [dialogueOpen,setDialogueOpen]=useState(false),[dialoguePath,setDialoguePath]=useState('');
   const location=useLocation(),projectBase=`/projects/${encodeURIComponent(id)}`;
   const dialogueOrigin=useRef(''),expectedDialoguePath=useRef<string|undefined>(undefined);
@@ -125,14 +132,14 @@ function ProjectSurfaces({api,project,projects,revision,refresh,onPair,frame,ses
   useEffect(()=>{if(!dialogueOpen)return;const key=(event:KeyboardEvent)=>{if(event.key==='Escape'&&!event.defaultPrevented&&!event.isComposing){event.preventDefault();leaveDialogue();}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[dialogueOpen]);
   return <DirectorChatControllerProvider active={composerRoute||dialogueOpen}>
     {frame.mode!=='visual'&&<div className="mb-4 flex min-h-11 flex-wrap items-center justify-between gap-3 border-b border-line pb-2.5 font-data text-sm">{mark}<div className="flex flex-wrap items-center gap-2"><ModeSwitch mode={frame.mode} onChange={frame.setMode}/><button className="min-w-28" onClick={refresh}>Tải lại dữ liệu</button></div></div>}
-    <OfficeFrame mode={frame.mode} overview={<Overview api={api} project={project} session={sessionRead} revision={revision} refresh={refresh} events={events}/>} overviewOpen={frame.overviewOpen} panelOpen={frame.panelOpen}>
-      <Routes><Route index element={<OverviewOutlet/>}/><Route path="runs" element={<Runs api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="runs/:runId" element={<RunRoute api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat/:runId" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="agents" element={<AgentsPage api={api} id={id} revision={revision}/>}/><Route path="issues" element={<IssuesPage/>}/><Route path="issues/:issueId" element={<IssueDetail/>}/><Route path="review" element={<Review api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="settings" element={<Settings api={api} project={project} refresh={refresh}/>}/><Route path="*" element={<EmptyState title="Không tìm thấy trang"><Link to={`/projects/${encodeURIComponent(id)}`}>Về tổng quan dự án</Link></EmptyState>}/></Routes>
-    </OfficeFrame>
+    <DecisionDraftProvider value={{drafts:decisionDrafts,setDraft:setDecisionDraft}}><OfficeFrame mode={frame.mode} overview={<Overview api={api} project={project} session={sessionRead} revision={revision} refresh={refresh} events={events}/>} overviewOpen={frame.overviewOpen} panelOpen={frame.panelOpen}>
+      <Routes><Route index element={<OverviewOutlet/>}/><Route path="runs" element={immersive?<TaskBoard api={api} id={id} revision={revision} refresh={refresh}/>:<Runs api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="runs/:runId" element={immersive?<RunRoute api={api} id={id} revision={revision} refresh={refresh} immersive/>:<RunRoute api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat/:runId" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="agents" element={<AgentsPage api={api} id={id} revision={revision}/>}/><Route path="issues" element={<IssuesPage/>}/><Route path="issues/:issueId" element={<IssueDetail/>}/><Route path="review" element={immersive?<DecisionInbox api={api} id={id} revision={revision} refresh={refresh}/>:<Review api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="settings" element={<Settings api={api} project={project} refresh={refresh}/>}/><Route path="*" element={<EmptyState title="Không tìm thấy trang"><Link to={`/projects/${encodeURIComponent(id)}`}>Về tổng quan dự án</Link></EmptyState>}/></Routes>
+    </OfficeFrame></DecisionDraftProvider>
     {frame.mode==='visual'&&<VisualOffice api={api} project={project} projects={projects} onPair={onPair} session={sessionRead.data} connection={connection} revision={revision} refresh={refresh} list={list} frame={frame} dialogueOpen={dialogueVisible} onDirectorDialogue={openDialogue} onLeaveDialogue={leaveDialogue}/>}
     {dialogueVisible&&frame.mode==='visual'&&createPortal(<DirectorDialogue active onClose={leaveDialogue}><DirectorChat immersive={immersive} /></DirectorDialogue>,document.body)}
   </DirectorChatControllerProvider>;
 }
-function RunRoute({api,id,revision,refresh}:{api:ApiClient;id:string;revision:number;refresh:()=>void}) { const {runId=''}=useParams();return <RunView key={runId} api={api} id={id} runId={runId} revision={revision} refresh={refresh}/>; }
+function RunRoute({api,id,revision,refresh,immersive=false}:{api:ApiClient;id:string;revision:number;refresh:()=>void;immersive?:boolean}) { const {runId=''}=useParams();return <TaskDetail key={runId} api={api} id={id} runId={runId} revision={revision} refresh={refresh} immersive={immersive}/>; }
 
 /**
  * Rendered only in visual mode, so Classic issues no extra reads. Portals the scene into the full-screen stage node, the floating HUD into
