@@ -14,8 +14,7 @@ describe("Claude Director stream adapter", () => {
 
   it("encodes each prompt as one complete user frame even when the prompt contains newlines", () => {
     const encoded = encodeClaudeDirectorPrompt("BFLOW_DIRECTOR_WAKE 123\nCheck the queue.");
-    expect(encoded.endsWith("\n")).toBe(true);
-    expect(encoded.slice(0, -1)).not.toContain("\n");
+    expect(encoded).not.toContain("\n");
     expect(JSON.parse(encoded)).toEqual({
       type: "user", message: { role: "user", content: "BFLOW_DIRECTOR_WAKE 123\nCheck the queue." },
       parent_tool_use_id: null

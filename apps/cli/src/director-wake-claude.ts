@@ -11,7 +11,7 @@ export function claudeDirectorArgs(): readonly string[] {
 /** The JSONL frame used by Claude Code's documented streaming input mode. */
 export function encodeClaudeDirectorPrompt(prompt: string): string {
   if (prompt.trim() === "") throw new Error("Claude Director prompt is empty");
-  return JSON.stringify({ type: "user", message: { role: "user", content: prompt }, parent_tool_use_id: null }) + "\n";
+  return JSON.stringify({ type: "user", message: { role: "user", content: prompt }, parent_tool_use_id: null });
 }
 
 const ResultSchema = z.object({
