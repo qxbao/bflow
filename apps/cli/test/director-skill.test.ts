@@ -34,9 +34,9 @@ describe("bflow-start director skill", () => {
   });
 
   it("embeds the skill version", () => {
-    expect(BFLOW_START_SKILL_VERSION).toBe("1.4.0");
+    expect(BFLOW_START_SKILL_VERSION).toBe("1.5.0");
     const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
-    expect(text).toContain("1.4.0");
+    expect(text).toContain("1.5.0");
     expect(text).toContain("BFLOW_DIRECTOR_TOKEN=<token> '/usr/bin/node' director call <tool> --json");
     expect(text).not.toContain("--token");
   });
@@ -48,13 +48,42 @@ describe("bflow-start director skill", () => {
     expect(shellQuoteArgv(["/x/it's"])).toBe("'/x/it'\\''s'");
   });
 
-  it("drops resume_run and calls planning_reference before planning", () => {
+  it("exposes retained-run recovery and calls planning_reference before planning", () => {
     const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
-    expect(text).not.toContain("resume_run");
+    expect(text).toContain("resume_run");
     expect(text).toContain("planning_reference");
     expect(text).not.toContain("cannot create a new run");
     expect(text).toContain("start_work");
     expect(text).toContain("userMessageSeq");
+  });
+
+  // Instruction coverage only; Runtime tests separately enforce the admission and resume guards.
+  it("bases recovery authority on origin and repository/session, never on token age", () => {
+    const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
+    expect(text).toContain("delegation.requestedBy");
+    expect(text).toContain("delegation.sessionId");
+    expect(text).toContain('"director"');
+    expect(text).toContain("same repository/session");
+    expect(text).toContain("token rotation");
+    expect(text).toContain("Legacy Conversation-origin runs are read-only");
+    expect(text).toContain("Foreign sessions are refused");
+    expect(text).not.toContain("Runs created before this Director session are read-only");
+    expect(text).not.toContain("cancel it and start new work");
+  });
+
+  it("recovers the current pending action within bounds before returning to idle wait", () => {
+    const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
+    expect(text).toContain("pendingAction");
+    expect(text).toContain("exact runId and actionId");
+    expect(text).toMatch(/blocker is fixed[^\n]*`resume_run`/);
+    expect(text).toContain("reconcile_delivery");
+    expect(text).toContain("unknown delivery");
+    expect(text).toContain("Do not repeat an identical failing call more than twice");
+    expect(text).toContain("Active blocked work is not idle");
+    expect(text).toContain("next owner/action");
+    expect(text).toContain("park_task");
+    expect(text).toContain("Never transfer approvals");
+    expect(text).toContain("explicit owner resume");
   });
 
   it("describes the v3 work loop with mailbox audiences and both approval paths", () => {
