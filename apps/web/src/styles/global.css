@@ -48,6 +48,46 @@
   --color-code: #20231a;
   --color-code-line: #3b402d;
 }
+.office-3d {
+  color-scheme: light;
+  --win-ink: #1b1033; --win-shadow: 4px 4px 0 var(--win-ink); --win-shadow-sm: 2px 2px 0 var(--win-ink);
+  --win-border: 2px solid var(--win-ink); --win-radius: 6px; --win-body: #f6f2ff; --win-panel: #e9e0ff;
+  --win-title-inactive: #786f94; --win-c-system: #5b4fc4; --win-c-work: #a71970; --win-c-decide: #f29d12;
+  --win-c-chat: #6c2fc9; --win-c-people: #12615f; --win-c-docs: #2f5fb3; --win-c-alert: #a3202a;
+  --color-canvas: #f6f2ff; --color-ink: #1b1033; --color-muted: #4b3f6b; --color-faint: #efe8ff;
+  --color-line: #cfc4ee; --color-accent: #6a2fd0; --color-focus: #a71970; --color-surface: #fff;
+  --color-input: #cfc4ee; --color-success: #1e6b3a; --color-danger: #a3202a; --color-warning: #7a5600; --color-code: #efe8ff; --color-code-line: #cfc4ee;
+}
+.bwin { position: fixed; display:flex; flex-direction:column; min-width:320px; min-height:240px; border:var(--win-border); border-radius:var(--win-radius); background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); overflow:hidden; }
+.bwin.is-active { box-shadow:var(--win-shadow); }
+.bwin-titlebar { display:flex; flex:none; align-items:center; gap:8px; min-height:36px; padding:4px 6px; color:var(--win-title-ink,#fff); background:var(--win-accent,var(--win-c-system)); border-bottom:2px solid var(--win-ink); cursor:grab; touch-action:none; }
+.bwin-titlebar:active { cursor:grabbing; }
+.bwin-titlebar.is-inactive { background:var(--win-title-inactive); }
+.bwin-title-icon { width:22px; height:22px; flex:none; }
+.bwin-title-text { margin:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:700 13px/1.2 var(--font-mono); text-transform:uppercase; }
+.bwin-controls { display:flex; gap:4px; }
+.bwin-controls button { width:26px; height:26px; min-height:26px; padding:0; border:2px solid var(--win-ink); border-radius:0; color:var(--win-ink); background:var(--win-body); box-shadow:var(--win-shadow-sm); font:700 16px/1 var(--font-mono); }
+.bwin-controls button:active { transform:translate(1px,1px); box-shadow:none; }
+.bwin-nav { flex:none; min-height:36px; border-bottom:2px solid var(--win-ink); background:var(--win-panel); }
+.bwin-nav-buttons { display:flex; align-items:center; gap:6px; padding:3px 8px; font:600 12px var(--font-mono); }
+.bwin-nav-buttons button { width:30px; min-height:28px; padding:0; border:2px solid var(--win-ink); border-radius:0; background:#fff; box-shadow:var(--win-shadow-sm); }
+.bwin-nav-buttons span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.bwin-body { flex:1; min-height:0; overflow:auto; padding:16px; color-scheme:light; background:var(--win-body); color:var(--win-ink); scrollbar-color:var(--win-accent) var(--win-panel); }
+.bwin-app .bwin-body { padding:0; }
+.bwin-app .bwin-inspector-host:empty { display:none; }
+.bwin-resize { position:absolute; right:0; bottom:0; width:20px; min-height:20px; padding:0; border:0; background:transparent; cursor:nwse-resize; }
+.bwin-backdrop { position:fixed; inset:0; z-index:90; background:rgb(27 16 51 / .35); backdrop-filter:blur(2px); }
+.office-3d .bwin-body button { border-radius:0; border:2px solid var(--win-ink); box-shadow:var(--win-shadow-sm); background:#fff; color:var(--win-ink); }
+.office-3d .bwin-body input, .office-3d .bwin-body select, .office-3d .bwin-body textarea { border-radius:0; border:2px solid var(--win-ink); background:#fff; color:var(--win-ink); }
+.office-3d .bwin-body :focus-visible { outline-color:var(--win-c-work); }
+.office-3d.office-panel-open .office-stage, .office-3d.office-panel-open .office-hud-root { right:0; }
+.office-3d.office-panel-open .bwin { animation:bwin-open 120ms ease-out; }
+@keyframes bwin-open { from { opacity:0; scale:.96; } to { opacity:1; scale:1; } }
+@media (prefers-reduced-motion:reduce) { .office-3d .bwin { animation:none!important; } }
+.office-3d .bwin-app { container:workspace / inline-size; }
+.office-3d .bwin-app .workspace-main-content { min-height:0; height:100%; overflow:auto; padding:16px; }
+@media (max-width:1099px) { .office-3d.office-panel-open .office-stage { visibility:hidden; pointer-events:none; } .office-3d.office-panel-open .bwin-app { left:0!important; top:0!important; width:100vw!important; height:calc(100dvh - 56px)!important; } }
+@media (max-width:767px) { .office-3d.office-panel-open .office-stage { visibility:hidden; } }
 .office-3d button, .office-3d input, .office-3d select, .office-3d textarea { border-radius: .5rem; }
 .office-3d fieldset { border-radius: .5rem; }
 
