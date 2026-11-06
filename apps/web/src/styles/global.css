@@ -142,12 +142,14 @@
 .office-3d .office-panel .panel { padding: 1.5rem; }
 .office-3d .office-panel h1 { font-size: 1.5rem; }
 .office-topbar { display: grid; grid-template-columns: minmax(0, 18rem) auto; gap: .75rem; align-items: start; }
-.office-topbar > [aria-label="Trạng thái văn phòng"] { grid-column: 1 / -1; justify-self: start; max-width: 100%; }
+.office-topbar > .office-mode { justify-self: end; }
+.office-status summary::-webkit-details-marker { display: none; }
+.office-status-chevron { transition: transform .15s ease; }
+.office-status[open] .office-status-chevron { transform: rotate(180deg); }
 .office-immersive .office-topbar { grid-template-columns: minmax(0, 18rem) minmax(0, 1fr); grid-template-rows: auto auto auto; }
 .office-immersive .office-topbar > [aria-label="Văn phòng Bflow"] { grid-column: 1; grid-row: 1; }
 .office-immersive .office-topbar > [aria-label="Thông báo văn phòng"] { grid-column: 1 / -1; grid-row: 2; justify-self: end; max-width: calc(100vw - 6.5rem); }
-.office-immersive .office-topbar > [aria-label="Chế độ hiển thị"] { grid-column: 2; grid-row: 1; justify-self: end; }
-.office-immersive .office-topbar > [aria-label="Trạng thái văn phòng"] { grid-column: 1 / -1; grid-row: 3; justify-self: start; max-width: 100%; }
+.office-immersive .office-topbar > .office-mode { grid-column: 2; grid-row: 1; justify-self: end; }
 .office-immersive .office-topbar > [aria-label="Hướng dẫn lần đầu"],
 .office-immersive .office-topbar > .office-guide-replay { position: absolute; top: 40dvh; right: 0; width: min(20rem, calc(100vw - 6.5rem)); }
 .office-immersive .office-topbar > [aria-label="Hướng dẫn lần đầu"] { z-index: 1; }
@@ -155,6 +157,7 @@
 .office-topbar > .office-guide-replay { text-align: left; }
 .office-rail { left: .75rem; right: auto; top: 50%; transform: translateY(-42%); }
 .office-rail button { min-height: 44px; width: 72px; font-size: 11px; }
+.office-rail.office-rail-anchored { bottom: auto; transform: none; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; transition: top .18s ease; }
 .office-panel-open .office-quick-chat { display: none; }
 .office-cameras { margin-inline: auto; }
 .chat-layout { position: relative; border-radius: 1rem; overflow: clip; }
@@ -218,8 +221,8 @@
   .chat-thread { height: auto; min-height: 30rem; }
 }
 
-.office-topbar > details { display: block; margin: 0; padding-block: 0; }
-.office-topbar > details summary { min-height: 40px; }
+.office-status { margin-bottom: 0; }
+.office-status summary { min-height: 2rem; }
 .office-cameras details[open] > div { grid-template-columns: repeat(3, 2.75rem); }
 .office-cameras details[open] > div > button { min-width: 2.75rem; min-height: 2.75rem; padding-inline: .25rem; }
 @media (max-width: 1099px) { .office-panel-open [data-hud-bottom] > div:last-child { display: none; } }
@@ -282,4 +285,22 @@
   .director-dialogue .chat-thread form [role="status"] { margin-bottom: .25rem; font-size: .6875rem; line-height: 1.2; }
   .director-dialogue .chat-thread [aria-label="Gợi ý trò chuyện"] button { min-height: 2rem; padding: .25rem .5rem; }
   .director-dialogue .chat-thread #director-chat-approval { margin-top: 0; line-height: 1.15; }
+}
+
+/* Web <-> 3D: a short cross-fade with a slight depth shift (View Transitions, started by useUiMode). The 3D stage then fades in once
+   its first frame is drawn, so the canvas never pops in as a black block. Reduced motion skips both. */
+::view-transition-old(root) { animation: bflow-mode-out .22s ease-in both; }
+::view-transition-new(root) { animation: bflow-mode-in .38s cubic-bezier(.2, .7, .2, 1) both; }
+@keyframes bflow-mode-out { to { opacity: 0; transform: scale(.985); } }
+@keyframes bflow-mode-in { from { opacity: 0; transform: scale(1.015); } }
+.mode-switch { view-transition-name: bflow-mode-switch; }
+::view-transition-group(bflow-mode-switch) { animation-duration: .38s; animation-timing-function: cubic-bezier(.2, .7, .2, 1); }
+.office-stage { animation: bflow-stage-in .6s ease-out both; }
+/* The HUD settles in after the scene; the mode pill is left out because it already morphed into place. `translate` keeps the rail's transform. */
+.office-topbar > :not(.office-mode), .office-rail, [data-hud-bottom] { animation: bflow-hud-in .45s .12s ease-out both; }
+@keyframes bflow-stage-in { from { opacity: 0; } }
+@keyframes bflow-hud-in { from { opacity: 0; translate: 0 6px; } }
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root), ::view-transition-new(root), ::view-transition-group(bflow-mode-switch), .office-stage,
+  .office-topbar > :not(.office-mode), .office-rail, [data-hud-bottom] { animation: none; }
 }

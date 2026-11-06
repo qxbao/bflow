@@ -6,12 +6,12 @@ import {
   PlaneGeometry, Quaternion, SpotLight, SRGBColorSpace, Vector3, type Object3D,
 } from 'three';
 import type { OfficeObjectId } from '../model/types';
-import { BOARD_X, DECOR, GRID_H, GRID_W, OBJECT_CELLS, PLANT_CELLS, ZONE_SIGNS, cellCentre, decorPlacement, deskPlan, partitionPieces, zoneAt, zones, type DeskPlan, type Vec2, type ZoneSign } from './world';
+import { BOARD_X, DECOR, GRID_H, GRID_W, OBJECT_CELLS, PLANT_CELLS, ZONE_SIGNS, cellCentre, decorPlacement, deskCentre, deskPlan, partitionPieces, zoneAt, zones, type DeskPlan, type Vec2, type ZoneSign } from './world';
 
 export const BACKGROUND = '#dfe5e6';
-/** Light carpet with a distinct tint per room: warm oak, blue-grey, lavender, mint and sand; the lobby is neutral. */
+/** Light carpet with a distinct tint per room: warm oak, blue-grey, lavender, mint, pale stone and sand; the lobby is neutral. */
 const FLOOR: Readonly<Record<string, string>> = {
-  lobby: '#d9d8d2', conversation: '#d9bc92', coordination: '#c9d6df', taskboard: '#d2d3e6', developer: '#cbe0d2', verification: '#e6d6c2',
+  lobby: '#d9d8d2', conversation: '#d9bc92', coordination: '#c9d6df', taskboard: '#d2d3e6', developer: '#cbe0d2', spare: '#e1ded7', verification: '#e6d6c2',
 };
 /** Sky fill of the full tier; the low tier (no spot pools, no shadows) lifts it a little. */
 export const HEMI_HIGH = 1.0, HEMI_LOW = 1.5;
@@ -169,8 +169,8 @@ export class Stage {
     const plain: Matrix4[] = [], led: Matrix4[] = [];
     for (let i = 0; i < GRID_W; i++) (i % 5 === 2 ? led : plain).push(m4(i + 0.5, 0, 0));
     for (let j = 0; j < GRID_H; j++) {
-      if (j === OBJECT_CELLS.door.gy) continue; // the door stands in this wall slot
-      (j % 6 === 2 ? led : plain).push(m4(0, 0, j + 0.5, Math.PI / 2));
+      // The door stands in this slot of the west wall only; the east wall stays unbroken.
+      if (j !== OBJECT_CELLS.door.gy) (j % 6 === 2 ? led : plain).push(m4(0, 0, j + 0.5, Math.PI / 2));
       (j % 6 === 2 ? led : plain).push(m4(GRID_W, 0, j + 0.5, -Math.PI / 2));
     }
     wallOf('wall', plain); wallOf('wall_led', led);
@@ -191,8 +191,9 @@ export class Stage {
       beam.frustumCulled = false; beam.renderOrder = 2;
       this.group.add(beam);
     };
-    for (const x of [3, 7, 11.5, 15.5, 21, 25]) addSpot(x, 3.3, 0.16, 0); // the Coordination pair sits over its two windows
-    for (const z of [4, 10, 15]) { addSpot(0.16, 3.3, z, Math.PI / 2); addSpot(GRID_W - 0.16, 3.3, z, -Math.PI / 2); }
+    // Each room's pair of spots is mirror-symmetric about its centre line: over the two bookcases, the two windows and either side of the board.
+    for (const x of [2.5, 6.5, 12, 16, 21.5, 25.5]) addSpot(x, 3.3, 0.16, 0);
+    for (const z of [4.25, 11.5, 16.75]) { addSpot(0.16, 3.3, z, Math.PI / 2); addSpot(GRID_W - 0.16, 3.3, z, -Math.PI / 2); }
     wallOf('spot', spots);
 
     // Single objects. Tall wall furniture stands flush against its wall.
@@ -203,7 +204,7 @@ export class Stage {
       this.group.add(clone);
       if (id) { const s = OBJECT_SIZES[id]; this.objects.push({ id, position: { x, z }, size: { w: s.w * scale, h: s.h * scale, d: s.d * scale } }); }
     };
-    const at = (id: OfficeObjectId): Vec2 => cellCentre(OBJECT_CELLS[id]);
+    const at = (id: OfficeObjectId): Vec2 => deskCentre(OBJECT_CELLS[id]);
     const flush = (depth: number): number => 0.07 + (depth * OBJECT_SCALE) / 2;
     place('counter', at('counter').x, at('counter').z, 0, 'counter', 1);
     place('exec_chair', at('counter').x, at('counter').z, 0, undefined, 1);
@@ -244,7 +245,7 @@ export class Stage {
     key.shadow.mapSize.set(2048, 2048);
     Object.assign(key.shadow.camera, { left: -22, right: 22, top: 18, bottom: -18, near: 1, far: 70 });
     key.shadow.bias = -0.0004; key.shadow.normalBias = 0.04;
-    const accents = [[4.5, 4], [13.5, 4], [23.5, 5], [9, 13], [23.5, 13]].map(([x, z]) => {
+    const accents = [[4.5, 4], [14, 4], [23.5, 4], [4.5, 14], [23.5, 11.5]].map(([x, z]) => {
       const l = new SpotLight('#fff0dc', 30, 16, 0.85, 0.9, 1.5);
       l.position.set(x as number, 5.2, (z as number) + 1.5); l.target.position.set(x as number, 0, z as number);
       this.group.add(l.target);
@@ -265,10 +266,10 @@ export class Stage {
     };
     glow('#6f9bd6', 0.14, 12.5, 5.2, new Vector3(BOARD_X, 2.05, 0.35), false);
     glow('#5d86c4', 0.08, 11, 5, new Vector3(BOARD_X, 0.02, 3.4), true);
-    for (const [zone, x, z, w, h] of [['conversation', 4.5, 4, 8, 7], ['coordination', 13.5, 4, 10, 7], ['verification', 23.5, 13, 10, 9]] as const) {
+    for (const [zone, x, z, w, h] of [['conversation', 4.5, 4, 8, 7], ['coordination', 14, 4, 9, 7], ['verification', 23.5, 11.5, 10, 6]] as const) {
       this.pools.push({ zone, mesh: glow('#ff9d4d', 0.05, w, h, new Vector3(x, 0.02, z), true) });
     }
-    this.pools.push({ zone: 'developer', mesh: glow('#ff9d4d', 0.045, 18, 9, new Vector3(9.5, 0.02, 13), true) });
+    this.pools.push({ zone: 'developer', mesh: glow('#ff9d4d', 0.045, 9, 9, new Vector3(4.5, 0.02, 14), true) });
     this.deskGlowMat = new MeshBasicMaterial({ map: this.glowTex, color: '#6fb4e8', transparent: true, opacity: 0.1, blending: AdditiveBlending, depthWrite: false, fog: false });
     const dg = new InstancedMesh(this.glowGeo, this.deskGlowMat, CAP);
     dg.frustumCulled = false; dg.count = 0; dg.renderOrder = 1;
@@ -298,7 +299,7 @@ export class Stage {
     // with two monitors, everyone else at laptops.
     const desks: Matrix4[] = [], pcDesks: Matrix4[] = [], dualDesks: Matrix4[] = [], chairs: Matrix4[] = [], glows: Matrix4[] = [];
     for (const cell of plan.desks) {
-      const p = cellCentre(cell), zone = zoneAt(cell);
+      const p = deskCentre(cell), zone = zoneAt(cell);
       (zone === 'developer' ? pcDesks : zone === 'verification' ? dualDesks : desks).push(m4(p.x, 0, p.z)); chairs.push(m4(p.x, 0, p.z));
       glows.push(new Matrix4().compose(new Vector3(p.x, 0.03, p.z + 0.1), new Quaternion().setFromEuler(new Euler(-Math.PI / 2, 0, 0)), new Vector3(1.9, 1.3, 1)));
     }

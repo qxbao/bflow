@@ -13,7 +13,7 @@ import { AGENT_ZOOM, CameraIntent, CameraMove, FOV, NO_INSET, withInset, type In
 import { Character, MarkKit } from './characters';
 import { FpsGovernor, initialTier, settingsFor, type QualitySettings } from './quality';
 import { BACKGROUND, HEMI_HIGH, HEMI_LOW, Stage, setShadowCasting } from './stage';
-import { FOCUS_POINTS, OBJECT_CELLS, OFFICE_ASSET_PATHS, QUEUE_BOARD, WORLD, cellCentre, contentBox, deskPlan, seatCell, zoneTitles, type Vec2 } from './world';
+import { FOCUS_POINTS, OBJECT_CELLS, OFFICE_ASSET_PATHS, QUEUE_BOARD, WORLD, cellCentre, contentBox, deskCentre, deskPlan, seatCell, zoneTitles, type Vec2 } from './world';
 
 export interface OfficeRenderer {
   /** Returns the handoff ids of the walk cues it accepted; cues dropped (paused, destroyed) are not returned, so the caller may offer them again. */
@@ -238,7 +238,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       if (!g) { g = kit.build(mark.mark as HandoffMark); marks.set(id, g); scene.add(g); }
       const slot = `${cell.gx},${cell.gy}`, n = stacked.get(slot) ?? 0;
       stacked.set(slot, n + 1);
-      const p = cellCentre(cell);
+      const p = deskCentre(cell);
       g.position.set(p.x - 0.5 + n * 0.55, 2.45, p.z - 0.62);
     }
     for (const [id, g] of marks) if (!keep.has(id)) { g.removeFromParent(); marks.delete(id); }

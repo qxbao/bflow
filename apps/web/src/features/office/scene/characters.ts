@@ -14,6 +14,13 @@ export const ROLE_COLORS: Readonly<Record<string, string>> = {
 };
 /** Roles dressed in a suit and tie (the `suit` child of the torso replaces the `hoodie`), with the suit cloth colour. */
 const SUITS: Readonly<Record<string, string>> = { conversation: '#2c3a55' };
+/** Roles in a sleeveless top (the `tank` child of the torso and the `bare_<k>` arms replace the `hoodie` and `sleeve_<k>`). */
+const TANKS: ReadonlySet<string> = new Set(['developer']);
+/** Hair style per role (a `hair_*` child of the head); everyone else wears `hair_short`. `hair_long` comes with the `face_f` details. */
+const HAIR_STYLES: Readonly<Record<string, string>> = { qa: 'hair_spiky', reviewer: 'hair_long' };
+/** Hair colour per role, replacing the dark default of the `hair` material. */
+const HAIR_COLORS: Readonly<Record<string, string>> = { reviewer: '#b8382b' };
+const HAIR_NAMES = ['hair_short', 'hair_spiky', 'hair_long'] as const;
 const FADE = 0.18;
 const hashOf = (id: string): number => { let h = 2166136261; for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 16777619); return (h >>> 0) / 4294967296; };
 const shortest = (from: number, to: number): number => { let d = (to - from) % (Math.PI * 2); if (d > Math.PI) d -= Math.PI * 2; if (d < -Math.PI) d += Math.PI * 2; return d; };
@@ -36,14 +43,18 @@ export class Character {
   constructor(template: Object3D, private readonly clips: readonly AnimationClip[], readonly instanceId: string, role: string, proxyGeometry: BoxGeometry, proxyMaterial: MeshBasicMaterial, pick: Record<string, unknown> = { instanceId }) {
     const body = template.clone(true);
     const suit = SUITS[role], outfit = suit ?? ROLE_COLORS[role] ?? ROLE_COLORS['developer'];
-    const hoodie = body.getObjectByName('hoodie'), jacket = body.getObjectByName('suit');
-    if (hoodie) hoodie.visible = suit === undefined;
-    if (jacket) jacket.visible = suit !== undefined;
+    const tank = suit === undefined && TANKS.has(role), style = HAIR_STYLES[role] ?? 'hair_short', hairColor = HAIR_COLORS[role];
+    const show = (name: string, visible: boolean): void => { const o = body.getObjectByName(name); if (o) o.visible = visible; };
+    show('hoodie', suit === undefined && !tank); show('suit', suit !== undefined); show('tank', tank);
+    for (const k of ['l', 'r']) { show(`sleeve_${k}`, !tank); show(`bare_${k}`, tank); }
+    for (const name of HAIR_NAMES) show(name, name === style);
+    show('face_f', style === 'hair_long');
     // Own materials per character, so alpha and the role colour never leak to another one; the templates stay untouched.
     body.traverse(o => {
       if (!(o instanceof Mesh)) return;
       const m = (o.material as MeshStandardMaterial).clone();
       if (m.name === 'outfit') { m.color = new Color(outfit); m.emissive = m.color.clone(); m.emissiveIntensity = suit ? 0.12 : 0.22; }
+      if (m.name === 'hair' && hairColor) m.color = new Color(hairColor);
       o.material = m; o.castShadow = true; o.receiveShadow = false;
       this.mats.push(m);
     });

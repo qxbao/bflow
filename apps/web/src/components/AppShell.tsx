@@ -6,7 +6,7 @@ import { FieldHelp } from './FieldHelp';
 /** `dockPx` is the height of the HUD's bottom block; on phones the panel stops above it so the operations dock is never covered. */
 export type VisualShell={panelOpen:boolean;closable:boolean;immersive?:boolean;dockPx:number;onClose:()=>void;onOverview:()=>void;inspectorRef:(element:HTMLElement|null)=>void;hudRef:(element:HTMLElement|null)=>void;stageRef:(element:HTMLElement|null)=>void};
 export function isEscapeDismissal(event: Pick<KeyboardEvent, 'key' | 'defaultPrevented' | 'isComposing'>): boolean { return event.key==='Escape'&&!event.defaultPrevented&&!event.isComposing; }
-export function AppShell({projects,projectId,visual,children}:{projects:WebProject[];projectId?:string;visual?:VisualShell|undefined;children:ReactNode}) {
+export function AppShell({projects,projectId,visual,modeSwitch,children}:{projects:WebProject[];projectId?:string;visual?:VisualShell|undefined;modeSwitch?:ReactNode;children:ReactNode}) {
   const navigate=useNavigate(), location=useLocation(), main=useRef<HTMLElement>(null);
   const [menuOpen,setMenuOpen]=useState(false);
   const menuButton=useRef<HTMLButtonElement>(null),menu=useRef<HTMLElement>(null);
@@ -18,7 +18,9 @@ export function AppShell({projects,projectId,visual,children}:{projects:WebProje
   function toggleMenu(){if(menuOpen && menu.current?.contains(document.activeElement))menuButton.current?.focus();setMenuOpen(value=>!value);}
   return <div className={visual?`workspace-shell office-3d min-h-dvh ${visual.panelOpen?'office-panel-open':''} ${visual.immersive?'office-immersive':''}`:'workspace-shell min-h-dvh'} style={visual?{'--hud-h':`${visual.dockPx}px`} as CSSProperties:undefined}>
     <a className="sr-only absolute z-30 bg-surface p-3 focus:not-sr-only focus:top-2 focus:left-3" href={visual?'#office-hud':'#main'}>Bỏ qua điều hướng</a>
-    <header className={`${visual?'hidden ':'flex '}min-h-14 items-center justify-between gap-3 border-b border-line px-4 sm:px-6`}>
+    {/* Web mode: the Web | 3D pill sits where the 3D HUD puts it (16px from the top-right corner), so switching never moves it. */}
+    {modeSwitch && <div className="absolute top-4 right-4 z-40">{modeSwitch}</div>}
+    <header className={`${visual?'hidden ':'flex '}min-h-14 items-center justify-between gap-3 border-b border-line px-4 sm:px-6 ${modeSwitch?'pr-32 sm:pr-36':''}`}>
       <Link className="shrink-0 font-display text-xl font-extrabold tracking-[.2em] text-ink no-underline hover:no-underline" to="/">B<span className="text-accent">FLOW</span></Link>
       <span className="hidden min-w-0 font-data text-xs text-muted sm:block">Không gian làm việc <span aria-hidden="true">/</span> {project?.displayName??'Quản lý dự án'}</span>
       <button className="lg:hidden" ref={menuButton} aria-controls="workspace-navigation" aria-expanded={menuOpen} onClick={toggleMenu}>{menuOpen?'Đóng điều hướng':'Điều hướng'}</button>
