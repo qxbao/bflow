@@ -199,18 +199,19 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const syncActors = (): void => {
     const keep = new Set<string>();
     const animate = !reduced();
-    for (const view of choreo.views()) {
+    // Staff of unoccupied desks are drawn like agents but carry no pick data and are never picked or labelled.
+    for (const view of [...choreo.views(), ...choreo.ambientViews()]) {
       keep.add(view.instanceId);
       let c = characters.get(view.instanceId);
       if (!c) {
-        c = new Character(lease.models.character.scene, lease.models.character.animations, view.instanceId, view.role, proxyGeometry, proxyMaterial);
+        c = new Character(lease.models.character.scene, lease.models.character.animations, view.instanceId, view.role, proxyGeometry, proxyMaterial, view.ambient ? {} : { instanceId: view.instanceId });
         characters.set(view.instanceId, c);
         scene.add(c.root);
-        picks.push(c.proxy);
+        if (!view.ambient) picks.push(c.proxy);
       }
-      c.set(view, alphaFor(view.certainty, view.pose), animate);
+      c.set(view, view.ambient ? 1 : alphaFor(view.certainty, view.pose), animate);
     }
-    for (const [id, c] of characters) if (!keep.has(id)) { picks.splice(picks.indexOf(c.proxy), 1); c.dispose(); characters.delete(id); }
+    for (const [id, c] of characters) if (!keep.has(id)) { const at = picks.indexOf(c.proxy); if (at >= 0) picks.splice(at, 1); c.dispose(); characters.delete(id); }
   };
   /** Presence alone decides the figure (host heartbeat, never Herdr done): absent is an empty desk, unknown a ghost. */
   const syncDirector = (model: OfficeModel): void => {
@@ -224,7 +225,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       director = new Character(lease.models.character.scene, lease.models.character.animations, 'director-desk', 'conversation', proxyGeometry, proxyMaterial, { director: true });
       scene.add(director.root); picks.push(director.proxy);
     }
-    director.set({ instanceId: 'director-desk', role: 'conversation', certainty: d.certainty, pose: d.presence === 'unknown' ? 'ghost' : 'preparing', clip: look.clip, point: directorPoint, heading: SEATED_HEADING, walking: false, carrying: false }, look.alpha, !reduced());
+    director.set({ instanceId: 'director-desk', role: 'conversation', certainty: d.certainty, pose: d.presence === 'unknown' ? 'ghost' : 'preparing', clip: look.clip, point: directorPoint, heading: SEATED_HEADING, walking: false, carrying: false, ambient: false, lounging: false, lift: 0 }, look.alpha, !reduced());
   };
   // Desk indicators come from handoff state alone, so they are redrawn on every apply (a first snapshot carries no cues).
   const syncMarks = (model: OfficeModel): void => {
@@ -290,8 +291,9 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       if (tagFits(tag.text) && placer.tag(tagX, tagY, tag.text.length * 6.8 + 12, 18, far)) slot(n++, tag.id, 'agent', tag.text);
       const extra = poseLabel(a.pose);
       if (extra === 'bubble') { boxTag[boxCount] = tag; boxX[boxCount] = tagX; boxY[boxCount] = tagY - 22; boxText[boxCount] = excerpts.get(a.instanceId) ?? a.statusText; boxCount++; }
-      // The z letters rise from just over the (slumped) head, below the name tag, so they read as belonging to the sleeper.
-      else if (extra === 'sleep' && project(view.point.x, SLEEP_Y, view.point.z, v.w, v.h)) slot(n++, tag.sleepId, 'sleep', 'Zzz');
+      // The z letters rise from just over the (slumped) head, below the name tag, so they read as belonging to the sleeper. An idle agent away in the
+      // Creative Space is not asleep, so it has none.
+      else if (extra === 'sleep' && !view.lounging && project(view.point.x, SLEEP_Y, view.point.z, v.w, v.h)) slot(n++, tag.sleepId, 'sleep', 'Zzz');
     }
     // The Director desk tag (also over an empty desk) and the queue board count, Director layout only.
     const desk = lastModel?.director;

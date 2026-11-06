@@ -2,16 +2,16 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { CLIPS, Choreographer, SEAT_OFFSET_Z, WALK_LIMITS, clipFor } from '../src/features/office/scene/actors';
-import { GRID_H, GRID_W, cellCentre, deskPlan, routeBetween, seatCell } from '../src/features/office/scene/world';
+import { ACTIVITY_CLIP, CLIPS, Choreographer, SEAT_OFFSET_Z, WALK_LIMITS, clipFor, seatRole } from '../src/features/office/scene/actors';
+import { GRID_H, GRID_W, LOUNGE_SPOTS, OBJECT_CELLS, cellCentre, deskPlan, routeBetween, seatCell } from '../src/features/office/scene/world';
 import type { VisualCue } from '../src/features/office/model/timeline';
 import type { OfficeModel, OfficePose } from '../src/features/office/model/types';
 
 const model: OfficeModel = {
   tier: 'full', certainty: 'confirmed', statusText: '', pendingDecisions: 0, connection: 'connected', handoffs: [], tasks: [],
   agents: [
-    { instanceId: 'a', label: 'A', role: 'coordinator', pose: 'sleeping', certainty: 'inferred', statusText: '', seat: 'coordination:coordinator' },
-    { instanceId: 'b', label: 'B', role: 'developer', pose: 'sleeping', certainty: 'inferred', statusText: '', seat: 'developer:1' },
+    { instanceId: 'a', label: 'A', role: 'coordinator', pose: 'working', certainty: 'confirmed', statusText: '', seat: 'coordination:coordinator' },
+    { instanceId: 'b', label: 'B', role: 'developer', pose: 'working', certainty: 'confirmed', statusText: '', seat: 'developer:1' },
   ],
 };
 const walk = (id: string): VisualCue => ({ kind: 'walk', handoffId: id, actor: 'a', from: { kind: 'instance', instanceId: 'a' }, to: { kind: 'instance', instanceId: 'b' } });
@@ -27,7 +27,7 @@ const readGlb = (file: string): Glb => {
 };
 
 describe('models', () => {
-  test('character.glb has the rig nodes, the role-colour material and exactly the nine clips, and no embedded images', () => {
+  test('character.glb has the rig nodes, the role-colour material and exactly the twelve clips, and no embedded images', () => {
     const glb = readGlb('character.glb');
     const names = glb.nodes.map(n => n.name);
     for (const n of ['character', 'hips', 'torso', 'head', 'arm_l', 'arm_r', 'thigh_l', 'thigh_r', 'shin_l', 'shin_r', 'paper', 'hoodie', 'suit']) expect(names).toContain(n);
@@ -42,7 +42,7 @@ describe('models', () => {
   test('furniture.glb carries every node the scene instantiates and no images', () => {
     const glb = readGlb('furniture.glb');
     const names = glb.nodes.map(n => n.name);
-    for (const n of ['floor_tile', 'wall', 'wall_led', 'spot', 'trim_bar', 'desk', 'chair', 'counter', 'exec_chair', 'board', 'server', 'cabinet', 'mailbox', 'settings', 'door', 'plant']) expect(names).toContain(n);
+    for (const n of ['floor_tile', 'wall', 'wall_led', 'spot', 'trim_bar', 'desk', 'chair', 'chair_black', 'stool_red', 'counter', 'exec_chair', 'board', 'server', 'cabinet', 'mailbox', 'settings', 'door', 'plant']) expect(names).toContain(n);
     expect(glb.images ?? []).toEqual([]);
   });
 });
@@ -88,7 +88,7 @@ describe('Choreographer', () => {
     const done = c.views().find(v => v.instanceId === 'a')!;
     expect(done.walking).toBe(false);
     expect(done.point).toEqual(home);
-    expect(done.clip).toBe('sleep');
+    expect(done.clip).toBe('type');
     expect(done.heading).toBe(0);
   });
   test('pause drops the backlog and walkers, and nothing replays', () => {
@@ -139,4 +139,90 @@ describe('Choreographer', () => {
     c.apply({ ...model, agents: model.agents.map(a => ({ ...a, pose: 'hand_raised' })) }, []);
     expect(c.views().every(v => v.clip === 'raise_hand')).toBe(true);
   });
+});
+
+describe('full staff and the Creative Space', () => {
+  const idle = (m: OfficeModel, id: string): OfficeModel => ({ ...m, agents: m.agents.map(a => (a.instanceId === id ? { ...a, pose: 'sleeping' } : a)) });
+  const at = (c: Choreographer, id: string) => [...c.views(), ...c.ambientViews()].find(v => v.instanceId === id)!;
+  test('every drawn desk has one figure: its agent or an anonymous staff member, who is never an agent view', () => {
+    const c = new Choreographer();
+    c.apply(model, []);
+    const plan = deskPlan(model.agents.map(a => a.seat!));
+    expect(c.views().map(v => v.instanceId)).toEqual(['a', 'b']);
+    const staff = c.ambientViews();
+    expect(staff.map(v => v.instanceId).sort()).toEqual(plan.seats.filter(s => !model.agents.some(a => a.seat === s)).map(s => `staff:${s}`).sort());
+    expect(staff.every(v => v.ambient && v.lounging)).toBe(true);
+    expect(staff.find(v => v.instanceId === 'staff:verification:qa')!.role).toBe('qa');
+    expect(seatRole('developer:7')).toBe('developer');
+    expect(seatRole('coordination:planner:2')).toBe('planner');
+  });
+  test('without a running session there is no staff', () => {
+    const c = new Choreographer();
+    c.apply({ ...model, tier: 'closed', agents: [] }, []);
+    expect(c.ambientViews()).toHaveLength(0);
+  });
+  test('staff fill the leisure spots in order, each with its activity', () => {
+    const c = new Choreographer();
+    c.apply({ ...model, agents: [] }, []);
+    const staff = c.ambientViews(), n = deskPlan([]).desks.length;
+    expect(staff).toHaveLength(n);
+    const used = LOUNGE_SPOTS.slice(0, n);
+    for (const s of used) {
+      const v = staff.find(q => q.point.x === s.x && q.point.z === s.z);
+      expect(v, `${s.x},${s.z}`).toBeDefined();
+      expect(v!.clip).toBe(ACTIVITY_CLIP[s.activity]);
+      expect(v!.heading).toBe(s.heading);
+      expect(v!.lift).toBe(s.lift);
+    }
+  });
+  test('an idle agent walks to the Creative Space and back to its desk when it gets work; spots of the others stay put', () => {
+    const c = new Choreographer();
+    c.apply(model, []);
+    const staffBefore = new Map(c.ambientViews().map(v => [v.instanceId, v.point]));
+    const desk = at(c, 'b').point;
+    c.apply(idle(model, 'b'), []);
+    expect(at(c, 'b').walking).toBe(true);
+    expect(c.tick(16).moving).toBe(true);
+    for (let i = 0; i < 400 && c.tick(50).moving; i++);
+    const away = at(c, 'b');
+    expect(away.walking).toBe(false);
+    expect(away.lounging).toBe(true);
+    expect(LOUNGE_SPOTS.some(s => s.x === away.point.x && s.z === away.point.z)).toBe(true);
+    for (const v of c.ambientViews()) expect(v.point).toEqual(staffBefore.get(v.instanceId));
+    c.apply(model, []);
+    for (let i = 0; i < 400 && c.tick(50).moving; i++);
+    expect(at(c, 'b').point).toEqual(desk);
+    expect(at(c, 'b').clip).toBe('type');
+  });
+  test('a figure that appears idle is placed at once; under reduced motion nothing walks', () => {
+    const c = new Choreographer(false);
+    c.apply(idle(model, 'b'), []);
+    expect(at(c, 'b').lounging).toBe(true);
+    expect(at(c, 'b').walking).toBe(false);
+    c.apply(model, []);
+    expect(at(c, 'b').walking).toBe(false);
+    expect(at(c, 'b').lounging).toBe(false);
+  });
+  test('a staff member takes no handoff endpoint, and an idle agent drops its walk cues', () => {
+    const c = new Choreographer();
+    c.apply({ ...model, agents: [model.agents[0]!] }, []);
+    // No developer or QA agent: the endpoint falls back to the server, never to a staff member's desk.
+    expect(c.cellFor({ kind: 'role', role: 'developer' })).toEqual(OBJECT_CELLS.server);
+    expect(c.cellFor({ kind: 'role', role: 'qa' })).toEqual(OBJECT_CELLS.server);
+    const lazy = new Choreographer(false);
+    lazy.apply(idle(model, 'a'), [walk('h1')]);
+    expect(lazy.busy()).toBe(false);
+  });
+  test('with every desk drawn and every agent idle, everyone gets a leisure spot', () => {
+    const seats = [...Array.from({ length: 20 }, (_, i) => `developer:${i + 1}`), 'coordination:planner', 'coordination:architect', 'coordination:specifier', 'coordination:coordinator',
+      'verification:reviewer', 'verification:qa', 'verification:tester', 'verification:security', 'coordination:planner:2', 'coordination:specifier:2', 'verification:reviewer:2', 'verification:qa:2'];
+    expect(deskPlan(seats).desks.length).toBeLessThanOrEqual(LOUNGE_SPOTS.length);
+    const agents = seats.slice(0, 20).map((seat, i) => ({ instanceId: `x${i}`, label: '', role: seatRole(seat) as OfficeModel['agents'][number]['role'], pose: 'sleeping' as const, certainty: 'confirmed' as const, statusText: '', seat }));
+    const c = new Choreographer(false);
+    c.apply({ ...model, agents: [...agents, ...seats.slice(20).map((seat, i) => ({ ...agents[0]!, instanceId: `y${i}`, role: seatRole(seat) as OfficeModel['agents'][number]['role'], seat }))] }, []);
+    expect(c.views().every(v => v.lounging)).toBe(true);
+    expect(c.views()).toHaveLength(seats.length);
+    expect(c.ambientViews()).toHaveLength(0);
+  });
+
 });

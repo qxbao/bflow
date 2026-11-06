@@ -174,14 +174,14 @@ describe('layout', () => {
     expect(deskPlan([]).desks.filter(c => c.gy >= 10 && c.gx <= 8)).toHaveLength(16);
     expect(deskPlan(['developer:13']).desks.filter(c => c.gy >= 10 && c.gx <= 8)).toHaveLength(20);
   });
-  test('developer desks stand in four evenly spaced north-south lines in the west half; the east half is the empty spare room', () => {
+  test('developer desks stand in four evenly spaced north-south lines in the west half; the east half is the Creative Space', () => {
     const cells = DEVELOPER_SEATS.map(s => seatCell(s)!), cols = [...new Set(cells.map(c => c.gx))].sort((a, b) => a - b);
     expect(cols).toEqual([1, 3, 5, 7]);
     for (const gx of cols) expect(cols).toContain(8 - gx);
     // The first seats of a row are the two centre lines.
     expect([1, 2].map(n => seatCell(`developer:${n}`)!.gx).sort()).toEqual([3, 5]);
     for (const c of cells) expect(zoneAt(c)).toBe('developer');
-    for (let gy = 9; gy <= 18; gy++) for (let gx = 10; gx <= 17; gx++) expect(zoneAt({ gx, gy })).toBe('spare');
+    for (let gy = 9; gy <= 18; gy++) for (let gx = 10; gx <= 17; gx++) expect(zoneAt({ gx, gy })).toBe('creative');
     expect(deskPlan(DEVELOPER_SEATS).desks.some(c => c.gy >= 9 && c.gx >= 9 && c.gx <= 17)).toBe(false);
   });
   test('rooms follow the reference layout: back row above the front row, QA/Reviewer at the right', () => {
@@ -234,7 +234,7 @@ describe('layout', () => {
     expect(homeCamera(few)).toMatchObject({ x: few.cx, z: few.cz });
     const far = clampCamera({ x: 0, z: 99, zoom: 2 }, few);
     expect(far.z).toBeLessThanOrEqual(few.cz + (few.d / 2 + 1.5));
-    expect(ZONE_TITLES.map(z => z.text)).toEqual(['Conversation', 'Coordinator', 'Task Board', 'Developer Zone', 'QA / Reviewer']);
+    expect(ZONE_TITLES.map(z => z.text)).toEqual(['Conversation', 'Coordinator', 'Task Board', 'Developer Zone', 'QA / Reviewer', 'Creative Space', 'Swimming Pool']);
   });
   test('objects, desks and plants do not collide and stay inside the world', () => {
     const everyDesk = deskPlan([...Array.from({ length: 20 }, (_, i) => `developer:${i + 1}`), 'verification:reviewer:2', 'verification:qa:2', 'coordination:planner:2', 'coordination:specifier:2', 'conversation:conversation:2', 'conversation:conversation:3']).desks;
