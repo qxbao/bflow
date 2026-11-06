@@ -1,11 +1,12 @@
-// Actor choreography (§5.2, §5.7). A plain state machine: no three.js, no clock, no randomness, so jsdom can test it.
-// Poses come only from the OfficeModel. Motion is a walk cue for a handoff that has a receipt, or the walk between a desk and the Creative Space when
-// an agent starts or stops being idle. No wandering, and no success animation: a finished turn has no clip of its own.
+// Actor choreography (§5.2, §5.7). A plain state machine: no three.js, no clock, and randomness only from an injected source, so jsdom can test it.
+// Poses come only from the OfficeModel. Motion is a walk cue for a handoff that has a receipt, the walk between a desk and a leisure spot when an
+// agent starts or stops being idle, and the walk from one leisure spot to another. No success animation: a finished turn has no clip of its own.
 // Every drawn desk has one figure: its agent, or an anonymous staff member (ambient decoration, never an agent, never picked or labelled). Whoever
-// is not working (an idle agent, every staff member) spends the time at a leisure spot of the Creative Space, then the pool.
+// is not working (an idle agent, every staff member) spends the time at random leisure spots of the Creative Space and the pool. A bartender (also
+// ambient) always works behind the bar while a session runs, walking between its service points.
 import { dropBacklog, enqueue, type VisualCue, type VisualEndpoint, type VisualLimits } from '../model/timeline';
 import type { OfficeAgent, OfficeDirectorPresence, OfficeModel, OfficePose } from '../model/types';
-import { LOUNGE_SPOTS, OBJECT_CELLS, cellCentre, deskCentre, deskPlan, roomShift, routeBetween, seatCell, type Cell, type LoungeActivity, type Vec2 } from './world';
+import { BAR_POINTS, LOUNGE_SPOTS, OBJECT_CELLS, cellCentre, deskCentre, deskPlan, roomShift, routeBetween, seatCell, type Cell, type LoungeActivity, type Vec2 } from './world';
 
 export type Clip = 'sleep' | 'idle' | 'type' | 'type_fast' | 'walk' | 'carry' | 'raise_hand' | 'blocked' | 'ghost' | 'stand' | 'play' | 'swim';
 /** Clip names of character.glb (office-actors.test compares them with the file). */
@@ -14,6 +15,12 @@ export const CLIPS: readonly Clip[] = ['sleep', 'idle', 'type', 'type_fast', 'wa
 export const ACTIVITY_CLIP: Readonly<Record<LoungeActivity, Clip>> = { stand: 'stand', play: 'play', perch: 'idle', swim: 'swim' };
 /** Pace of the walk between a desk and a leisure spot, and its bounds. */
 export const COMMUTE = { msPerCell: 260, minMs: 800, maxMs: 5000 } as const;
+/** How long a figure stays at a leisure spot before it moves on to another free one (random within these bounds). */
+export const STAY = { minMs: 20000, maxMs: 50000 } as const;
+/** How long the bartender stays at a service point, and the pace of its walk along the bar. */
+export const BAR_STAY = { minMs: 4000, maxMs: 10000, msPerUnit: 700 } as const;
+/** Scene key of the bartender figure. */
+export const BARTENDER_ID = 'staff:bartender';
 /** An agent with nothing to do: it leaves its desk for the Creative Space. Uncertain or lost agents stay at the desk, where their state shows. */
 export const isIdle = (pose: OfficePose): boolean => pose === 'sleeping';
 /** Role drawn for a staff member of a desk: the role of the seat (`developer:3`, `coordination:planner`, `verification:qa:2`). */
@@ -78,7 +85,9 @@ export interface ActorView {
 interface Trip { cells: Cell[]; elapsed: number }
 /** A one-way walk along world points (desk to leisure spot or back). */
 interface Commute { points: Vec2[]; elapsed: number; duration: number }
-interface Actor { instanceId: string; role: string; certainty: OfficeAgent['certainty']; pose: OfficePose; home: Cell; ambient: boolean; spot?: number; trip?: Trip; commute?: Commute; key: string }
+/** The bartender: the service point it is at (or walking to), whether it leans over the counter to serve there, and the time left there. */
+interface Bartender { at: number; serving: boolean; stay: number; commute?: Commute; key: string }
+interface Actor { instanceId: string; role: string; certainty: OfficeAgent['certainty']; pose: OfficePose; home: Cell; ambient: boolean; spot?: number; stay?: number; trip?: Trip; commute?: Commute; key: string }
 
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
 const SEATED_AT = (c: Cell): Vec2 => { const p = deskCentre(c); return { x: p.x, z: p.z + SEAT_OFFSET_Z }; };
@@ -91,8 +100,13 @@ export class Choreographer {
   private readonly animateClips: boolean;
   /** Cell of the Director desk while the model has one. */
   private directorDesk: Cell | undefined;
-  /** `animateClips` false (reduced motion) leaves every clip frozen on its first pose, so nothing is busy at idle. */
-  constructor(animateClips = true) { this.animateClips = animateClips; }
+  private readonly random: () => number;
+  private bartender: Bartender | undefined;
+  /**
+   * `animateClips` false (reduced motion) leaves every clip frozen on its first pose and every figure at its first spot, so nothing is busy at idle.
+   * `random` (0 <= n < 1) picks the leisure spots and how long a figure stays at one.
+   */
+  constructor(animateClips = true, random: () => number = Math.random) { this.animateClips = animateClips; this.random = random; }
 
   /** Poses and seats always follow the model at once. Only walk cues are queued, and only when the caller allows motion. */
   apply(model: OfficeModel, cues: readonly VisualCue[]): string[] {
@@ -123,6 +137,8 @@ export class Choreographer {
       lounge.push(id);
     });
     for (const id of this.actors.keys()) if (!seen.has(id)) this.actors.delete(id);
+    if (model.tier === 'closed') this.bartender = undefined;
+    else this.bartender ??= { at: Math.floor(this.random() * BAR_POINTS.length) % BAR_POINTS.length, serving: true, stay: this.barStay(), key: '' };
     this.placeLoungers(lounge, fresh);
     // A cue for an actor that left the model, or that is away from its desk, can never play: purge it so it cannot start later or hold budget.
     this.queue = this.queue.filter(c => c.kind !== 'walk' || (this.actors.has(c.actor) && this.actors.get(c.actor)?.spot === undefined));
@@ -133,9 +149,9 @@ export class Choreographer {
   }
 
   /**
-   * Leisure spots are sticky: a figure keeps its spot while it stays idle, and a newly idle one takes the lowest free spot (fill order keeps the
-   * rooms balanced). There are more spots than desks; should they ever run out, a staff member without a spot is not drawn and an agent without one
-   * stays at its desk. Figures that change between desk and spot walk there unless they just appeared.
+   * A newly idle figure takes a random free spot and keeps it across applies; `tick` moves it on to another one after its stay. There are more spots
+   * than desks; should they ever run out, a staff member without a spot is not drawn and an agent without one stays at its desk. Figures that change
+   * between desk and spot walk there unless they just appeared.
    */
   private placeLoungers(lounge: readonly string[], fresh: ReadonlySet<string>): void {
     const wanted = new Set(lounge), used = new Map<number, Actor>();
@@ -147,24 +163,68 @@ export class Choreographer {
     for (const id of lounge) {
       const actor = this.actors.get(id);
       if (!actor || actor.spot !== undefined) continue;
-      const free = LOUNGE_SPOTS.findIndex((_, i) => !used.has(i));
-      if (free < 0) { if (actor.ambient) this.actors.delete(id); continue; }
+      const free = this.freeSpot(used);
+      if (free === undefined) { if (actor.ambient) this.actors.delete(id); continue; }
       used.set(free, actor);
       this.moveTo(actor, free, fresh.has(id));
     }
   }
 
+  private barStay(): number { return BAR_STAY.minMs + this.random() * (BAR_STAY.maxMs - BAR_STAY.minMs); }
+
+  /** The bartender walks on to another service point after its stay there; it serves at some stops and just waits at others. */
+  private tickBartender(dtMs: number): boolean {
+    const b = this.bartender;
+    if (!b || !this.animateClips) return false;
+    if (b.commute) {
+      b.commute.elapsed += dtMs;
+      if (b.commute.elapsed < b.commute.duration) return true;
+      delete b.commute;
+      return false;
+    }
+    b.stay -= dtMs;
+    if (b.stay > 0) return false;
+    const from = BAR_POINTS[b.at] as Vec2;
+    b.at = (b.at + 1 + Math.floor(this.random() * (BAR_POINTS.length - 1))) % BAR_POINTS.length;
+    const to = BAR_POINTS[b.at] as Vec2;
+    b.serving = this.random() < 0.6; b.stay = this.barStay();
+    b.commute = { points: [from, to], elapsed: 0, duration: Math.max(COMMUTE.minMs, Math.abs(to.x - from.x) * BAR_STAY.msPerUnit) };
+    return true;
+  }
+
+  /** The bartender behind the bar while a session runs: drawn, never picked or labelled. */
+  bartenderView(): ActorView | undefined {
+    const b = this.bartender;
+    if (!b) return undefined;
+    const base = { instanceId: BARTENDER_ID, role: 'bartender', certainty: 'confirmed' as const, pose: 'working' as const, carrying: false, ambient: true, lounging: false, lift: 0 };
+    if (b.commute) return { ...base, ...along(b.commute), clip: 'walk', walking: true };
+    return { ...base, clip: b.serving ? 'play' : 'stand', point: BAR_POINTS[b.at] as Vec2, heading: Math.PI, walking: false };
+  }
+
+  /** A random leisure spot that is not in `used`, if any is left. */
+  private freeSpot(used: { has(i: number): boolean }): number | undefined {
+    const free = LOUNGE_SPOTS.flatMap((_, i) => (used.has(i) ? [] : [i]));
+    return free.length > 0 ? free[Math.min(free.length - 1, Math.floor(this.random() * free.length))] : undefined;
+  }
+
   /** Sends an actor to a leisure spot (or back to its desk with `undefined`), walking from where it is now unless it just appeared. */
   private moveTo(actor: Actor, spot: number | undefined, appear: boolean): void {
     const from = this.viewOf(actor).point;
-    if (spot === undefined) delete actor.spot; else actor.spot = spot;
+    if (spot === undefined) { delete actor.spot; delete actor.stay; } else { actor.spot = spot; actor.stay = STAY.minMs + this.random() * (STAY.maxMs - STAY.minMs); }
     delete actor.trip; delete actor.commute;
     if (appear || !this.animateClips) return;
     const to = this.restPoint(actor);
-    const cells = routeBetween({ gx: Math.floor(from.x), gy: Math.floor(from.z) }, { gx: Math.floor(to.x), gy: Math.floor(to.z) }, this.desks);
-    if (cells.length < 2) return;
-    const duration = Math.min(COMMUTE.maxMs, Math.max(COMMUTE.minMs, cells.length * COMMUTE.msPerCell));
-    actor.commute = { points: [from, ...cells.slice(1, -1).map(cellCentre), to], elapsed: 0, duration };
+    // A spot deep in the pool has no free neighbour: the route then ends (or starts) one cell north, at the edge, and the figure wades the rest.
+    const ends = (p: Vec2): Cell[] => { const c = { gx: Math.floor(p.x), gy: Math.floor(p.z) }; return [c, { gx: c.gx, gy: c.gy - 1 }]; };
+    const starts = ends(from), stops = ends(to);
+    for (let i = 0; i < starts.length; i++) for (let j = 0; j < stops.length; j++) {
+      const cells = routeBetween(starts[i] as Cell, stops[j] as Cell, this.desks);
+      if (cells.length < 2) continue;
+      const inner = cells.map(cellCentre).slice(i === 0 ? 1 : 0, j === 0 ? -1 : undefined);
+      const duration = Math.min(COMMUTE.maxMs, Math.max(COMMUTE.minMs, cells.length * COMMUTE.msPerCell));
+      actor.commute = { points: [from, ...inner, to], elapsed: 0, duration };
+      return;
+    }
   }
 
   /** Where an actor stays when it is not walking: its leisure spot, or seated at its desk. */
@@ -175,7 +235,7 @@ export class Choreographer {
 
   /** True while a later tick can still change what is shown (a trip, a queued cue, or looping clips). Otherwise only the next apply can. */
   busy(): boolean {
-    if (this.queue.length > 0 || (this.animateClips && this.actors.size > 0)) return true;
+    if (this.queue.length > 0 || (this.animateClips && (this.actors.size > 0 || this.bartender !== undefined))) return true;
     for (const actor of this.actors.values()) if (actor.trip || actor.commute) return true;
     return false;
   }
@@ -214,7 +274,18 @@ export class Choreographer {
   tick(dtMs: number): { moving: boolean; changed: boolean } {
     if (!this.busy()) return { moving: false, changed: false };
     let moving = false;
+    const taken = new Set<number>();
+    for (const actor of this.actors.values()) if (actor.spot !== undefined) taken.add(actor.spot);
     for (const actor of this.actors.values()) {
+      // After its stay at a leisure spot, a figure walks on to another free one (never under reduced motion, where `stay` never runs out).
+      if (this.animateClips && actor.spot !== undefined && actor.stay !== undefined && !actor.commute) {
+        actor.stay -= dtMs;
+        if (actor.stay <= 0) {
+          const next = this.freeSpot(taken);
+          if (next === undefined) actor.stay = STAY.minMs;
+          else { taken.delete(actor.spot); taken.add(next); this.moveTo(actor, next, false); if (actor.commute) { moving = true; continue; } }
+        }
+      }
       if (actor.commute) {
         actor.commute.elapsed += dtMs;
         if (actor.commute.elapsed >= actor.commute.duration) delete actor.commute;
@@ -228,7 +299,13 @@ export class Choreographer {
         else moving = true;
       }
     }
+    if (this.tickBartender(dtMs)) moving = true;
     let changed = false;
+    const bar = this.bartender, view = this.bartenderView();
+    if (bar && view) {
+      const key = `${view.clip}:${Math.round(view.point.x * 20)}:${Math.round(view.point.z * 20)}`;
+      if (key !== bar.key) { bar.key = key; changed = true; }
+    }
     for (const actor of this.actors.values()) {
       const key = this.keyOf(actor);
       if (key !== actor.key) { actor.key = key; changed = true; }

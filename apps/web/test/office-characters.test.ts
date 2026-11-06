@@ -2,7 +2,7 @@ import { BoxGeometry, Group, Mesh, MeshBasicMaterial, MeshStandardMaterial } fro
 import { describe, expect, test } from 'vitest';
 import { Character } from '../src/features/office/scene/characters';
 
-const DRESS_UP = ['hoodie', 'suit', 'tank', 'tshirt', 'sleeve_l', 'sleeve_r', 'bare_l', 'bare_r', 'tsleeve_l', 'tsleeve_r', 'hair_short', 'hair_spiky', 'face_f', 'glasses', 'eye_shine', 'dress_shirt', 'pants_l', 'pants_r', 'calf_l', 'calf_r'] as const;
+const DRESS_UP = ['hoodie', 'suit', 'tank', 'tshirt', 'sleeve_l', 'sleeve_r', 'bare_l', 'bare_r', 'tsleeve_l', 'tsleeve_r', 'hair_short', 'hair_spiky', 'face_f', 'glasses', 'dress_shirt', 'vest', 'pants_l', 'pants_r', 'calf_l', 'calf_r'] as const;
 /** A stand-in rig: a torso in the `outfit` material with the dress-up children of character.glb (`hair_long` holds a mesh in the `hair` material). */
 function template(): Group {
   const root = new Group(), geo = new BoxGeometry(1, 1, 1);
@@ -37,6 +37,11 @@ describe('character outfits', () => {
       expect(outfitOf(c), role).toBe('f4f3ee');
     }
   });
+  test('the bartender wears a white business shirt under a black vest', () => {
+    const c = make('bartender');
+    expect(shown(c)).toEqual(['dress_shirt', 'hair_short', 'pants_l', 'pants_r', 'sleeve_l', 'sleeve_r', 'vest']);
+    expect(outfitOf(c)).toBe('f4f3ee');
+  });
   test('other roles keep the hoodie in their role colour', () => {
     const c = make('tester');
     expect(shown(c)).toEqual(['hair_short', 'hoodie', 'pants_l', 'pants_r', 'sleeve_l', 'sleeve_r']);
@@ -49,13 +54,13 @@ describe('character outfits', () => {
   });
   test('QA has jet-black spiky hair and the black team T-shirt with short sleeves', () => {
     const c = make('qa');
-    expect(shown(c)).toEqual(['bare_l', 'bare_r', 'eye_shine', 'hair_spiky', 'pants_l', 'pants_r', 'tshirt', 'tsleeve_l', 'tsleeve_r']);
+    expect(shown(c)).toEqual(['bare_l', 'bare_r', 'hair_spiky', 'pants_l', 'pants_r', 'tshirt', 'tsleeve_l', 'tsleeve_r']);
     expect(outfitOf(c)).toBe('1e1f24');
     expect(hairOf(c)).toBe('141417');
   });
   test('the Reviewer is a woman with long crimson hair and round glasses, in the black team T-shirt; other roles keep the dark default hair', () => {
     const c = make('reviewer');
-    expect(shown(c)).toEqual(['bare_l', 'bare_r', 'eye_shine', 'face_f', 'glasses', 'hair_long', 'pants_l', 'pants_r', 'tshirt', 'tsleeve_l', 'tsleeve_r']);
+    expect(shown(c)).toEqual(['bare_l', 'bare_r', 'face_f', 'glasses', 'hair_long', 'pants_l', 'pants_r', 'tshirt', 'tsleeve_l', 'tsleeve_r']);
     expect(outfitOf(c)).toBe('1e1f24');
     expect(hairOf(c)).toBe('8a1538');
     expect(hairOf(make('planner'))).toBe('2a1d19');

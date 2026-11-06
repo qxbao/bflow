@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { ACTIVITY_CLIP, CLIPS, Choreographer, SEAT_OFFSET_Z, WALK_LIMITS, clipFor, seatRole } from '../src/features/office/scene/actors';
-import { GRID_H, GRID_W, LOUNGE_SPOTS, OBJECT_CELLS, cellCentre, deskPlan, routeBetween, seatCell } from '../src/features/office/scene/world';
+import { ACTIVITY_CLIP, BARTENDER_ID, BAR_STAY, CLIPS, Choreographer, SEAT_OFFSET_Z, STAY, WALK_LIMITS, clipFor, seatRole } from '../src/features/office/scene/actors';
+import { BAR_POINTS, GRID_H, GRID_W, LOUNGE_SPOTS, OBJECT_CELLS, cellCentre, deskPlan, routeBetween, seatCell } from '../src/features/office/scene/world';
 import type { VisualCue } from '../src/features/office/model/timeline';
 import type { OfficeModel, OfficePose } from '../src/features/office/model/types';
 
@@ -66,12 +66,12 @@ describe('routes', () => {
 });
 
 describe('Choreographer', () => {
-  test('actors stay put without cues: no wandering', () => {
+  test('working agents stay put without cues: no wandering (only the bartender and idle figures move about)', () => {
     const c = new Choreographer();
     c.apply(model, []);
     const before = c.views().map(v => v.point);
     expect(before.map(p => p.z)).toEqual(before.map((_, i) => cellCentre(seatCell(model.agents[i]!.seat!)!).z + SEAT_OFFSET_Z));
-    for (let i = 0; i < 100; i++) expect(c.tick(100).moving).toBe(false);
+    for (let i = 0; i < 100; i++) { c.tick(100); expect(c.views().some(v => v.walking)).toBe(false); }
     expect(c.views().map(v => v.point)).toEqual(before);
   });
   test('a walk cue moves the sender and returns it home within the budget', () => {
@@ -144,6 +144,8 @@ describe('Choreographer', () => {
 describe('full staff and the Creative Space', () => {
   const idle = (m: OfficeModel, id: string): OfficeModel => ({ ...m, agents: m.agents.map(a => (a.instanceId === id ? { ...a, pose: 'sleeping' } : a)) });
   const at = (c: Choreographer, id: string) => [...c.views(), ...c.ambientViews()].find(v => v.instanceId === id)!;
+  /** A small deterministic random source (mulberry32). */
+  const seeded = (seed: number) => () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
   test('every drawn desk has one figure: its agent or an anonymous staff member, who is never an agent view', () => {
     const c = new Choreographer();
     c.apply(model, []);
@@ -156,27 +158,72 @@ describe('full staff and the Creative Space', () => {
     expect(seatRole('developer:7')).toBe('developer');
     expect(seatRole('coordination:planner:2')).toBe('planner');
   });
-  test('without a running session there is no staff', () => {
+  test('without a running session there is no staff and no bartender', () => {
     const c = new Choreographer();
     c.apply({ ...model, tier: 'closed', agents: [] }, []);
     expect(c.ambientViews()).toHaveLength(0);
+    expect(c.bartenderView()).toBeUndefined();
   });
-  test('staff fill the leisure spots in order, each with its activity', () => {
-    const c = new Choreographer();
+  test('a bartender always works behind the bar, facing the patrons, and walks between its service points', () => {
+    const c = new Choreographer(true, seeded(5));
+    c.apply(model, []);
+    const first = c.bartenderView()!;
+    expect(first).toMatchObject({ instanceId: BARTENDER_ID, role: 'bartender', ambient: true, walking: false, heading: Math.PI });
+    expect(BAR_POINTS).toContainEqual(first.point);
+    expect(['play', 'stand']).toContain(first.clip);
+    expect(c.tick(BAR_STAY.maxMs).moving).toBe(true);
+    expect(c.bartenderView()!.walking).toBe(true);
+    for (let i = 0; i < 400 && c.bartenderView()!.walking; i++) c.tick(50);
+    const next = c.bartenderView()!;
+    expect(BAR_POINTS).toContainEqual(next.point);
+    expect(next.point).not.toEqual(first.point);
+    // Under reduced motion it stays at its first service point.
+    const still = new Choreographer(false, seeded(5));
+    still.apply(model, []);
+    const placed = still.bartenderView()!.point;
+    still.tick(BAR_STAY.maxMs * 3);
+    expect(still.bartenderView()!.point).toEqual(placed);
+    expect(still.busy()).toBe(false);
+  });
+  test('staff take random, distinct leisure spots, each with its activity; the pool is among them', () => {
+    const c = new Choreographer(true, seeded(7));
     c.apply({ ...model, agents: [] }, []);
     const staff = c.ambientViews(), n = deskPlan([]).desks.length;
     expect(staff).toHaveLength(n);
-    const used = LOUNGE_SPOTS.slice(0, n);
-    for (const s of used) {
-      const v = staff.find(q => q.point.x === s.x && q.point.z === s.z);
-      expect(v, `${s.x},${s.z}`).toBeDefined();
-      expect(v!.clip).toBe(ACTIVITY_CLIP[s.activity]);
-      expect(v!.heading).toBe(s.heading);
-      expect(v!.lift).toBe(s.lift);
+    expect(new Set(staff.map(v => `${v.point.x},${v.point.z}`)).size).toBe(n);
+    for (const v of staff) {
+      const s = LOUNGE_SPOTS.find(q => q.x === v.point.x && q.z === v.point.z);
+      expect(s, `${v.point.x},${v.point.z}`).toBeDefined();
+      expect(v.clip).toBe(ACTIVITY_CLIP[s!.activity]);
+      expect(v.heading).toBe(s!.heading);
+      expect(v.lift).toBe(s!.lift);
     }
+    // The last free spot is taken whatever the random source says, and a source that always picks the end of the list sends figures swimming.
+    const pool = new Choreographer(true, () => 0.999999);
+    pool.apply({ ...model, agents: [] }, []);
+    expect(pool.ambientViews().some(v => v.clip === 'swim')).toBe(true);
   });
-  test('an idle agent walks to the Creative Space and back to its desk when it gets work; spots of the others stay put', () => {
-    const c = new Choreographer();
+  test('after its stay a lounging figure walks on to another free spot; under reduced motion it stays put', () => {
+    const c = new Choreographer(true, seeded(3));
+    c.apply(idle(model, 'b'), []);
+    for (let i = 0; i < 400 && c.tick(50).moving; i++);
+    const first = at(c, 'b').point;
+    c.tick(STAY.maxMs);
+    expect(at(c, 'b').walking).toBe(true);
+    for (let i = 0; i < 400 && at(c, 'b').walking; i++) c.tick(50);
+    const next = at(c, 'b').point;
+    expect(next).not.toEqual(first);
+    expect(LOUNGE_SPOTS.some(s => s.x === next.x && s.z === next.z)).toBe(true);
+    const spots = [...c.views(), ...c.ambientViews()].filter(v => !v.walking).map(v => `${v.point.x},${v.point.z}`);
+    expect(new Set(spots).size).toBe(spots.length);
+    const still = new Choreographer(false, seeded(3));
+    still.apply(idle(model, 'b'), []);
+    const placed = at(still, 'b').point;
+    still.tick(STAY.maxMs * 2);
+    expect(at(still, 'b').point).toEqual(placed);
+  });
+  test('an idle agent walks to a leisure spot and back to its desk when it gets work; spots of the others stay put', () => {
+    const c = new Choreographer(true, seeded(1));
     c.apply(model, []);
     const staffBefore = new Map(c.ambientViews().map(v => [v.instanceId, v.point]));
     const desk = at(c, 'b').point;

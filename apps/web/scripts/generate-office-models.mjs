@@ -224,7 +224,7 @@ const mats = g => {
   g.material('lapel', '#1b2436', { rough: 0.5 });
   g.material('lips', '#d4677a', { rough: 0.5 });
   g.material('frame', '#141416', { rough: 0.35 });
-  g.material('shine', '#ffffff', { rough: 0.2, emissive: '#9a9a9a' });
+  g.material('vest', '#18191d', { rough: 0.55 });
   g.material('logo', '#f2c230', { rough: 0.4, emissive: '#3a2a04' });
 };
 
@@ -285,11 +285,6 @@ function character() {
       { g: place(box(0.03, 0.008, 0.008, 0), { t: [0, 0.165, 0.236] }), m: 'frame' },
       ...[-1, 1].map(x => ({ g: place(box(0.007, 0.007, 0.2, 0), { t: [x * 0.18, 0.16, 0.13], r: [0, x * 18, 0] }), m: 'frame' })),
     ] },
-    // Catch lights in the eyes of the reference look (a large and a small white dot per eye).
-    { name: 'eye_shine', parts: [-1, 1].flatMap(x => [
-      { g: place(ball(0.013, 0.015, 0.008, 8, 6), { t: [x * 0.085 + 0.012, 0.168, 0.222] }), m: 'shine' },
-      { g: place(ball(0.006, 0.006, 0.006, 6, 4), { t: [x * 0.085 - 0.01, 0.136, 0.222] }), m: 'shine' },
-    ]) },
     // Feminine face details (lashes and lips), shown with `hair_long`.
     { name: 'face_f', parts: [
       ...[-1, 1].map(x => ({ g: place(box(0.06, 0.014, 0.014, 0.004), { t: [x * 0.088, 0.203, 0.205] }), m: 'eye' })),
@@ -327,6 +322,14 @@ function character() {
               ...[0.2, 0.15, 0.1, 0.05].map(y => ({ g: place(ball(0.008, 0.008, 0.005, 6, 4), { t: [0, y, 0.12] }), m: 'lapel' })),
               { g: place(box(0.06, 0.05, 0.01, 0.004), { t: [0.08, 0.17, 0.113] }), m: 'shirt' },
               { g: place(box(0.3, 0.06, 0.2, 0.025), { t: [0, 0.272, -0.02] }), m: 'shirt' },
+            ] },
+            // `vest`: a black waistcoat over the `dress_shirt`, open in a V at the neck so the collar and placket show, with a row of buttons.
+            { name: 'vest', parts: [
+              { g: place(box(0.3, 0.17, 0.016, 0.006), { t: [0, 0.095, 0.121] }), m: 'vest' },
+              ...[-1, 1].map(x => ({ g: place(box(0.1, 0.1, 0.016, 0.006), { t: [x * 0.1, 0.215, 0.121], r: [0, 0, x * 12] }), m: 'vest' })),
+              { g: place(box(0.3, 0.25, 0.016, 0.006), { t: [0, 0.13, -0.121] }), m: 'vest' },
+              ...[-1, 1].map(x => ({ g: place(box(0.016, 0.25, 0.23, 0.006), { t: [x * 0.163, 0.13, 0] }), m: 'vest' })),
+              ...[0.16, 0.115, 0.07, 0.025].map(y => ({ g: place(ball(0.009, 0.009, 0.005, 6, 4), { t: [0, y, 0.131] }), m: 'logo' })),
             ] },
             // `tshirt`: a crew neck and a small logo on the left chest over the outfit torso, worn with the bare arms and `tsleeve_<k>`.
             { name: 'tshirt', parts: [
@@ -402,7 +405,7 @@ function character() {
   });
   clip('walk', 0.8, (s, k) => stride(s, k, v => ({ arm_l: { r: [30 * v, 0, 4] }, arm_r: { r: [-30 * v, 0, -4] } })), 8);
   clip('carry', 0.8, (s, k) => stride(s, k, v => ({ arm_l: { r: [-78, 0, -4 + 2 * v] }, arm_r: { r: [-78, 0, 4 - 2 * v] } })), 8);
-  // Standing leisure clips of the Creative Space and the pool: a relaxed stand, leaning over a game (arcade buttons, a billiard shot, foosball rods)
+  // Standing leisure clips of the Creative Space and the pool: a relaxed stand, leaning over a game (arcade buttons, a billiard shot)
   // and treading water.
   const standing = (extra = {}) => ({
     hips: { t: [0, STAND_Y, 0], r: [0, 0, 0] }, thigh_l: { r: [0, 0, 0] }, thigh_r: { r: [0, 0, 0] }, shin_l: { r: [0, 0, 0] }, shin_r: { r: [0, 0, 0] },
@@ -800,7 +803,7 @@ function furniture() {
     b(1.0, 0.75, 0.04, [0, 1.75, 0.02], 'gold', 0.01), b(0.86, 0.6, 0.012, [0, 1.75, 0.045], 'bookNavy', 0.003), b(0.86, 0.2, 0.014, [0, 1.55, 0.047], 'bookForest', 0.003),
     b(0.5, 0.08, 0.016, [0.12, 1.66, 0.048], 'bookTan', 0.003), { g: place(cyl(0.07, 0.07, 0.014, 14), { t: [-0.2, 1.9, 0.048], r: [90, 0, 0] }), m: 'gold' },
   ] });
-  // ---------- the Creative Space (bar, billiards, foosball, arcades) ----------
+  // ---------- the Creative Space (bar, billiards, arcades) ----------
   // Rounded bar counter, 8.0 x 1.4 overall, top at 1.05, the patrons' side facing +z: a straight front run 5.8 long whose ends curve back (radius 0.8)
   // into two short legs that meet the wine wall behind, so the bartender works inside the curve. Panelled front with an amber strip and a brass
   // foot rail; beer taps, shakers and glasses on the marble top.
@@ -859,20 +862,6 @@ function furniture() {
     ...[-1, 1].flatMap(sx => [-1, 1].map(sz => b(0.09, 0.02, 0.09, [sx * 1.06, BH + 0.002, sz * 0.56], 'gold', 0.008))),
     ...[[0, 0, 'lemon'], [1, -1, 'sky'], [1, 1, 'red'], [2, -2, 'lav'], [2, 0, 'ink'], [2, 2, 'mint'], [3, -1, 'coral'], [3, 1, 'bookGreen']].map(([r, k, m]) => bl(0.03, 0.03, 0.03, [0.45 + r * 0.052, BH + 0.045, k * 0.031], m, 8, 6)),
     bl(0.03, 0.03, 0.03, [-0.5, BH + 0.045, 0], 'white', 8, 6), { g: place(cyl(0.008, 0.014, 1.3, 6), { t: [-0.1, BH + 0.06, 0.3], r: [0, 8, 90] }), m: 'wood' },
-  ] });
-  // Foosball table, 1.4 x 1.1 with its handles: a walnut cabinet on four legs, a green field with white lines and two goals, and eight chrome rods
-  // across it (handles out on both long sides) carrying the red and blue players (1-2-5-3 per side).
-  const FB = 0.8, rodX = Array.from({ length: 8 }, (_, i) => -0.525 + i * 0.15);
-  const team = [['red', 1], ['red', 2], ['bookBlue', 3], ['red', 5], ['bookBlue', 5], ['red', 3], ['bookBlue', 2], ['bookBlue', 1]];
-  add({ name: 'foosball_table', parts: [
-    b(1.3, 0.24, 0.8, [0, FB - 0.05, 0], 'walnut', 0.02), b(1.2, 0.02, 0.68, [0, FB - 0.02, 0], 'felt', 0.004), b(1.18, 0.004, 0.01, [0, FB - 0.008, 0], 'net', 0.001),
-    b(0.01, 0.004, 0.66, [0, FB - 0.008, 0], 'net', 0.001), ...[-1, 1].map(s => b(0.03, 0.08, 0.22, [s * 0.62, FB, 0], 'ink', 0.008)),
-    ...[-1, 1].flatMap(sx => [-1, 1].map(sz => b(0.08, FB - 0.17, 0.08, [sx * 0.58, (FB - 0.17) / 2, sz * 0.33], 'walnutDark', 0.015))), b(1.1, 0.04, 0.04, [0, 0.12, 0], 'walnutDark', 0.01),
-    ...rodX.flatMap((x, r) => [
-      { g: place(cyl(0.008, 0.008, 1.0, 6), { t: [x, FB + 0.1, 0], r: [90, 0, 0] }), m: 'chrome' },
-      ...[-1, 1].map(s => ({ g: place(cyl(0.022, 0.022, 0.1, 8), { t: [x, FB + 0.1, s * 0.52], r: [90, 0, 0] }), m: 'ink' })),
-      ...Array.from({ length: team[r][1] }, (_, k) => { const n = team[r][1], z = n === 1 ? 0 : -0.26 + (k * 0.52) / (n - 1); return [b(0.03, 0.09, 0.04, [x, FB + 0.08, z], team[r][0], 0), bl(0.02, 0.02, 0.02, [x, FB + 0.15, z], 'white', 6, 4)]; }).flat(),
-    ]),
   ] });
   // Arcade cabinet, 0.75 x 0.7, the screen and controls facing +z: coloured sides, a lit marquee, a tilted screen, a joystick and buttons, a coin door.
   const arcade = (side, marquee) => [

@@ -18,8 +18,10 @@ const SUITS: Readonly<Record<string, string>> = { conversation: '#2c3a55' };
 const TANKS: ReadonlySet<string> = new Set(['developer']);
 /** Roles in shorts (the bare `calf_<k>` replace the `pants_<k>` trouser legs): the Developer zone wears a tank top and shorts only. */
 const SHORTS: ReadonlySet<string> = new Set(['developer']);
-/** Roles in a white business shirt (the `dress_shirt` child of the torso over a white outfit, with the long `sleeve_<k>`): the Director Team. */
-const DRESS_SHIRTS: ReadonlySet<string> = new Set(['planner', 'architect', 'specifier', 'coordinator']);
+/** Roles in a white business shirt (the `dress_shirt` child of the torso over a white outfit, with the long `sleeve_<k>`): the Director Team and the bartender. */
+const DRESS_SHIRTS: ReadonlySet<string> = new Set(['planner', 'architect', 'specifier', 'coordinator', 'bartender']);
+/** Roles with the black `vest` (a child of the torso) over the white business shirt: the bartender. */
+const VESTS: ReadonlySet<string> = new Set(['bartender']);
 const SHIRT_WHITE = '#f4f3ee';
 /**
  * Roles in the team T-shirt (the `tshirt` child of the torso, the `bare_<k>` arms and the short `tsleeve_<k>` sleeves replace the `hoodie` and
@@ -28,14 +30,12 @@ const SHIRT_WHITE = '#f4f3ee';
 const TSHIRTS: Readonly<Record<string, string>> = { reviewer: '#1e1f24', qa: '#1e1f24' };
 /** Roles wearing the round black `glasses` (a child of the head). */
 const GLASSES: ReadonlySet<string> = new Set(['reviewer']);
-/** Roles with the brown, lit eyes of the reference look (`eye` colour plus the `eye_shine` catch lights). */
-const EYES: Readonly<Record<string, string>> = { reviewer: '#3b2418', qa: '#3b2418' };
 /** Hair style per role (a `hair_*` child of the head); everyone else wears `hair_short`. `hair_long` comes with the `face_f` details. */
 const HAIR_STYLES: Readonly<Record<string, string>> = { qa: 'hair_spiky', reviewer: 'hair_long' };
 /** Hair colour per role, replacing the dark default of the `hair` material: the Reviewer's crimson and QA's jet black. */
 const HAIR_COLORS: Readonly<Record<string, string>> = { reviewer: '#8a1538', qa: '#141417' };
 /** Trousers and shoe colours per role (navy trousers, dark plum shoes in the reference look), replacing the `trousers` and `shoe` defaults. */
-const TROUSERS: Readonly<Record<string, string>> = { reviewer: '#2a2f45', qa: '#2a2f45' };
+const TROUSERS: Readonly<Record<string, string>> = { reviewer: '#2a2f45', qa: '#2a2f45', bartender: '#1c1d22' };
 const SHOES: Readonly<Record<string, string>> = { reviewer: '#2b2233', qa: '#2b2233' };
 const HAIR_NAMES = ['hair_short', 'hair_spiky', 'hair_long'] as const;
 const FADE = 0.18;
@@ -63,11 +63,11 @@ export class Character {
     const outfit = suit ?? shirt ?? (dress ? SHIRT_WHITE : undefined) ?? ROLE_COLORS[role] ?? ROLE_COLORS['developer'];
     const tank = suit === undefined && shirt === undefined && !dress && TANKS.has(role), style = HAIR_STYLES[role] ?? 'hair_short', hairColor = HAIR_COLORS[role];
     const show = (name: string, visible: boolean): void => { const o = body.getObjectByName(name); if (o) o.visible = visible; };
-    show('hoodie', suit === undefined && shirt === undefined && !dress && !tank); show('dress_shirt', dress); show('suit', suit !== undefined); show('tank', tank); show('tshirt', shirt !== undefined);
+    show('hoodie', suit === undefined && shirt === undefined && !dress && !tank); show('dress_shirt', dress); show('suit', suit !== undefined); show('tank', tank); show('tshirt', shirt !== undefined); show('vest', dress && VESTS.has(role));
     for (const k of ['l', 'r']) { show(`sleeve_${k}`, !tank && shirt === undefined); show(`bare_${k}`, tank || shirt !== undefined); show(`tsleeve_${k}`, shirt !== undefined); show(`pants_${k}`, !SHORTS.has(role)); show(`calf_${k}`, SHORTS.has(role)); }
     for (const name of HAIR_NAMES) show(name, name === style);
     show('face_f', style === 'hair_long');
-    show('glasses', GLASSES.has(role)); show('eye_shine', EYES[role] !== undefined);
+    show('glasses', GLASSES.has(role));
     // Own materials per character, so alpha and the role colour never leak to another one; the templates stay untouched.
     body.traverse(o => {
       if (!(o instanceof Mesh)) return;
@@ -76,7 +76,6 @@ export class Character {
       if (m.name === 'hair' && hairColor) m.color = new Color(hairColor);
       if (m.name === 'trousers' && TROUSERS[role]) m.color = new Color(TROUSERS[role]);
       if (m.name === 'shoe' && SHOES[role]) m.color = new Color(SHOES[role]);
-      if (m.name === 'eye' && EYES[role]) m.color = new Color(EYES[role]);
       o.material = m; o.castShadow = true; o.receiveShadow = false;
       this.mats.push(m);
     });
@@ -98,7 +97,8 @@ export class Character {
     if (this.paper) this.paper.visible = view.carrying;
     if (alpha !== this.alpha) {
       this.alpha = alpha;
-      for (const m of this.mats) { m.transparent = alpha < 1; m.opacity = alpha; m.depthWrite = alpha >= 1; m.needsUpdate = true; }
+      // A translucent figure still writes depth: its own parts then hide each other (the skull stays under the hair) whatever order they draw in.
+      for (const m of this.mats) { m.transparent = alpha < 1; m.opacity = alpha; m.needsUpdate = true; }
     }
     if (view.clip !== this.current) this.play(view.clip, animate);
   }

@@ -199,8 +199,9 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const syncActors = (): void => {
     const keep = new Set<string>();
     const animate = !reduced();
-    // Staff of unoccupied desks are drawn like agents but carry no pick data and are never picked or labelled.
-    for (const view of [...choreo.views(), ...choreo.ambientViews()]) {
+    // Staff of unoccupied desks and the bartender are drawn like agents but carry no pick data and are never picked or labelled.
+    const bartender = choreo.bartenderView();
+    for (const view of [...choreo.views(), ...choreo.ambientViews(), ...(bartender ? [bartender] : [])]) {
       keep.add(view.instanceId);
       let c = characters.get(view.instanceId);
       if (!c) {

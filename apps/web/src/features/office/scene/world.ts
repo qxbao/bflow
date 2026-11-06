@@ -2,7 +2,7 @@
 // the renderer stays a drawing layer. One grid cell is one world unit; cell (gx, gy) has its centre at x = gx + 0.5, z = gy + 0.5.
 // Rooms (north is the far wall, the camera looks from the south):
 //   back row  : Conversation | Coordination (Planner, Coordinator, Architect, Specifier) | Task Board (hero wall screen above its own zone, at the right)
-//   front row : Developer zone (20 seats in north-south rows, rows appear as agents arrive) | Creative Space (bar, billiards, foosball, arcades;
+//   front row : Developer zone (20 seats in north-south rows, rows appear as agents arrive) | Creative Space (bar, four billiard tables, arcades;
 //               whoever is not working spends the time here) | Verification (Reviewer, QA, Tester, Security, print corner) above the pool room
 // Every room is laid out mirror-symmetric about its own centre line, and every door sits in the middle of its wall.
 import { findPath } from '../model/path';
@@ -155,7 +155,7 @@ export const DECOR_SIZE: Readonly<Record<string, { w: number; d: number }>> = {
   bookcase_lux_w: { w: 2.9, d: 0.45 }, bookcase_lux_e: { w: 2.9, d: 0.45 }, statue: { w: 1.0, d: 0.5 }, sofa_lux: { w: 2.4, d: 0.95 }, tea_table: { w: 1.0, d: 0.6 }, rug_lux: { w: 3.4, d: 2.6 },
   meeting_chair: { w: 0.55, d: 0.55 }, globe: { w: 0.5, d: 0.5 }, painting: { w: 1.0, d: 0.05 }, floor_lamp: { w: 0.38, d: 0.38 }, printer: { w: 0.8, d: 0.5 }, paper_cabinet: { w: 0.8, d: 0.45 }, plant_tall: { w: 0.6, d: 0.6 }, plant_small: { w: 0.2, d: 0.2 }, pendant_lamp: { w: 0.7, d: 0.7 },
   whiteboard: { w: 2, d: 0.08 }, window: { w: 2.1, d: 0.16 }, wall_art: { w: 0.9, d: 0.03 },
-  bar_counter: { w: 8, d: 1.4 }, wine_wall: { w: 8, d: 0.4 }, bar_stool: { w: 0.4, d: 0.4 }, billiard_table: { w: 2.2, d: 1.2 }, foosball_table: { w: 1.4, d: 1.1 },
+  bar_counter: { w: 8, d: 1.4 }, wine_wall: { w: 8, d: 0.4 }, bar_stool: { w: 0.4, d: 0.4 }, billiard_table: { w: 2.2, d: 1.2 },
   arcade_a: { w: 0.75, d: 0.7 }, arcade_b: { w: 0.75, d: 0.7 }, pool: { w: 7, d: 2.6 }, diving_board: { w: 0.6, d: 0.6 },
 };
 export type DecorWall = 'north' | 'west' | 'east';
@@ -187,11 +187,11 @@ export const DECOR: readonly DecorItem[] = [
   // Verification: the print corner on the middle of the east wall, a printer and a paper cabinet either side under the whiteboard.
   deco('printer', 27, 10, { wall: 'east' }), deco('whiteboard', 27, 11, { mount: 'wall', wall: 'east' }), deco('paper_cabinet', 27, 12, { wall: 'east' }),
   // Creative Space, mirror-symmetric about x 14 and clear of its four doors: two arcade cabinets either side of the double door from the Director
-  // Team room (against that partition, facing into the room), two billiard tables, two foosball tables, then the bar along the front edge: a wine
+  // Team room (against that partition, facing into the room), two rows of two billiard tables, then the bar along the front edge: a wine
   // wall the whole width of the room and in front of it the rounded counter, as wide as the room, with six stools.
   ...[10, 11, 16, 17].map((gx, i) => deco(i === 0 || i === 3 ? 'arcade_a' : 'arcade_b', gx, 8, { wall: 'north' })),
   deco('billiard_table', 12, 11, { off: [-0.4, 0.15] }), deco('billiard_table', 15, 11, { off: [0.4, 0.15] }),
-  deco('foosball_table', 12, 14, { off: [-0.4, -0.2] }), deco('foosball_table', 15, 14, { off: [0.4, -0.2] }),
+  deco('billiard_table', 12, 14, { off: [-0.4, -0.2] }), deco('billiard_table', 15, 14, { off: [0.4, -0.2] }),
   ...[11, 12, 13, 14, 15, 16].map(gx => deco('bar_stool', gx, 16, { off: [0, 0.25] })),
   deco('bar_counter', 14, 17, { ry: Math.PI, off: [-0.5, 0.35] }), deco('wine_wall', 14, 18, { ry: Math.PI, off: [-0.5, 0.25] }),
   // Pool room: one long pool centred on the room (x 23.5), clear of both doors, with a diving board at either end reaching over the water.
@@ -206,30 +206,38 @@ const E = Math.PI / 2, W = -Math.PI / 2, N = Math.PI;
 const STOOL_LIFT = 0.415, SWIM_LIFT = -0.55;
 const spot = (x: number, z: number, heading: number, activity: LoungeActivity): LoungeSpot => ({ x, z, heading, activity, lift: activity === 'perch' ? STOOL_LIFT : activity === 'swim' ? SWIM_LIFT : 0 });
 /**
- * Leisure spots in fill order. Mirrored pairs follow each other (the bartender stands alone on the centre line), so any number of figures leaves
- * the rooms as balanced as possible. The Creative Space comes first; the pool only takes figures once it is full.
+ * Leisure spots, mirror-symmetric about the centre line of their room. An idle figure takes a random free one and
+ * moves on to another after a while, so any spot of the Creative Space or the pool may be in use.
  */
 export const LOUNGE_SPOTS: readonly LoungeSpot[] = [
   spot(13.5, 16.75, 0, 'perch'), spot(14.5, 16.75, 0, 'perch'),
-  spot(10.55, 11.65, E, 'play'), spot(17.45, 11.65, W, 'play'),
-  spot(11.75, 13.6, 0, 'play'), spot(16.25, 13.6, 0, 'play'),
-  spot(11.5, 9.75, N, 'play'), spot(16.5, 9.75, N, 'play'),
-  spot(CREATIVE_X, 18.1, N, 'stand'),
-  spot(12.45, 13.6, 0, 'play'), spot(15.55, 13.6, 0, 'play'),
-  spot(13.6, 11.65, W, 'stand'), spot(14.4, 11.65, E, 'stand'),
   spot(12.5, 16.75, 0, 'perch'), spot(15.5, 16.75, 0, 'perch'),
-  spot(10.5, 9.75, N, 'play'), spot(17.5, 9.75, N, 'play'),
   spot(11.5, 16.75, 0, 'perch'), spot(16.5, 16.75, 0, 'perch'),
-  spot(10.75, 14.3, E, 'stand'), spot(17.25, 14.3, W, 'stand'),
-  // The camera side of the foosball tables fills last: players there hide the tables.
-  spot(11.75, 15.0, N, 'play'), spot(16.25, 15.0, N, 'play'),
-  spot(12.45, 15.0, N, 'play'), spot(15.55, 15.0, N, 'play'),
+  // Arcades.
+  spot(11.5, 9.75, N, 'play'), spot(16.5, 9.75, N, 'play'),
+  spot(10.5, 9.75, N, 'play'), spot(17.5, 9.75, N, 'play'),
+  // Back row of billiard tables: a shot from the outer end, the long side or the gap between the tables.
+  spot(10.55, 11.65, E, 'play'), spot(17.45, 11.65, W, 'play'),
+  spot(12.1, 10.7, 0, 'play'), spot(15.9, 10.7, 0, 'play'),
+  spot(13.6, 11.65, W, 'stand'), spot(14.4, 11.65, E, 'stand'),
+  spot(12.1, 12.6, N, 'play'), spot(15.9, 12.6, N, 'play'),
+  // Front row of billiard tables; the camera side holds a player who waits for the shot.
+  spot(10.55, 14.3, E, 'play'), spot(17.45, 14.3, W, 'play'),
+  spot(12.1, 13.35, 0, 'play'), spot(15.9, 13.35, 0, 'play'),
+  spot(13.6, 14.3, W, 'stand'), spot(14.4, 14.3, E, 'stand'),
+  spot(11.6, 15.25, N, 'stand'), spot(16.4, 15.25, N, 'stand'),
+  // Pool.
   spot(21.6, 16.8, 0, 'swim'), spot(25.4, 16.8, 0, 'swim'),
   spot(22.6, 17.9, 0, 'swim'), spot(24.4, 17.9, 0, 'swim'),
   spot(POOL_X, 16.8, 0, 'swim'),
   spot(21.4, 17.95, 0, 'swim'), spot(25.6, 17.95, 0, 'swim'),
   spot(POOL_X, 17.95, 0, 'swim'),
 ];
+/**
+ * Service points of the bartender, inside the curve of the bar counter between it and the wine wall, from one end to the other. The bartender is
+ * always there while a session runs and walks from one to another, facing the patrons (north) while serving.
+ */
+export const BAR_POINTS: readonly Vec2[] = [11.3, 12.6, CREATIVE_X, 15.4, 16.7].map(x => ({ x, z: 18.15 }));
 const WALL_FACE = 0.07, PARTITION_FACE = 0.1, PENDANT_Y = 2.9, TABLE_Y = 0.41;
 const WALL_RY: Readonly<Record<DecorWall, number>> = { north: 0, west: Math.PI / 2, east: -Math.PI / 2 };
 /** World placement of a decor item: position (y is 0 for the floor) and rotation about y. */

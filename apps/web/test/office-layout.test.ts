@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { cellCentre, CREATIVE_X, DECOR, LOUNGE_SPOTS, POOL_X, DECOR_CELLS, DECOR_SIZE, deskCentre, DEVELOPER_SEAT_COUNT, DOORWAY_CELLS, GRID_H, GRID_W, OBJECT_CELLS, PARTITION_CELLS, PLANT_CELLS, TABLE_CELLS, ZONE_SIGNS, ZONE_TITLES, decorFootprint, decorPlacement, deskPlan, partitionPieces, routeBetween, seatCell, zoneAt, type Cell } from '../src/features/office/scene/world';
+import { BAR_POINTS, cellCentre, CREATIVE_X, DECOR, LOUNGE_SPOTS, POOL_X, DECOR_CELLS, DECOR_SIZE, deskCentre, DEVELOPER_SEAT_COUNT, DOORWAY_CELLS, GRID_H, GRID_W, OBJECT_CELLS, PARTITION_CELLS, PLANT_CELLS, TABLE_CELLS, ZONE_SIGNS, ZONE_TITLES, decorFootprint, decorPlacement, deskPlan, partitionPieces, routeBetween, seatCell, zoneAt, type Cell } from '../src/features/office/scene/world';
 
 const key = (c: Cell): string => `${c.gx},${c.gy}`;
 const ALL_SEATS = [
@@ -131,10 +131,10 @@ describe('symmetry', () => {
     expect(mirrored(at('plant_tall', p => p.x > 18 && p.z < 8), 23.5)).toBe(true);
     expect(mirrored(PLANT_CELLS.filter(c => c.gy === 7).map(cellCentre), 14)).toBe(true);
   });
-  test('the Creative Space has a bar, two billiard and two foosball tables and four arcades, all mirrored about its centre line', () => {
+  test('the Creative Space has a bar, four billiard tables and four arcades, all mirrored about its centre line', () => {
     const inside = DECOR.filter(d => zoneAt(d.cell) === 'creative' || d.node.startsWith('arcade'));
     const count = (node: string) => inside.filter(d => d.node === node).length;
-    expect([count('bar_counter'), count('wine_wall'), count('bar_stool'), count('billiard_table'), count('foosball_table'), count('arcade_a') + count('arcade_b')]).toEqual([1, 1, 6, 2, 2, 4]);
+    expect([count('bar_counter'), count('wine_wall'), count('bar_stool'), count('billiard_table'), count('arcade_a') + count('arcade_b')]).toEqual([1, 1, 6, 4, 4]);
     expect(PLANT_CELLS.filter(c => zoneAt(c) === 'creative')).toHaveLength(0);
     // The wine wall and the rounded counter span the room's width along its front edge; the counter's back meets the wall.
     const wall = decorFootprint(inside.find(d => d.node === 'wine_wall')!), bar = decorFootprint(inside.find(d => d.node === 'bar_counter')!);
@@ -147,6 +147,9 @@ describe('symmetry', () => {
     const nodes = [...new Set(inside.map(d => d.node))];
     for (const node of nodes) expect(mirrored(inside.filter(d => d.node === node).map(decorPlacement), CREATIVE_X), node).toBe(true);
     for (const d of inside) { const f = decorFootprint(d); expect(f.x0).toBeGreaterThanOrEqual(10); expect(f.x1).toBeLessThanOrEqual(18); }
+    // The bartender's service points lie inside the curve of the counter, in front of the wine wall, mirrored about the room's centre line.
+    for (const p of BAR_POINTS) { expect(p.z).toBeGreaterThan(bar.z0 + 0.6); expect(p.z).toBeLessThan(wall.z0 - 0.2); expect(p.x).toBeGreaterThan(bar.x0 + 1); expect(p.x).toBeLessThan(bar.x1 - 1); }
+    expect(mirrored(BAR_POINTS, CREATIVE_X)).toBe(true);
   });
   test('the room under QA / Reviewer holds one long pool with a diving board at either end, mirrored, and keeps both doors', () => {
     const inside = DECOR.filter(d => d.cell.gx > 18 && d.cell.gy > 14);
@@ -160,7 +163,7 @@ describe('symmetry', () => {
     expect(DOORWAY_CELLS.map(key)).toEqual(expect.arrayContaining(['23,14', '18,16']));
     expect(routeBetween({ gx: 19, gy: 16 }, { gx: 23, gy: 15 }, deskPlan([]).desks).length).toBeGreaterThan(0);
   });
-  test('leisure spots are free of furniture, inside their room, and every prefix of the fill order is as balanced as it can be', () => {
+  test('leisure spots are free of furniture, inside their room, and mirrored about its centre line', () => {
     // Stools are sat on, the pool swum in and the bartender stands inside the curve of the counter.
     const solid = DECOR.filter(d => (d.mount === undefined || d.mount === 'floor') && !['bar_stool', 'pool', 'bar_counter'].includes(d.node)).map(decorFootprint);
     for (const s of LOUNGE_SPOTS) {
@@ -169,15 +172,10 @@ describe('symmetry', () => {
       expect(zone === 'creative' || zone === 'pool', `${s.x},${s.z}`).toBe(true);
       if (s.activity === 'swim') { const pool = decorFootprint(DECOR.find(d => d.node === 'pool')!); expect(s.x > pool.x0 + 0.3 && s.x < pool.x1 - 0.3 && s.z > pool.z0 + 0.3 && s.z < pool.z1 - 0.3).toBe(true); }
     }
-    const creative = LOUNGE_SPOTS.filter(s => s.activity !== 'swim');
-    expect(LOUNGE_SPOTS.slice(0, creative.length)).toEqual(creative); // the pool fills only after the Creative Space
-    // However many figures there are, at most one stands without its mirror image.
+    expect(LOUNGE_SPOTS.filter(s => s.activity === 'swim').length).toBeGreaterThan(0);
     const axis = (s: (typeof LOUNGE_SPOTS)[number]) => (s.activity === 'swim' ? POOL_X : CREATIVE_X);
-    for (let n = 1; n <= LOUNGE_SPOTS.length; n++) {
-      const head = LOUNGE_SPOTS.slice(0, n);
-      const lonely = head.filter(s => Math.abs(s.x - axis(s)) > 1e-6 && !head.some(o => Math.abs(o.z - s.z) < 1e-6 && Math.abs(o.x - (2 * axis(s) - s.x)) < 1e-6));
-      expect(lonely.length, `first ${n}`).toBeLessThanOrEqual(1);
-    }
+    const lonely = LOUNGE_SPOTS.filter(s => Math.abs(s.x - axis(s)) > 1e-6 && !LOUNGE_SPOTS.some(o => Math.abs(o.z - s.z) < 1e-6 && Math.abs(o.x - (2 * axis(s) - s.x)) < 1e-6));
+    expect(lonely).toEqual([]);
     expect(new Set(LOUNGE_SPOTS.map(s => `${s.x},${s.z}`)).size).toBe(LOUNGE_SPOTS.length);
   });
 });

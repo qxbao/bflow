@@ -13,7 +13,7 @@ function readJson(file: string): GltfJson {
 }
 
 const NEW_NODES = ['partition', 'partition_end', 'sign_board', 'sofa', 'armchair', 'coffee_table', 'rug', 'bookshelf', 'water_cooler', 'floor_lamp', 'printer', 'whiteboard', 'window', 'pendant_lamp', 'plant_tall', 'plant_small', 'wall_art',
-  'exec_chair', 'chair_black', 'stool_red', 'bar_counter', 'wine_wall', 'bar_stool', 'billiard_table', 'foosball_table', 'arcade_a', 'arcade_b', 'pool', 'diving_board', 'bookcase_lux_w', 'bookcase_lux_e', 'statue', 'sofa_lux', 'tea_table', 'rug_lux', 'globe', 'painting', 'desk_pc', 'desk_dual', 'paper_cabinet', 'meeting_chair'];
+  'exec_chair', 'chair_black', 'stool_red', 'bar_counter', 'wine_wall', 'bar_stool', 'billiard_table', 'arcade_a', 'arcade_b', 'pool', 'diving_board', 'bookcase_lux_w', 'bookcase_lux_e', 'statue', 'sofa_lux', 'tea_table', 'rug_lux', 'globe', 'painting', 'desk_pc', 'desk_dual', 'paper_cabinet', 'meeting_chair'];
 const OLD_NODES = ['floor_tile', 'wall', 'wall_led', 'spot', 'trim_bar', 'desk', 'chair', 'counter', 'board', 'table', 'server', 'cabinet', 'mailbox', 'settings', 'door', 'plant'];
 const CLIPS = ['sleep', 'idle', 'type', 'type_fast', 'raise_hand', 'blocked', 'ghost', 'walk', 'carry', 'stand', 'play', 'swim'];
 
@@ -35,7 +35,7 @@ describe('generated office models', () => {
   });
   test('character has the dress-up nodes the scene toggles per role', () => {
     const names = readJson('character.glb').nodes.map(n => n.name);
-    for (const n of ['hoodie', 'suit', 'tank', 'tshirt', 'tsleeve_l', 'tsleeve_r', 'glasses', 'eye_shine', 'dress_shirt', 'pants_l', 'pants_r', 'calf_l', 'calf_r', 'sleeve_l', 'sleeve_r', 'bare_l', 'bare_r', 'hair_short', 'hair_spiky', 'hair_long', 'face_f']) expect(names, n).toContain(n);
+    for (const n of ['hoodie', 'suit', 'tank', 'tshirt', 'tsleeve_l', 'tsleeve_r', 'glasses', 'dress_shirt', 'vest', 'pants_l', 'pants_r', 'calf_l', 'calf_r', 'sleeve_l', 'sleeve_r', 'bare_l', 'bare_r', 'hair_short', 'hair_spiky', 'hair_long', 'face_f']) expect(names, n).toContain(n);
   });
   test('colour only: no images or textures, and the two files stay under 4 MiB', () => {
     for (const f of ['character.glb', 'furniture.glb']) {
