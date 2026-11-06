@@ -39,7 +39,7 @@ test('visual windows use their title bar as the page title and settings links as
 
 test('visual routes stay in the app window; tool windows restore and adapt at all three widths',async({page})=>{
   test.setTimeout(120000);
-  const base=await openProject(page,host.pairing,host.repository,/books.*Xem dự án/);
+  const base=await openProject(page,await host.call('restart'),host.repository,/books.*Xem dự án/);
   await enterVisual(page);
   await sceneReady(page);
   const appWindow=page.getByRole('dialog',{name:'Công việc'});
