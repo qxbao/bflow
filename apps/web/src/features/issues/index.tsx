@@ -128,14 +128,14 @@ export function IssueQueuePanel({compact=false}:{compact?:boolean}){
   const base=`/projects/${encodeURIComponent(q.projectId)}/issues`;
   const filterId=useId();
   return <section data-component="IssueQueue" aria-label="Hàng đợi sự cố" className="min-w-0">
-    <Heading className="m-0 text-base">Hàng đợi sự cố</Heading>
+    <Heading className="issue-queue-heading m-0 text-base">Hàng đợi sự cố</Heading>
     {q.availability==='unavailable'&&<p role="status" className="my-2 text-sm text-muted">Hàng đợi sự cố chưa khả dụng với cấu hình hoặc phiên bản này. Đây không có nghĩa là không có sự cố.</p>}
     {q.availability==='unknown'&&<div role="status" className="my-2 text-sm"><p className="my-1">Chưa xác định được trạng thái hàng đợi. Lần đọc phiên Director gần nhất không thành công; đây không có nghĩa là không có sự cố.</p><button type="button" onClick={q.refresh}>Đọc lại</button></div>}
     {q.availability==='loading'&&<LoadingState loading initial label="Đang đọc hàng đợi sự cố…"/>}
     {q.availability==='ready'&&<>
-      <div className="my-2 flex flex-wrap items-end gap-3"><div><label htmlFor={filterId} className="block text-xs">Lọc theo trạng thái</label><select id={filterId} value={q.filter} onChange={e=>q.setFilter(e.target.value as IssueFilter)}>{(Object.keys(filterLabels) as IssueFilter[]).map(key=><option key={key} value={key}>{filterLabels[key]}</option>)}</select></div><button type="button" onClick={q.refresh}>Đọc lại hàng đợi</button></div>
-      {Boolean(q.error)&&<p role="alert" className="my-2 border-l-3 border-warning pl-3 text-sm">Chưa đọc được hàng đợi sự cố mới nhất; dữ liệu bên dưới có thể đã cũ. Đây không có nghĩa là hết sự cố.</p>}
-      {q.items.length===0?<p className="my-2 text-sm text-muted">{q.all.length===0&&q.page===1?'Chưa có sự cố nào được ghi nhận.':'Không có sự cố phù hợp bộ lọc trong trang này.'}</p>
+      <div className="issue-filter-row my-2 flex flex-wrap items-end gap-3"><div><label htmlFor={filterId} className="block text-xs">Lọc theo trạng thái</label><select id={filterId} value={q.filter} onChange={e=>q.setFilter(e.target.value as IssueFilter)}>{(Object.keys(filterLabels) as IssueFilter[]).map(key=><option key={key} value={key}>{filterLabels[key]}</option>)}</select></div><button type="button" onClick={q.refresh}>Đọc lại hàng đợi</button></div>
+      {Boolean(q.error)&&<p role="alert" className="issue-read-alert my-2 border-l-3 border-warning pl-3 text-sm">Chưa đọc được hàng đợi sự cố mới nhất; dữ liệu bên dưới có thể đã cũ. Đây không có nghĩa là hết sự cố.</p>}
+      {q.items.length===0?<p className="issue-empty my-2 text-sm text-muted">{q.all.length===0&&q.page===1?'Chưa có sự cố nào được ghi nhận.':'Không có sự cố phù hợp bộ lọc trong trang này.'}</p>
         :<ul className="m-0 list-none border-t border-line p-0">{q.items.map(issue=><li key={issue.issueId} className="border-b border-line py-2.5"><IssueSummary issue={issue}/>
           <p className="my-1 text-sm"><Link to={`${base}/${encodeURIComponent(issue.issueId)}`}>Xem chi tiết sự cố →</Link></p>
           <IssueActions issue={issue} currentRunId={q.currentRuns[issue.runId]} fresh={q.fresh} refresh={q.refresh}/></li>)}</ul>}

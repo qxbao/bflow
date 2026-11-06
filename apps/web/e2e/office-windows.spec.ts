@@ -11,6 +11,32 @@ test.beforeAll(async()=>{host=await startDirectHost();await mkdir(evidence,{recu
 test.afterAll(async()=>{await host?.close();});
 const shot=(page:Page,name:string)=>page.screenshot({path:resolve(evidence,`${name}.png`),fullPage:false});
 
+test('visual windows use their title bar as the page title and settings links as tabs',async({page})=>{
+  test.setTimeout(120000);
+  const base=await openProject(page,host.pairing,host.repository,/books.*Xem dự án/);
+  await enterVisual(page);
+  const origin=new URL(page.url()).origin;
+  await page.goto(`${origin}${base}/agents`);
+  const agents=page.getByRole('dialog',{name:'Nhân viên'});
+  await expect(agents).toBeVisible();
+  await expect(agents.locator('.agents-page-heading')).toBeHidden();
+  await page.goto(`${origin}${base}/review`);
+  const review=page.getByRole('dialog',{name:'Cần bạn quyết định'});
+  await expect(review).toBeVisible();
+  await expect(review.locator('.review-page-intro')).toBeHidden();
+  await page.goto(`${origin}${base}/settings`);
+  const settings=page.getByRole('dialog',{name:'Cài đặt dự án'});
+  await expect(settings).toBeVisible();
+  await expect(settings.getByText(/^Bản Web:/)).toHaveCount(0);
+  const tabs=settings.getByRole('navigation',{name:'Các phần cài đặt'});
+  await expect(tabs.getByRole('link',{name:'Cấu hình'})).toBeVisible();
+  const tabStyle=await tabs.getByRole('link',{name:'Cấu hình'}).evaluate(node=>{const style=getComputedStyle(node);return {border:style.borderTopWidth,radius:style.borderRadius,background:style.backgroundColor};});
+  expect(tabStyle.border).toBe('2px');
+  expect(tabStyle.radius).toBe('0px');
+  expect(tabStyle.background).toBe('rgb(255, 255, 255)');
+  await shot(page,'1440-settings-game-tabs');
+});
+
 test('visual routes stay in the app window; tool windows restore and adapt at all three widths',async({page})=>{
   test.setTimeout(120000);
   const base=await openProject(page,host.pairing,host.repository,/books.*Xem dự án/);
@@ -21,6 +47,22 @@ test('visual routes stay in the app window; tool windows restore and adapt at al
   await mirror(page,/Bảng nhiệm vụ/);
   await expect(page).toHaveURL(/\/runs$/);
   await expect(appWindow).toBeVisible();
+  const buttonStyle=await page.evaluate(()=>{
+    const selectors=['.office-rail button','.taskbar-start','.taskbar-windows button'];
+    return selectors.map(selector=>{const node=document.querySelector<HTMLElement>(selector)!,style=getComputedStyle(node);return {border:style.borderWidth,radius:style.borderRadius,shadow:style.boxShadow,height:Math.round(node.getBoundingClientRect().height),icon:Boolean(node.querySelector('.taskbar-button-icon, svg'))};});
+  });
+  expect(buttonStyle.map(style=>style.border)).toEqual(['2px','2px','2px']);
+  expect(buttonStyle.map(style=>style.radius)).toEqual(['0px','0px','0px']);
+  expect(buttonStyle.map(style=>style.height)).toEqual([44,44,44]);
+  expect(buttonStyle.every(style=>style.shadow!=='none'&&style.icon)).toBe(true);
+  await taskbar.getByRole('button',{name:'◆ Bflow'}).click();
+  const startMenu=taskbar.getByRole('group',{name:'Menu Bflow'});
+  await expect(startMenu.getByRole('button',{name:'Sắp xếp lại cửa sổ'})).toBeVisible();
+  await expect(startMenu.getByRole('button',{name:'Đóng mọi cửa sổ'})).toBeVisible();
+  await expect(startMenu.getByRole('button',{name:'Công việc'})).toHaveCount(0);
+  await expect(startMenu.getByText('Góc nhìn văn phòng')).toHaveCount(0);
+  await shot(page,'1440-compact-start-menu');
+  await taskbar.getByRole('button',{name:'◆ Bflow'}).click();
   await appWindow.getByRole('button',{name:'Phóng to Công việc'}).click();
   await expect(appWindow).toHaveAttribute('data-display','maximized');
   await appWindow.getByRole('button',{name:'Khôi phục Công việc'}).click();
@@ -42,9 +84,10 @@ test('visual routes stay in the app window; tool windows restore and adapt at al
   expect(overlap.bottom-overlap.top).toBeGreaterThan(0);
   const topHit=await page.evaluate(({x,y})=>document.elementFromPoint(x,y)?.closest<HTMLElement>('[data-window-id]')?.dataset.windowId,{x:(overlap.left+overlap.right)/2,y:(overlap.top+overlap.bottom)/2});
   expect(topHit).toBe('cabinet');
-  await expect(documents.getByRole('heading',{name:'Tủ tài liệu'})).toBeVisible();
+  await expect(documents.getByRole('heading',{name:'Tài liệu'})).toBeVisible();
+  await documents.evaluate(async element=>{await Promise.all(element.getAnimations().map(animation=>animation.finished.catch(()=>undefined)));});
   await shot(page,'1440-documents-over-app');
-  await documents.getByRole('heading',{name:'Tủ tài liệu'}).click();
+  await documents.getByRole('heading',{name:'Tài liệu'}).click();
   const title=documents.locator('.bwin-titlebar'),titleBox=await title.boundingBox();
   expect(titleBox).not.toBeNull();
   await page.mouse.move(titleBox!.x+titleBox!.width/2,titleBox!.y+titleBox!.height/2);
@@ -73,8 +116,7 @@ test('visual routes stay in the app window; tool windows restore and adapt at al
 
   // At tile size the active route window owns the right 62%; the 3D scene still occupies the open left zone.
   await page.setViewportSize({width:900,height:768});
-  await taskbar.getByRole('button',{name:'◆ Bflow'}).click();
-  await taskbar.getByRole('group',{name:'Menu Bflow'}).getByRole('button',{name:'Công việc'}).click();
+  await page.getByRole('navigation',{name:'Lối tắt'}).getByRole('button',{name:'Công việc'}).click();
   await expect(appWindow).toBeVisible();
   await expect(documents).toBeHidden();
   const tileApp=await appWindow.boundingBox();

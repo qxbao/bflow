@@ -125,20 +125,24 @@ function Field({name,path,value,onChange,disabled=false}:{name:string;path:strin
 
 function Roles({value,onChange}:{value:WebConfigValue[];onChange:(v:WebConfigValue[])=>void}){
  const [bulkCli,setBulkCli]=useState('claude'),[bulkModel,setBulkModel]=useState('');
+ const [selectedRole,setSelectedRole]=useState('');
+ const selectedIndex=Math.max(0,value.findIndex(item=>item && typeof item==='object' && !Array.isArray(item) && item.role===selectedRole));
  const configuredModels=[...new Set(value.flatMap(item=>item && typeof item==='object' && !Array.isArray(item) && (item.cli??'claude')===bulkCli && typeof item.model==='string' && item.model?[item.model]:[]))];
  const presets=presetModels[bulkCli]??[];
  const suggestions=[...configuredModels.filter(id=>!presets.some(model=>model.id===id)).map(id=>({id,label:id})),...presets];
  const applyAll=()=>{onChange(value.map(item=>{if(!item || typeof item!=='object' || Array.isArray(item))return item;if(bulkCli==='agy' && item.role==='conversation')return item;const targetCli=bulkCli;const cliChanged=item.cli!==targetCli;const next:Record<string,WebConfigValue>={...item,cli:targetCli};if(targetCli==='agy')delete next.effort;if(bulkModel.trim())next.model=bulkModel.trim();else if(cliChanged)delete next.model;return next;}));};
  return <>
-  <div className="my-2 border border-line bg-canvas p-2.5 text-xs">
+  <details className="role-bulk-settings my-2" open><summary>Thiết lập đồng loạt cho cả nhóm</summary><div className="border border-line bg-canvas p-2.5 text-xs">
    <div className="flex flex-wrap items-end gap-2">
     <div className="min-w-32"><FieldLabel htmlFor="bulk-role-cli" label="Công cụ AI cho cả nhóm" labelClassName="text-xs" help="Chọn công cụ AI (claude, codex hoặc agy) để gán đồng loạt cho tất cả vai trò bên dưới khi bấm “Áp dụng cho tất cả vai trò”."/><select id="bulk-role-cli" value={bulkCli} onChange={e=>{setBulkCli(e.target.value);setBulkModel('');}}>{['claude','codex','agy'].map(cli=><option key={cli}>{cli}</option>)}</select></div>
     <div className="min-w-40 flex-1"><FieldLabel htmlFor="bulk-role-model" label="Mô hình AI cho cả nhóm" labelClassName="text-xs" help="Nhập ID model hoặc bấm gợi ý bên dưới, rồi bấm “Áp dụng cho tất cả vai trò” và “Lưu cấu hình”. Gợi ý có thể khác danh sách model được cấp cho tài khoản; bạn vẫn có thể nhập ID khác. Với Agy, giữ nguyên vai trò conversation vì chưa được hỗ trợ." example={`Ví dụ: ${presets.slice(0,3).map(model=>model.id).join(', ')}`} /><input id="bulk-role-model" value={bulkModel} placeholder={`Ví dụ: ${presets[0]?.id??'ID model'}`} onChange={e=>setBulkModel(e.target.value)}/></div>
     <button type="button" onClick={applyAll}>Áp dụng cho tất cả vai trò</button>
    </div>
    {suggestions.length>0 && <div className="mt-2 flex flex-wrap items-center gap-1.5"><span className="font-data text-muted">Gợi ý mô hình:</span>{suggestions.map(model=><button type="button" key={model.id} title={model.id} className="min-h-7 px-2 py-0.5 text-xs" onClick={()=>setBulkModel(model.id)}>{model.label}</button>)}</div>}
-  </div>
-  <div className="content-grid grid items-start gap-2.5 md:grid-cols-2 2xl:grid-cols-3">{value.map((item,index)=>{
+  </div></details>
+  <div className="my-2 max-w-md"><FieldLabel htmlFor="selected-role" label="Vai trò cần sửa" help="Chọn một vai trò để xem và chỉnh riêng các thiết lập của vai trò đó."/><select id="selected-role" value={selectedIndex} onChange={e=>setSelectedRole(String((value[Number(e.target.value)] as Record<string,WebConfigValue>)?.role??''))}>{value.map((item,index)=>item && typeof item==='object' && !Array.isArray(item)?<option key={index} value={index}>{roleLabels[String(item.role)]??String(item.role)}</option>:null)}</select></div>
+  <div className="content-grid grid items-start gap-2.5">{value.map((item,index)=>{
+   if(index!==selectedIndex)return null;
    if(!item || typeof item!=='object' || Array.isArray(item))return null;
    const roleName=String(item.role),roleVi=roleLabels[roleName]??roleName;
    const baseId=`role-${index}-${roleName.replace(/[^a-zA-Z0-9_-]/g,'-')}`;

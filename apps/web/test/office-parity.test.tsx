@@ -395,19 +395,19 @@ test.each(rows.map(r => [r.row, r.name, r] as const))('parity row %i: %s', async
   }
 }, 20000);
 
-const overviewCamera = (): void => { fireEvent.click(within(screen.getByRole('group', { name: 'Góc nhìn camera' })).getByRole('button', { name: 'Toàn cảnh' })); };
-test('Toàn cảnh closes a route panel and returns to the index', async () => {
+const closeAllWindows = (): void => { fireEvent.click(screen.getByRole('button', { name: '◆ Bflow' })); fireEvent.click(screen.getByRole('button', { name: 'Đóng mọi cửa sổ' })); };
+test('Đóng mọi cửa sổ closes a route panel and returns to the index', async () => {
   await openRunViaRail();
   expect(panelOpen()).toBe(true);
-  overviewCamera();
+  closeAllWindows();
   await waitFor(() => expect(panelOpen()).toBe(false));
   expect(where).toBe('/projects/p');
 });
-test('Toàn cảnh closes an open inspector', async () => {
+test('Đóng mọi cửa sổ closes an open inspector', async () => {
   await mount();
   await mirror(/Máy chủ/);
   expect(await within(await screen.findByRole('dialog',{name:'Máy chủ'})).findByRole('heading', { name: /Máy chủ \(phiên dự án\)/ })).toBeTruthy();
-  overviewCamera();
+  closeAllWindows();
   await waitFor(() => expect(panelOpen()).toBe(false));
 });
 

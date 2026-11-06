@@ -118,6 +118,12 @@ test('Office3D: Director desk and issue board in the WebGL scene and the accessi
   await shot(page, '10b-office3d-director-desk-scene');
   await mirror(page, /^Bảng sự cố \(/);
   await page.waitForTimeout(1500);
+  const issueDialog=page.getByRole('dialog',{name:'Sự cố'});
+  const filterWidth=await issueDialog.evaluate(root=>{
+    const body=root.querySelector<HTMLElement>('.bwin-body')!,row=root.querySelector<HTMLElement>('.issue-filter-row')!;
+    return {content:body.clientWidth,toolbar:row.getBoundingClientRect().width};
+  });
+  expect(filterWidth.toolbar).toBeGreaterThan(filterWidth.content-48);
   await shot(page, '11-office3d-issue-board');
   await page.getByRole('button', { name: 'Đóng cửa sổ Sự cố' }).click();
   await page.waitForTimeout(1500);
@@ -137,6 +143,60 @@ test('Office3D: Director desk and issue board in the WebGL scene and the accessi
   await page.waitForTimeout(1000);
   await blur(page); await page.waitForTimeout(500);
   await shot(page, '13-office3d-phone-reduced-motion');
+});
+
+test('Office3D: chat controls fit inside the game window', async ({ page }) => {
+  test.setTimeout(120000);
+  await call('configure', { presence: 'active' });
+  const base=await openProject(page,await call('pair'),repository,/guides.*Xem dự án/);
+  await enterVisual(page);
+  await page.goto(`${new URL(page.url()).origin}${base}/chat`);
+  const app=page.getByRole('dialog',{name:'Trò chuyện'});
+  const chat=app.getByRole('region',{name:'Trò chuyện với Director'});
+  await expect(chat).toBeVisible();
+  await expect(app.locator('.bwin-nav')).toHaveCount(0);
+  await expect(page.getByRole('navigation',{name:'Điều hướng văn phòng'})).toBeVisible();
+  await expect(app.getByRole('button',{name:'Lịch sử trò chuyện'})).toBeVisible();
+  await expect(app.getByText('Về phê duyệt')).toBeHidden();
+  await expect(app.getByRole('button',{name:'Gửi tin nhắn'})).toBeVisible();
+  const fit=await app.evaluate(root=>{
+    const body=root.querySelector<HTMLElement>('.bwin-body')!,thread=root.querySelector<HTMLElement>('[data-component="DirectorChat"]')!,send=root.querySelector<HTMLElement>('button[aria-label="Gửi tin nhắn"]')!,form=thread.querySelector<HTMLElement>('form')!;
+    const right=root.getBoundingClientRect().right,button=send.getBoundingClientRect(),bodyBox=body.getBoundingClientRect();
+    return {bodyOverflow:body.scrollWidth-body.clientWidth,threadOverflow:thread.scrollWidth-thread.clientWidth,sendRight:button.right,right,formBottom:form.getBoundingClientRect().bottom,bodyBottom:bodyBox.bottom,windowBottom:root.getBoundingClientRect().bottom};
+  });
+  expect(fit.bodyOverflow).toBeLessThanOrEqual(1);
+  expect(fit.threadOverflow).toBeLessThanOrEqual(1);
+  expect(fit.sendRight).toBeLessThanOrEqual(fit.right);
+  expect(fit.formBottom).toBeLessThanOrEqual(fit.bodyBottom);
+  expect(fit.formBottom).toBeLessThanOrEqual(fit.windowBottom);
+  await page.waitForTimeout(350);
+  await shot(page,'16-office3d-chat-compact');
+});
+
+test('Office3D: unavailable Director chat keeps notices aligned', async ({page})=>{
+  test.setTimeout(120000);
+  await call('configure',{presence:'absent',clearMessages:true});
+  await page.route('**/director/messages**',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({apiVersion:1,code:'unavailable',message:'fixture offline',retryable:true,correlationId:'fixture-chat-read'})}));
+  const base=await openProject(page,await call('pair'),repository,/guides.*Xem dự án/);
+  await enterVisual(page);
+  await page.route('**/api/v1/projects/*/session',async route=>{const response=await route.fetch();const value=await response.json();await route.fulfill({response,json:{...value,state:'stopped'}});});
+  await page.setViewportSize({width:1024,height:900});
+  await page.goto(`${new URL(page.url()).origin}${base}/chat`);
+  const chat=page.getByRole('region',{name:'Trò chuyện với Director'});
+  await expect(chat.getByRole('alert')).toBeVisible();
+  const geometry=await chat.evaluate(root=>{
+    const pick=(selector:string)=>{const node=root.querySelector<HTMLElement>(selector);if(!node)return null;const r=node.getBoundingClientRect(),s=getComputedStyle(node);return {x:r.x,y:r.y,width:r.width,height:r.height,position:s.position,boxShadow:s.boxShadow,borderLeftWidth:s.borderLeftWidth};};
+    return {log:pick('[role="log"]'),alert:pick('[role="alert"]'),block:pick('#director-chat-blocked'),form:pick('form'),outcome:pick('[aria-label="Kết quả mở phiên Director"]')};
+  });
+  expect(geometry.log&&geometry.alert&&geometry.block&&geometry.form&&geometry.outcome).toBeTruthy();
+  expect(geometry.alert!.width).toBeGreaterThan(geometry.log!.width-36);
+  expect(geometry.alert!.boxShadow).toBe('none');
+  expect(geometry.block!.width).toBeGreaterThan(geometry.form!.width-36);
+  expect(geometry.block!.boxShadow).toBe('none');
+  expect(geometry.outcome!.position).toBe('static');
+  expect(geometry.outcome!.borderLeftWidth).toBe('0px');
+  await expect(chat.locator('[role="status"][aria-busy="true"]')).toHaveCount(0);
+  await shot(page,'17-office3d-chat-unavailable');
 });
 
 test('Immersive flag: Director desk opens one persistent, editable in-scene dialogue', async ({ page }) => {

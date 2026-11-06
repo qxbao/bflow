@@ -102,7 +102,7 @@ it('a stale issue is refused definitively, re-read and leaves no recovery record
 it('a non-current episode cannot be acted on and sends nothing',async()=>{
   const {calls}=server({issues:[issue()],run:runView({currentRunId:'child'})});render(page());
   fireEvent.click(await screen.findByRole('button',{name:'Thử lại sự cố'}));
-  expect(await screen.findByText(/tiếp nối ở phiên bản khác/)).toBeTruthy();expect(calls.commands).toHaveLength(0);
+  expect((await screen.findAllByText(/tiếp nối ở phiên bản khác/)).length).toBeGreaterThan(0);expect(calls.commands).toHaveLength(0);
 });
 it('list rows disable actions for a non-current episode without clicking',async()=>{
   const {calls}=server({issues:[issue()],run:runView({currentRunId:'child'})});render(page());

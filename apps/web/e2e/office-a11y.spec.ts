@@ -23,12 +23,10 @@ test('default-off 3D overview panel has an opaque surface and readable text cont
   test.skip(immersiveEnabled, 'Regression is for the default-off 3D panel style');
   await open(page);
   await rail(page, /^Tổng quan/).click();
-  await expect(page.locator('#main h1')).toBeVisible();
-  await expect(page.locator('#main p.text-muted').first()).toBeVisible();
+  await expect(page.locator('#main .overview-intro')).toBeHidden();
+  await expect(page.locator('#main [data-component="Overview"]')).toBeVisible();
   const colors = await page.locator('#main').evaluate(element => {
     const panel = getComputedStyle(element);
-    const heading = element.querySelector('h1');
-    const muted = element.querySelector('p.text-muted');
     const rgb = (value: string): [number, number, number, number] => {
       const parts = value.match(/[\d.]+/g)?.map(Number) ?? [];
       return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0, parts[3] ?? 1];
@@ -42,8 +40,9 @@ test('default-off 3D overview panel has an opaque surface and readable text cont
       return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
     };
     const background = rgb(panel.backgroundColor);
-    return { background: panel.backgroundColor, alpha: background[3], ink: getComputedStyle(heading!).color, muted: getComputedStyle(muted!).color,
-      inkRatio: ratio(getComputedStyle(heading!).color, panel.backgroundColor), mutedRatio: ratio(getComputedStyle(muted!).color, panel.backgroundColor) };
+    const muted=panel.getPropertyValue('--color-muted').trim();
+    return { background: panel.backgroundColor, alpha: background[3], ink: panel.color, muted,
+      inkRatio: ratio(panel.color, panel.backgroundColor), mutedRatio: ratio(muted, panel.backgroundColor) };
   });
   expect(colors.alpha).toBe(1);
   expect(colors.inkRatio).toBeGreaterThanOrEqual(4.5);
@@ -120,7 +119,7 @@ test('keyboard only: Tab reaches the HUD, the stage and every mirror object; arr
   // Esc pressed while focus is in the HUD (not in the panel) closes the panel too.
   await rail(page, /^Tổng quan/).click();
   await expect(page.locator('#main')).toBeVisible();
-  await page.getByRole('group', { name: 'Góc nhìn camera' }).getByRole('button', { name: 'Toàn cảnh' }).focus();
+  await page.getByRole('button', { name: /Mở trạng thái:/ }).focus();
   await page.keyboard.press('Escape');
   await expect(page.locator('#main')).toBeHidden();
   // A mirror object opens its page and Esc comes back.
@@ -164,13 +163,18 @@ for (const width of [375, 768, 1280, 1440]) {
     }
     const result = await page.evaluate(() => {
       const root = document.documentElement;
-      const rects = (els: Element[]) => els.map(e => ({ name: (e.getAttribute('aria-label') ?? e.textContent ?? '').trim().slice(0, 40), r: e.getBoundingClientRect() })).filter(x => x.r.width > 0 && x.r.height > 0);
+      const rects = (els: Element[]) => els.map(e => ({ name: (e.getAttribute('aria-label') ?? e.textContent ?? '').trim().slice(0, 40), r: e.getBoundingClientRect(), inStrip:Boolean(e.closest('.office-rail')) })).filter(x => x.r.width > 0 && x.r.height > 0);
       const hud = document.getElementById('office-hud')!;
-      const controls = rects([...hud.querySelectorAll('button, input, select, a[href]')].filter(e => !e.closest('details:not([open])')));
+      const controls = rects([...hud.querySelectorAll('button, input, select, a[href]')].filter(e => {
+        if(e.closest('details:not([open])'))return false;
+        const strip=e.closest('.office-rail');if(!strip)return true;
+        const item=e.getBoundingClientRect(),visible=strip.getBoundingClientRect();
+        return item.right>visible.left && item.left<visible.right;
+      }));
       const overlap = (a: DOMRect, b: DOMRect) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1;
       const clashes: string[] = [];
       for (let i = 0; i < controls.length; i++) for (let j = i + 1; j < controls.length; j++) if (overlap(controls[i]!.r, controls[j]!.r)) clashes.push(`${controls[i]!.name} x ${controls[j]!.name} @ ${[controls[i]!.r.x,controls[i]!.r.y,controls[i]!.r.width,controls[i]!.r.height].map(Math.round).join(',')} / ${[controls[j]!.r.x,controls[j]!.r.y,controls[j]!.r.width,controls[j]!.r.height].map(Math.round).join(',')}`);
-      const outside = controls.filter(c => c.r.left < -0.5 || c.r.right > innerWidth + 0.5 || c.r.top < -0.5 || c.r.bottom > innerHeight + 0.5).map(c => c.name);
+      const outside = controls.filter(c => !c.inStrip && (c.r.left < -0.5 || c.r.right > innerWidth + 0.5 || c.r.top < -0.5 || c.r.bottom > innerHeight + 0.5)).map(c => c.name);
       // Name tags only: a message box is wider than the safe-area test its anchor passes, and it is decoration over the character (aria-hidden), not a control label.
       const labels = rects([...document.querySelectorAll('[aria-label="Cảnh văn phòng"] [data-kind="agent"]')]);
       const covered = labels.filter(l => controls.some(c => overlap(l.r, c.r))).map(l => `${l.name} x ${controls.filter(c=>overlap(l.r,c.r)).map(c=>`${c.name}@${[c.r.x,c.r.y,c.r.width,c.r.height].map(Math.round).join(',')}`).join(';')}`);
@@ -184,17 +188,15 @@ for (const width of [375, 768, 1280, 1440]) {
     expect(result.outside).toEqual([]);
     expect(result.covered).toEqual([]);
     expect(result.small).toEqual([]);
-    if(immersiveEnabled){
-      await page.getByText('Camera',{exact:true}).click();
-      const buttons=page.locator('.office-cameras details[open] > div button');
-      const boxes=await buttons.evaluateAll(elements=>elements.map(element=>{const r=element.getBoundingClientRect();return {name:element.getAttribute('aria-label')||element.textContent,left:r.left,right:r.right,top:r.top,bottom:r.bottom};}));
-      for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++)expect(Math.min(boxes[i]!.right,boxes[j]!.right)-Math.max(boxes[i]!.left,boxes[j]!.left)>1&&Math.min(boxes[i]!.bottom,boxes[j]!.bottom)-Math.max(boxes[i]!.top,boxes[j]!.top)>1,`${boxes[i]!.name} @ ${[boxes[i]!.left,boxes[i]!.top,boxes[i]!.right-boxes[i]!.left,boxes[i]!.bottom-boxes[i]!.top]} x ${boxes[j]!.name} @ ${[boxes[j]!.left,boxes[j]!.top,boxes[j]!.right-boxes[j]!.left,boxes[j]!.bottom-boxes[j]!.top]}`).toBe(false);
-      await page.getByText('Camera',{exact:true}).click();
-    }
+    await page.getByRole('button',{name:'◆ Bflow'}).click();
+    const menu=page.getByRole('group',{name:'Menu Bflow'});
+    await expect(menu.getByText('Góc nhìn văn phòng')).toHaveCount(0);
+    await expect(menu.getByRole('button',{name:'Sắp xếp lại cửa sổ'})).toBeVisible();
+    await page.getByRole('button',{name:'◆ Bflow'}).click();
     // The panel opens inside the viewport too, full width on a phone.
-    if(width<768){await page.getByRole('button',{name:'◆ Bflow'}).click();await page.getByRole('group',{name:'Menu Bflow'}).getByRole('button',{name:'Tổng quan'}).click();}
-    else await rail(page, /^Tổng quan/).click();
-    await page.waitForTimeout(150); // Let the 120 ms window-open scale animation settle before measuring its edges.
+    await rail(page, /^Tổng quan/).click();
+    await page.locator('#main').evaluate(async element=>{await Promise.all(element.getAnimations().map(animation=>animation.finished.catch(()=>undefined)));});
+    if(width<768){await page.getByRole('button',{name:'◆ Bflow'}).click();await expect(page.getByRole('group',{name:'Menu Bflow'}).getByRole('button',{name:'Công việc'})).toBeVisible();await page.getByRole('button',{name:'◆ Bflow'}).click();}
     const panel = await page.locator('#main').boundingBox();
     expect(panel && panel.x >= -0.5 && panel.x + panel.width <= width + 0.5).toBe(true);
     if (width < 768) expect(Math.round(panel!.width)).toBe(immersiveEnabled ? width - 24 : width);

@@ -12,6 +12,8 @@ export function clampRect(rect: WindowRect, viewport: Viewport, min = { w: 320, 
 export function defaultRect(kind: WindowKind, viewport: Viewport, index = 0): WindowRect {
   const taskbar = 56;
   if (kind === 'app') return clampRect({ x: 120 + (viewport.width - 120) * .32, y: 16, w: Math.max(420, Math.min(920, viewport.width * .52)), h: viewport.height - taskbar - 32 }, viewport, { w: 420, h: 320 });
+  if (kind === 'status') return clampRect({ x: viewport.width - 436, y: 72, w: 420, h: 380 }, viewport);
+  if (kind === 'cabinet' || kind === 'server') return clampRect({ x: viewport.width - 560, y: 168, w: 480, h: 320 }, viewport);
   const w = Math.min(480, viewport.width - 32), h = Math.min(560, viewport.height - 200);
   return clampRect({ x: viewport.width - w - 16 - (index % 4) * 32, y: 168 + (index % 4) * 32, w, h }, viewport);
 }

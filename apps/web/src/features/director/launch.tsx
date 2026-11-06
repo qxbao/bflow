@@ -104,7 +104,7 @@ export function DirectorLaunch({label='Mở phiên Director'}:{label?:string}){
   }
   return <div data-component="DirectorLaunch" className="min-w-0">
     {!unsettled&&<button ref={toggle} type="button" aria-expanded={open} aria-controls={`${uid}-picker`} className="min-w-40 border-ink bg-brand font-semibold text-on-brand hover:bg-ink hover:text-surface" disabled={!command.online||command.busy} onClick={()=>void openPicker()}>{label}</button>}
-    {open&&!unsettled&&<div id={`${uid}-picker`} onKeyDown={escape} className="mt-2.5 min-w-0 border border-line bg-canvas p-3">
+    {open&&!unsettled&&<div id={`${uid}-picker`} onKeyDown={escape} className="director-launch-picker mt-2.5 min-w-0 border border-line bg-canvas p-3">
       {loading&&<p role="status" className="my-1 text-sm text-muted">Đang kiểm tra cách mở Director trên máy này…</p>}
       {options&&<>
         {!options.terminal.available&&<p className="mt-0 mb-2 border-l-3 border-warning pl-3 text-sm">Máy này không mở được terminal tự động{options.terminal.reason?`: ${options.terminal.reason}`:'.'} Bflow sẽ trả về lệnh để bạn tự chạy.</p>}

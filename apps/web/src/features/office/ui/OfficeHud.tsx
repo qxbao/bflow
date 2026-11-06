@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useId, useState, type FormEvent, type ReactNode } from 'react';
 import type { WebProjectSession, WebRunView } from '@bflow/contracts/web';
 import { phases } from '../../../components/StatusBadge';
 import type { Connection } from '../../../api/events';
@@ -58,7 +58,7 @@ function Icon({ name }: { name: IconName }) {
 const sticker:Partial<Record<IconName,StickerIconName>>={overview:'overview',tasks:'tasks',decision:'decision',chat:'chat',issues:'issues',agents:'agents',docs:'docs',settings:'settings',refresh:'refresh'};
 
 const panel = 'rounded-xl border border-line bg-surface/85 backdrop-blur-md';
-const railButton = 'relative flex min-h-12 w-[3.75rem] flex-col items-center justify-center gap-0.5 rounded-lg border-transparent px-1 py-1 text-[0.625rem] leading-tight';
+const railButton = 'relative flex min-h-12 items-center justify-center gap-1.5 px-2 py-1 text-xs';
 const camButton = 'flex min-h-11 items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs sm:px-3';
 
 export interface OfficeHudProps {
@@ -92,6 +92,8 @@ export interface OfficeHudProps {
   onDocuments: () => void;
   onNavigate: (path: '' | 'runs' | 'review' | 'chat' | 'agents' | 'settings') => void;
   onRefresh: () => void;
+  onHistory?: (delta:-1|1) => void;
+  onPageReload?: () => void;
   onFocusZone: (zone: OfficeFocusZone) => void;
   onAgentList: () => void;
   /**
@@ -125,31 +127,7 @@ export function OfficeHud(p: OfficeHudProps) {
   const [draft, setDraft] = useState('');
   const [dockOpen, setDockOpen] = useState(false);
   const dockId = useId();
-  const bottom = useRef<HTMLDivElement>(null);
-  const card = useRef<HTMLElement>(null);
-  // The rail sits in the gap between the office card and the bottom controls, so a taller card or dock never overlaps it.
-  const [railGap, setRailGap] = useState<{ top: number; bottom: number }>();
-  const { onDockHeight } = p;
-  useEffect(() => {
-    const el = bottom.current;
-    if (!el || !onDockHeight) return;
-    const measure = (): void => onDockHeight(el.offsetHeight);
-    measure();
-    if (typeof ResizeObserver === 'undefined') return () => onDockHeight(0);
-    const observer = new ResizeObserver(measure);
-    observer.observe(el);
-    return () => { observer.disconnect(); onDockHeight(0); };
-  }, [onDockHeight]);
-  useEffect(() => {
-    const top = card.current, end = bottom.current;
-    if (!top || !end || typeof ResizeObserver === 'undefined') return;
-    const measure = (): void => { if (top.offsetHeight > 0) setRailGap({ top: top.offsetTop + top.offsetHeight, bottom: end.offsetHeight }); };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(top);
-    observer.observe(end);
-    return () => observer.disconnect();
-  }, []);
+  useEffect(() => { p.onDockHeight?.(0); }, [p.onDockHeight]);
   const run = currentRun(p.runs), counts = agentCounts(p.model), chat = p.director ? p.director.canSend : chatAvailable(p.session);
   const desk = p.model?.director !== undefined, queue = p.model?.queue;
   const pending = p.model?.pendingDecisions ?? 0;
@@ -181,7 +159,7 @@ export function OfficeHud(p: OfficeHudProps) {
   const cams: [OfficeFocusZone, IconName, string][] = [['overview', 'all', 'Toàn cảnh'], ['conversation', 'chat', desk ? 'Director' : 'Trợ lý'], ['coordinator', 'coordinator', 'Điều phối'], ['developer', 'developer', 'Lập trình'], ['qa', 'qa', 'Kiểm tra']];
   return <>
     <div className={`pointer-events-none office-topbar absolute inset-x-4 top-4 ${hideOnPhone}`}>
-      <ProjectWidget ref={card} className={panel}>
+      <ProjectWidget className={panel}>
         <h2 className="m-0 font-display text-xl leading-none font-extrabold tracking-wide text-ink">Bflow Office</h2>
         <select aria-label="Chuyển dự án" value={p.projectId} onChange={e => p.onProject(e.target.value)} className="mt-1 min-h-9 w-full truncate px-2 py-1 text-xs lg:min-h-8">
           {p.projects.some(x => x.projectId === p.projectId) ? null : <option value={p.projectId}>{p.projectName}</option>}
@@ -207,28 +185,29 @@ export function OfficeHud(p: OfficeHudProps) {
           {p.stale && <span className="rounded border border-warning px-1.5 text-warning">Dữ liệu cũ</span>}
         </div></StatusTray>
       </ProjectWidget>
+      <nav aria-label="Điều hướng văn phòng" className="office-desktop-nav pointer-events-auto">
+        <button type="button" aria-label="Quay lại" title="Quay lại" disabled={!p.onHistory} onClick={()=>p.onHistory?.(-1)}>←</button>
+        <button type="button" aria-label="Tiến" title="Tiến" disabled={!p.onHistory} onClick={()=>p.onHistory?.(1)}>→</button>
+        <button type="button" aria-label="Tải lại trang" title="Tải lại trang" onClick={()=>p.onPageReload?p.onPageReload():p.onRefresh()}>⟳</button>
+      </nav>
       {p.immersive && p.notifications}
       {p.immersive && p.firstVisit}
     </div>
-    <DesktopIcons {...(railGap ? { style:{ top: railGap.top + 28, maxHeight: `calc(100% - ${railGap.top + railGap.bottom + 40}px)` } } : {})} className={`${railGap ? 'office-rail-anchored' : ''} ${panel} ${hideOnPhone}`}>
+    <DesktopIcons className={`${panel} ${hideOnPhone}`}>
       {rail.map(([icon, label, action, badge, badgeText]) => <button type="button" key={label} className={railButton} onClick={action}>
-        {sticker[icon]?<StickerIcon name={sticker[icon]!} className="size-9 shrink-0"/>:<Icon name={icon}/>}<span className="text-center">{label}</span>
+        {sticker[icon]?<StickerIcon name={sticker[icon]!} className="size-6 shrink-0"/>:<Icon name={icon}/>}<span>{label}</span>
         {badge !== undefined && badge > 0 && <span className="absolute top-0.5 right-1.5 min-w-4 rounded-full bg-danger px-1 text-center text-[0.625rem] leading-4 font-semibold text-canvas"><span className="sr-only">{badgeText}</span>{badge}</span>}
       </button>)}
+      {(p.dockSummary.count > 0 || p.dockSummary.attention) && <button type="button" aria-expanded={operationsOpen} aria-controls={dockId} onClick={() => p.onDockOpen?p.onDockOpen():setDockOpen(open => !open)} className={`${railButton} ${p.dockSummary.attention ? 'border-warning text-warning' : ''}`}>Thao tác đã gửi ({p.dockSummary.count})</button>}
     </DesktopIcons>
-    <div ref={bottom} data-hud-bottom className={`absolute inset-x-3 bottom-0 flex flex-col gap-2 pb-3 ${p.panelOpen ? 'max-md:pb-0' : ''}`}>
-      {(p.dockSummary.count > 0 || p.dockSummary.attention) && <button type="button" aria-expanded={operationsOpen} aria-controls={dockId} onClick={() => p.onDockOpen?p.onDockOpen():setDockOpen(open => !open)} className={`pointer-events-auto self-start rounded-lg px-3 py-1.5 text-xs ${panel} ${p.dockSummary.attention ? 'border-warning text-warning' : ''}`}>Thao tác đã gửi ({p.dockSummary.count})</button>}
+    <div data-hud-bottom className="absolute inset-x-3 bottom-14">
       {/* Live region that exists before the state changes, so a screen reader hears the dock needing a look while it stays collapsed. */}
       <span role="status" className="sr-only" data-testid="dock-attention">{p.dockSummary.attention ? 'Có thao tác cần xem trong Thao tác đã gửi' : ''}</span>
       {!p.onDockOpen&&<div id={dockId} hidden={!dockOpen} data-hud-dock className="pointer-events-auto max-h-[40dvh] overflow-y-auto empty:hidden">{p.dock}</div>}
-      <div className={`flex flex-col items-stretch gap-2 ${p.panelOpen ? '' : 'md:flex-row md:items-end'} ${hideOnPhone}`}>
-        <CameraBar>
-          {cams.map(([zone, icon, label]) => <button type="button" key={zone} aria-label={label} title={label} className={camButton} onClick={() => { if (zone === 'overview') setDockOpen(false); p.onFocusZone(zone); }}><Icon name={icon}/><span className="max-sm:hidden">{label}</span></button>)}
-          {p.immersive&&<details className="relative"><summary className={`${camButton} cursor-pointer list-none ${panel}`} aria-label="Điều khiển camera">Camera</summary><div className={`absolute bottom-full left-0 z-30 mb-1 grid grid-cols-3 gap-1 p-1 ${panel}`}><span/><button type="button" aria-label="Di chuyển góc nhìn lên" onClick={()=>p.onCameraControl?.('up')}>↑</button><span/><button type="button" aria-label="Di chuyển góc nhìn sang trái" onClick={()=>p.onCameraControl?.('left')}>←</button><button type="button" aria-label="Thu nhỏ" onClick={()=>p.onCameraControl?.('zoom-out')}>−</button><button type="button" aria-label="Di chuyển góc nhìn sang phải" onClick={()=>p.onCameraControl?.('right')}>→</button><span/><button type="button" aria-label="Phóng to" onClick={()=>p.onCameraControl?.('zoom-in')}>+</button><span/><button type="button" aria-label="Di chuyển góc nhìn xuống" onClick={()=>p.onCameraControl?.('down')}>↓</button></div></details>}
-          {p.overflow > 0 && <button type="button" className={`${camButton} text-accent`} aria-label={`Còn ${p.overflow} lập trình viên chưa hiện trong cảnh. Mở danh sách nhân viên`} title="Mở danh sách nhân viên" onClick={p.onAgentList}>+{p.overflow}</button>}
-        </CameraBar>
-        {!p.taskbar&&quickChat}
-      </div>
+      {!p.taskbar&&<div className={hideOnPhone}><CameraBar>
+        {cams.map(([zone, icon, label]) => <button type="button" key={zone} aria-label={label} className={camButton} onClick={() => { if (zone === 'overview') setDockOpen(false); p.onFocusZone(zone); }}><Icon name={icon}/><span>{label}</span></button>)}
+        {p.overflow > 0 && <button type="button" className={camButton} aria-label={`Còn ${p.overflow} lập trình viên chưa hiện trong cảnh. Mở danh sách nhân viên`} onClick={p.onAgentList}>+{p.overflow}</button>}
+      </CameraBar>{quickChat}</div>}
     </div>
     {p.taskbar?.(quickChat)}
   </>;

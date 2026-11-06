@@ -60,7 +60,7 @@ export function AgentsPage({ api, id, revision }: { api: ApiClient; id: string; 
   const selected = agents.find(a => a.instanceId === wanted) ?? agents.find(a => openWork(a) > 0) ?? agents[0];
   const unsupported = unsupportedError(result.error);
   return <section aria-label="Nhân viên" className="min-w-0">
-    <h2 className="mt-0">Nhân viên</h2>
+    <h2 className="agents-page-heading mt-0">Nhân viên</h2>
     <LoadingState loading={result.loading} initial={!result.data} label="Đang tải danh sách nhân viên…" />
     {Boolean(result.error) && (unsupported && !result.data ? <EmptyState title="Chưa có dữ liệu nhân viên"><p>Máy chủ chưa cung cấp danh sách nhân viên. Có thể phiên chưa chạy.</p></EmptyState> : <ErrorState stale={Boolean(result.data)} error={result.error} retry={() => setReload(n => n + 1)} />)}
     {result.data && agents.length === 0 && <EmptyState title="Chưa có nhân viên nào"><p>Phiên chưa có nhân viên nào được theo dõi.</p></EmptyState>}

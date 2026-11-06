@@ -46,7 +46,7 @@ export function AppShell({projects,projectId,visual,modeSwitch,children}:{projec
   const base=projectId?`/projects/${encodeURIComponent(projectId)}`:undefined;
   const project=projects.find(item=>item.projectId===projectId);
   function toggleMenu(){if(menuOpen && menu.current?.contains(document.activeElement))menuButton.current?.focus();setMenuOpen(value=>!value);}
-  return <div className={visual?`workspace-shell office-3d min-h-dvh ${visual.immersive?'office-immersive':''}`:'workspace-shell min-h-dvh'} style={visual?{'--hud-h':`${visual.dockPx}px`} as CSSProperties:undefined}>
+  return <div className={visual?`workspace-shell office-3d min-h-dvh ${visual.immersive?'office-immersive':''}`:'workspace-shell min-h-dvh'} style={visual?{'--hud-h':`${visual.dockPx}px`,'--app-left':`${visual.panelOpen&&appDisplay!=='minimized'?appRect.x:window.innerWidth}px`} as CSSProperties:undefined}>
     <a className="sr-only absolute z-30 bg-surface p-3 focus:not-sr-only focus:top-2 focus:left-3" href={visual?'#office-hud':'#main'}>Bỏ qua điều hướng</a>
     {/* Web mode: the Web | 3D pill sits where the 3D HUD puts it (16px from the top-right corner), so switching never moves it. */}
     {modeSwitch && <div className="absolute top-4 right-4 z-40">{modeSwitch}</div>}
@@ -79,7 +79,7 @@ export function AppShell({projects,projectId,visual,modeSwitch,children}:{projec
         <div ref={setChromeHost} className={visual?'bwin-chrome-host':'classic-chrome-host'}/>
         <div className={visual?'bwin-body workspace-main-content':'classic-route-host'}>{children}</div>
       </main>
-      {visual&&chromeHost&&createPortal(<GameWindow id="app" kind="app" title={currentTitle} titleId="app-window-title" icon={currentIcon} color={currentColor} rect={appRect} display={appDisplay} z={appWindow?.z??1} active={appWindow?.active??true} closable={visual.closable} minimizable maximizable movable={window.innerWidth>=1100} resizable={window.innerWidth>=1100} onFocus={()=>actionsRef.current?.focus()} onClose={visual.onClose} onMinimize={()=>actionsRef.current?.minimize()} onToggleMaximize={()=>actionsRef.current?.toggleMaximize()} onMove={appMove} onResize={appResize} embedded nav={<div className="bwin-nav-buttons"><button aria-label="Quay lại" onClick={()=>navigate(-1)}>←</button><button aria-label="Tiến" onClick={()=>navigate(1)}>→</button><button aria-label="Tải lại trang" onClick={()=>navigate(0)}>⟳</button><span>{currentTitle}</span></div>}/>,chromeHost)}
+      {visual&&chromeHost&&createPortal(<GameWindow id="app" kind="app" title={currentTitle} titleId="app-window-title" icon={currentIcon} color={currentColor} rect={appRect} display={appDisplay} z={appWindow?.z??1} active={appWindow?.active??true} closable={visual.closable} minimizable maximizable movable={window.innerWidth>=1100} resizable={window.innerWidth>=1100} onFocus={()=>actionsRef.current?.focus()} onClose={visual.onClose} onMinimize={()=>actionsRef.current?.minimize()} onToggleMaximize={()=>actionsRef.current?.toggleMaximize()} onMove={appMove} onResize={appResize} embedded/>,chromeHost)}
     </div>
     <footer className={`${visual?'hidden ':''}border-t border-line px-4 py-4 font-data text-xs text-muted sm:px-6`}>Bflow · Web cục bộ · Theo dõi và xem xét công việc</footer>
   </div>;

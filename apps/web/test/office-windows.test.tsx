@@ -68,12 +68,11 @@ describe('game window state and geometry', () => {
     expect(windowButton.getAttribute('aria-pressed')).toBe('false');
     fireEvent.click(windowButton);
     expect(windowButton.getAttribute('aria-pressed')).toBe('true');
-    fireEvent.click(screen.getByRole('button',{name:'◆ Bflow'}));
-    fireEvent.click(within(screen.getByRole('group',{name:'Menu Bflow'})).getByRole('button',{name:'Chế độ Web'}));
+    fireEvent.click(screen.getByRole('button',{name:'Web'}));
     expect(onMode).toHaveBeenCalledWith('classic');
     fireEvent.click(screen.getByRole('button',{name:'◆ Bflow'}));
-    fireEvent.click(within(screen.getByRole('group',{name:'Menu Bflow'})).getByRole('button',{name:'Tài liệu'}));
-    expect(onDocuments).toHaveBeenCalledTimes(1);
+    fireEvent.click(within(screen.getByRole('group',{name:'Menu Bflow'})).getByRole('button',{name:'Đóng mọi cửa sổ'}));
+    expect(onCloseAll).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole('button',{name:'Mở trạng thái: Đã kết nối'}));
     expect(onStatusOpen).toHaveBeenCalledTimes(1);
   });

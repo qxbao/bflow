@@ -109,7 +109,7 @@ test('selecting in the mirror opens the agent inspector in the panel, and object
   expect(main.classList.contains('hidden')).toBe(true);
   fireEvent.click(within(mirror).getByRole('button', { name: /Tủ tài liệu/ }));
   const cabinet=await screen.findByRole('dialog',{name:'Tài liệu'});
-  expect(within(cabinet).getByRole('heading',{name:'Tủ tài liệu'})).toBeTruthy();
+  expect(within(cabinet).getByRole('heading',{name:'Tài liệu'})).toBeTruthy();
   expect(screen.getByRole('dialog',{name:'Developer #1'})).toBeTruthy();
   fireEvent.click(within(mirror).getByRole('button', { name: /Máy chủ/ }));
   expect(await screen.findByRole('dialog',{name:'Máy chủ'})).toBeTruthy();
@@ -131,7 +131,8 @@ test('a refused session opens re-pairing in the panel instead of stale data', as
   expect(await within(repair).findByLabelText(/Liên kết mở Bflow Web/)).toBeTruthy();
   expect(screen.getByLabelText('Trạng thái văn phòng').textContent).toContain('Cần ghép nối lại');
   // Toàn cảnh closes panels but the re-pair view cannot be dismissed.
-  fireEvent.click(screen.getByRole('button', { name: 'Toàn cảnh' }));
+  fireEvent.click(screen.getByRole('button', { name: '◆ Bflow' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Đóng mọi cửa sổ' }));
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(within(repair).getByLabelText(/Liên kết mở Bflow Web/)).toBeTruthy();
   expect(main.classList.contains('hidden')).toBe(true);
