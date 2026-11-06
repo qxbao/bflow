@@ -186,7 +186,14 @@ test('Immersive flag: Director desk opens one persistent, editable in-scene dial
   await page.keyboard.press('Escape');
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-state', 'overview');
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-selected', 'false');
-  await page.getByText('Camera', { exact: true }).click();
+  const camera = page.getByText('Camera', { exact: true });
+  const cameraBox = await camera.boundingBox();
+  expect(cameraBox, `camera control bounds: ${JSON.stringify(cameraBox)}`).not.toBeNull();
+  expect(cameraBox!.x, `camera control bounds: ${JSON.stringify(cameraBox)}`).toBeGreaterThanOrEqual(0);
+  expect(cameraBox!.y, `camera control bounds: ${JSON.stringify(cameraBox)}`).toBeGreaterThanOrEqual(0);
+  expect(cameraBox!.x + cameraBox!.width, `camera control bounds: ${JSON.stringify(cameraBox)}`).toBeLessThanOrEqual(812);
+  expect(cameraBox!.y + cameraBox!.height, `camera control bounds: ${JSON.stringify(cameraBox)}`).toBeLessThanOrEqual(375);
+  await camera.click();
   await expect(page.getByRole('button', { name: 'Phóng to' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Di chuyển góc nhìn sang trái' })).toBeVisible();
   await opener.focus();
@@ -214,7 +221,15 @@ test('short landscape recovery keeps transcript, launch/read controls, suggestio
   await expect(dialogue.getByText('Gợi ý trò chuyện',{exact:true})).toBeVisible();
   await expect(dialogue.getByText(/không tự gửi lại/)).toBeVisible();
   const targets=[dialogue.getByRole('button',{name:'Đóng cửa sổ Trò chuyện với Director'}),dialogue.getByRole('button',{name:'Đọc lại hội thoại'}),dialogue.getByRole('button',{name:'Khởi động phiên'}),dialogue.getByText('Gợi ý trò chuyện',{exact:true}),dialogue.getByRole('button',{name:'Đối chiếu tin nhắn'})];
-  await shot(page,'14-office3d-landscape-lost-ack');
+  await shot(page,'812-director-landscape-final');
+  const chatGeometry=await dialogue.evaluate(root=>{const win=root.closest('.bwin'),box=(selector:string)=>{const el=win?.querySelector<HTMLElement>(selector),r=el?.getBoundingClientRect();return el&&r?{x:r.x,y:r.y,width:r.width,height:r.height,scrollTop:el.scrollTop}:undefined;};return {body:box('.bwin-body'),thread:box('.chat-thread'),header:box('.chat-thread > header'),form:box('.chat-thread > form')};});
+  expect(chatGeometry.thread?.scrollTop).toBe(0);
+  expect(chatGeometry.header!.y).toBeGreaterThanOrEqual(chatGeometry.body!.y);
+  expect(chatGeometry.form!.y+chatGeometry.form!.height).toBeLessThanOrEqual(chatGeometry.body!.y+chatGeometry.body!.height);
+  expect(chatGeometry.header!.y+chatGeometry.header!.height).toBeLessThanOrEqual(chatGeometry.form!.y);
+  const compactControls=[targets[0]!,dialogue.getByLabel('Tin nhắn cho Director'),dialogue.getByRole('button',{name:'Gửi tin nhắn'}),targets[4]!];
+  const compactBoxes=await Promise.all(compactControls.map(async target=>{const box=await target.boundingBox();expect(box).not.toBeNull();expect(box!.x).toBeGreaterThanOrEqual(0);expect(box!.y).toBeGreaterThanOrEqual(0);expect(box!.x+box!.width).toBeLessThanOrEqual(812);expect(box!.y+box!.height).toBeLessThanOrEqual(375);return box!;}));
+  for(let i=0;i<compactBoxes.length;i++)for(let j=i+1;j<compactBoxes.length;j++)expect(compactBoxes[i]!.x+compactBoxes[i]!.width<=compactBoxes[j]!.x||compactBoxes[j]!.x+compactBoxes[j]!.width<=compactBoxes[i]!.x||compactBoxes[i]!.y+compactBoxes[i]!.height<=compactBoxes[j]!.y||compactBoxes[j]!.y+compactBoxes[j]!.height<=compactBoxes[i]!.y,`landscape controls ${i} and ${j} must not overlap`).toBe(true);
   for(const target of targets){
     await target.scrollIntoViewIfNeeded();
     await expect(target).toBeVisible();
