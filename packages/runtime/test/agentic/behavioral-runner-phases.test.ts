@@ -66,6 +66,8 @@ describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("independen
     }
     const observed = JSON.parse(Buffer.concat(chunks).toString());
     expect(observed.accepted).toBe(false);
+    expect(observed).toMatchObject({ runId: "run-1", taskId: "task-1", attemptId: f.implementationHandle.attemptId,
+      sourceRevision: f.git("rev-parse", "HEAD"), phase: "red" });
     expect(observed.measurementFailure.outcome.stdout).toContain("TypeError");
     expect(observed.measurementFailure.outcome.exitCode).toBe(1);
     await writeFile(join(f.cwd, "test/behavior.test.cjs"), `const {test}=require('node:test'); const assert=require('node:assert/strict'); const value=require('../source.cjs'); test(${JSON.stringify(testName)},()=>assert.equal(typeof value.multiply,'function'));\n`);
