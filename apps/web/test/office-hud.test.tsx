@@ -63,17 +63,15 @@ test('project switcher, failed and re-pair states, and the Tài liệu button', 
   expect(screen.getByLabelText('Trạng thái văn phòng').textContent).toContain('Chưa có dữ liệu nhân viên');
 });
 
-test('right rail with the decision badge and refresh', () => {
+test('desktop shortcut rail keeps badge and document actions', () => {
   const p = props();
   render(<OfficeHud {...p} />);
   const rail = within(screen.getByRole('navigation', { name: 'Lối tắt' }));
-  expect(rail.getAllByRole('button').map(b => b.textContent?.replace(/Đang chờ: /, ''))).toEqual(['Tổng quan', 'Công việc', 'Quyết định2', 'Trò chuyện', 'Nhân viên', 'Tài liệu', 'Cài đặt', 'Tải lại dữ liệu']);
+  expect(rail.getAllByRole('button').map(b => b.textContent?.replace(/Đang chờ: /, ''))).toEqual(['Tổng quan', 'Công việc', 'Quyết định2', 'Trò chuyện', 'Nhân viên', 'Tài liệu', 'Cài đặt']);
   fireEvent.click(rail.getByRole('button', { name: /Quyết định/ }));
   expect(p.onNavigate).toHaveBeenCalledWith('review');
   fireEvent.click(rail.getByRole('button', { name: 'Tổng quan' }));
   expect(p.onOverview).toHaveBeenCalled();
-  fireEvent.click(rail.getByRole('button', { name: 'Tải lại dữ liệu' }));
-  expect(p.onRefresh).toHaveBeenCalled();
 });
 
 test('camera buttons ask the scene for their zone and the overflow chip opens the agent list', () => {

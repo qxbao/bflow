@@ -28,6 +28,7 @@ test('3D app window and scene stay in bounds at free, tile and sheet widths', as
   for (const width of [1099, 1024, 768, 375, 812]) {
     await page.setViewportSize({ width, height: width === 812 ? 375 : 900 });
     await expect(main).toBeVisible();
+    await page.waitForTimeout(150);
     const rect=await main.boundingBox();
     expect(rect).not.toBeNull();
     expect(rect!.x+rect!.width).toBeLessThanOrEqual(width+1);

@@ -67,12 +67,11 @@ function Workspace({api,revision,refresh,onPair}:{api:ApiClient;revision:number;
 function Project({api,projects,projectsLoading,projectsError,revision,refresh,onPair}:{api:ApiClient;projects:WebProject[];projectsLoading:boolean;projectsError:unknown;revision:number;refresh:()=>void;onPair:(secret:string)=>Promise<void>}) {
   const {projectId=''}=useParams(); const project=projects.find(project=>project.projectId===projectId);
   const [mode,setMode]=useUiMode(),[overviewOpen,setOverviewOpen]=useState(false),[host,setHost]=useState<HTMLElement|null>(null),[hud,setHud]=useState<HTMLElement|null>(null),[windowHost,setWindowHost]=useState<HTMLElement|null>(null),[dockPx,setDockPx]=useState(0);
-  const [inspector,setInspector]=useState<Inspector|undefined>(),[inspectors,setInspectors]=useState<Inspector[]>([]),[inspectorHost,setInspectorHost]=useState<HTMLElement|null>(null);
   const inspectorOpeners=useRef(new Map<string,HTMLElement|null>());
   const navigate=useNavigate(),isIndex=Boolean(useMatch({path:'/projects/:projectId',end:true})),base=`/projects/${encodeURIComponent(projectId)}`;
   // Reset during render, not in an effect, so the previous project's inspector never paints for the new one.
   const [seenProject,setSeenProject]=useState(projectId);
-  if(seenProject!==projectId){setSeenProject(projectId);setOverviewOpen(false);setInspector(undefined);setInspectors([]);}
+  if(seenProject!==projectId){setSeenProject(projectId);setOverviewOpen(false);inspectorOpeners.current.clear();}
   // Overview is only meaningful at the index path; leaving it forgets the HUD-opened state.
   useEffect(()=>{if(!isIndex)setOverviewOpen(false);},[isIndex]);
   // Visual mode: the index path closes the panel (or shows the HUD-opened overview); every other route opens it.
@@ -80,14 +79,13 @@ function Project({api,projects,projectsLoading,projectsError,revision,refresh,on
   // The re-pair view cannot be dismissed (Esc and the close button do nothing): it reopens itself while the session is refused, so closing would only fight it.
   const closable=true;
   const close=useCallback(()=>{setOverviewOpen(false);if(!isIndex)navigate(base);},[isIndex,navigate,base]);
-  const showOverview=useCallback(()=>{setInspector(undefined);setOverviewOpen(true);},[]);
-  const openOverview=useCallback(()=>{setInspector(undefined);setOverviewOpen(true);if(!isIndex)navigate(base);},[isIndex,navigate,base]);
-  // Inspectors live in the panel on the index path: opening one leaves any page route and the overview.
-  const openInspector=useCallback((next:Inspector|undefined)=>{setInspector(next);if(next){const id=next.kind==='agent'?`agent:${next.instanceId}`:next.kind;if(!inspectorOpeners.current.has(id)){const active=document.activeElement;inspectorOpeners.current.set(id,active instanceof HTMLElement&&active!==document.body?active:null);}setInspectors(items=>{let updated=[...items.filter(item=>(item.kind==='agent'?`agent:${item.instanceId}`:item.kind)!==id),next];const agents=updated.filter((item):item is Extract<Inspector,{kind:'agent'}>=>item.kind==='agent');if(agents.length>3){const removed=agents[0]!;updated=updated.filter(item=>item.kind!=='agent'||item.instanceId!==removed.instanceId);}return updated;});}else setInspectors([]);},[]);
-  const closeInspector=useCallback((id:string,focusHud=false)=>{setInspectors(items=>items.filter(item=>(item.kind==='agent'?`agent:${item.instanceId}`:item.kind)!==id));setInspector(current=>(current&&(current.kind==='agent'?`agent:${current.instanceId}`:current.kind)===id?undefined:current));requestAnimationFrame(()=>{const opener=inspectorOpeners.current.get(id);inspectorOpeners.current.delete(id);if(!focusHud&&opener?.isConnected)opener.focus();else document.getElementById('office-hud')?.focus();});},[]);
-  return <WindowManagerProvider key={projectId} projectId={projectId} appOpen={panelOpen}><AppShell projects={projects} projectId={projectId} modeSwitch={project&&!visual?<ModeSwitch mode={mode} onChange={setMode}/>:undefined} visual={visual?{panelOpen,closable,immersive:immersiveOfficeEnabled(),dockPx,inspectorRef:setInspectorHost,windowsRef:setWindowHost,onClose:close,onOverview:showOverview,hudRef:setHud,stageRef:setHost}:undefined}>{project?<ProjectContent key={projectId} api={api} project={project} projects={projects} revision={revision} refresh={refresh} onPair={onPair} frame={{mode,setMode,overviewOpen,panelOpen,hud,host,windowHost,openOverview,closePanels:close,dockPx,setDockPx,inspector,inspectors,openInspector,closeInspector,inspectorHost}}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell></WindowManagerProvider>;
+  const showOverview=useCallback(()=>{setOverviewOpen(true);},[]);
+  const openOverview=useCallback(()=>{setOverviewOpen(true);if(!isIndex)navigate(base);},[isIndex,navigate,base]);
+  const openInspector=useCallback((next:Inspector)=>{const id=next.kind==='agent'?`agent:${next.instanceId}`:next.kind;if(!inspectorOpeners.current.has(id)){const active=document.activeElement;inspectorOpeners.current.set(id,active instanceof HTMLElement&&active!==document.body?active:null);}},[]);
+  const closeInspector=useCallback((id:string,focusHud=false)=>{requestAnimationFrame(()=>{const opener=inspectorOpeners.current.get(id);inspectorOpeners.current.delete(id);if(!focusHud&&opener?.isConnected)opener.focus();else document.getElementById('office-hud')?.focus();});},[]);
+  return <WindowManagerProvider key={projectId} projectId={projectId} enabled={visual}><AppShell projects={projects} projectId={projectId} modeSwitch={project&&!visual?<ModeSwitch mode={mode} onChange={setMode}/>:undefined} visual={visual?{panelOpen,closable,immersive:immersiveOfficeEnabled(),dockPx,windowsRef:setWindowHost,onClose:close,onOverview:showOverview,hudRef:setHud,stageRef:setHost}:undefined}>{project?<ProjectContent key={projectId} api={api} project={project} projects={projects} revision={revision} refresh={refresh} onPair={onPair} frame={{mode,setMode,overviewOpen,panelOpen,hud,host,windowHost,openOverview,closePanels:close,dockPx,setDockPx,openInspector,closeInspector}}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell></WindowManagerProvider>;
 }
-type Frame={mode:UiMode;setMode:(mode:UiMode)=>void;overviewOpen:boolean;panelOpen:boolean;hud:HTMLElement|null;host:HTMLElement|null;windowHost:HTMLElement|null;openOverview:()=>void;closePanels:()=>void;dockPx:number;setDockPx:(px:number)=>void;inspector:Inspector|undefined;inspectors:Inspector[];openInspector:(next:Inspector|undefined)=>void;closeInspector:(id:string,focusHud?:boolean)=>void;inspectorHost:HTMLElement|null};
+type Frame={mode:UiMode;setMode:(mode:UiMode)=>void;overviewOpen:boolean;panelOpen:boolean;hud:HTMLElement|null;host:HTMLElement|null;windowHost:HTMLElement|null;openOverview:()=>void;closePanels:()=>void;dockPx:number;setDockPx:(px:number)=>void;openInspector:(next:Inspector)=>void;closeInspector:(id:string,focusHud?:boolean)=>void};
 /** What the overlay panel shows in 3D besides pages: local state, never a route. */
 export type Inspector={kind:'agent';instanceId:string}|{kind:'unseated'}|{kind:'cabinet'}|{kind:'server'}|{kind:'repair'}|{kind:'director'}|{kind:'queue'};
 function ProjectContent({api,project,projects,revision,refresh,onPair,frame}:{api:ApiClient;project:WebProject;projects:WebProject[];revision:number;refresh:()=>void;onPair:(secret:string)=>Promise<void>;frame:Frame}) {
@@ -167,21 +165,24 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
   const {model,runs,stale,overflow,workforce,decisions,authRequired,error}=state;
   const control=useRef<StageControl|null>(null);
   const excerpts=useAgentExcerpts({api,id,enabled:model?.tier==='full'});
-  const {inspector}=frame;
+  const inspectorWindows=wm.windows.filter(item=>!['app','director-chat','operations','status'].includes(item.kind));
   const openInspector=useCallback((next:Inspector|undefined)=>{
-    if(next){wm.open(next.kind,next.kind==='agent'?{instanceId:next.instanceId}:undefined);frame.openInspector(next);}
-    else {for(const item of frame.inspectors){const id=item.kind==='agent'?`agent:${item.instanceId}`:item.kind;wm.close(id);}frame.openInspector(undefined);}
-  },[wm.open,wm.close,frame.openInspector,frame.inspectors]);
+    if(next){frame.openInspector(next);wm.open(next.kind,next.kind==='agent'?{instanceId:next.instanceId}:undefined);}
+    else {for(const item of inspectorWindows){if(item.kind==='repair')continue;wm.close(item.id);frame.closeInspector(item.id);}}
+  },[wm.open,wm.close,frame.openInspector,frame.closeInspector,inspectorWindows]);
   // A refused session is never shown as stale data: the panel offers re-pairing, the same ErrorState Classic uses.
   useEffect(()=>{
-    if(authRequired&&!frame.inspectors.some(item=>item.kind==='repair'))openInspector({kind:'repair'});
-    else if(!authRequired&&frame.inspectors.some(item=>item.kind==='repair')){wm.forceClose('repair');frame.closeInspector('repair');}
-  },[authRequired,frame.inspectors,frame.closeInspector,openInspector,wm.forceClose]);
+    const hasRepair=wm.windows.some(item=>item.kind==='repair');
+    if(authRequired&&!hasRepair){frame.openInspector({kind:'repair'});wm.open('repair');}
+    else if(!authRequired&&hasRepair){wm.forceClose('repair');frame.closeInspector('repair');}
+  },[authRequired,wm.windows,wm.open,wm.forceClose,frame.openInspector,frame.closeInspector]);
   const insetFor=()=>{
-    const app=document.getElementById('main'),box=app&&!app.classList.contains('hidden')?app.getBoundingClientRect():undefined;
-    const visible=[...wm.windows,...(box? [{rect:{x:box.x,y:box.y,w:box.width,h:box.height},display:'normal' as const}]:[])];
-    const bottom=Math.max(112,frame.hud?.querySelector<HTMLElement>('[data-hud-bottom]')?.offsetHeight??0);
-    return sceneInset(visible,{width:window.innerWidth,height:window.innerHeight},{left:88,bottom});
+    const top=[...wm.windows].filter(item=>item.display!=='minimized').sort((a,b)=>b.z-a.z)[0];
+    const visible=window.innerWidth>=1100?wm.windows:wm.windows.filter(item=>item.display!=='minimized'&&item.id===top?.id);
+    const bottom=56+(frame.hud?.querySelector<HTMLElement>('[data-hud-bottom]')?.offsetHeight??56);
+    // Match the real desktop icon rail: one 72 px column at tall screens, two columns (160 px) when the rail is short on vertical space.
+    const iconInset=window.innerWidth<768?0:window.innerHeight<=840?176:88;
+    return sceneInset(visible,{width:window.innerWidth,height:window.innerHeight},{left:iconInset,bottom});
   };
   const hasModel=model!==undefined,refocusHud=useRef(false),panelNow=useRef(frame.panelOpen),mounted=useRef(true);
   panelNow.current=frame.panelOpen;
@@ -199,7 +200,7 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
       if(frame.panelOpen){event.preventDefault();frame.closePanels();}
     };
     window.addEventListener('keydown',keydown);return()=>window.removeEventListener('keydown',keydown);
-  },[wm.windows,wm.close,dialogueOpen,inspector,frame]);
+  },[wm.windows,wm.close,dialogueOpen,frame]);
   // Toàn cảnh closes every panel (the re-pair view stays); the camera eases only after that commit, with the then-current inset.
   const pendingOverview=useRef(false);
   const settleOverview=()=>{pendingOverview.current=false;control.current?.setInset(insetFor());control.current?.focusZone('overview');};
@@ -208,12 +209,13 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
     // Closing may navigate and the router can commit late, so the camera waits for the effect below once the panel is really closed.
     // Nothing to wait for when no panel is open or the open one (the re-pair view) cannot close.
     const waits=frame.panelOpen;
-    wm.closeAll(['repair']);for(const item of frame.inspectors){if(item.kind!=='repair')frame.closeInspector(item.kind==='agent'?`agent:${item.instanceId}`:item.kind);}
+    closeToolsForOverview();
     frame.closePanels();
     if(waits)pendingOverview.current=true;else settleOverview();
   };
-  const closeToolsForOverview=()=>{wm.closeAll(['repair']);for(const item of frame.inspectors){if(item.kind!=='repair')frame.closeInspector(item.kind==='agent'?`agent:${item.instanceId}`:item.kind);}};
+  const closeToolsForOverview=()=>{for(const item of wm.windows){if(item.kind==='repair'||item.kind==='app')continue;if(item.kind==='director-chat'){onLeaveDialogue(false);continue;}wm.close(item.id);if(!['operations','status'].includes(item.kind))frame.closeInspector(item.id);}};
   const overview=()=>{closeToolsForOverview();frame.openOverview();};
+  const closeAllWindows=()=>{closeToolsForOverview();frame.closePanels();};
   const topWindowId=wm.windows.filter(item=>item.display!=='minimized').sort((a,b)=>b.z-a.z)[0]?.id;
   useEffect(()=>{if(pendingOverview.current && !frame.panelOpen && mounted.current)settleOverview();},[frame.panelOpen]);// eslint-disable-line react-hooks/exhaustive-deps
   useEffect(()=>{
@@ -224,10 +226,10 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
   // An agent that vanished after the model loaded: drop its inspector and hand focus back to the HUD.
   useEffect(()=>{
     if(model?.tier!=='full')return;
-    for(const item of frame.inspectors){if(item.kind!=='agent'||model.agents.some(agent=>agent.instanceId===item.instanceId))continue;refocusHud.current=true;const id=`agent:${item.instanceId}`;wm.close(id);frame.closeInspector(id,true);}
-  },[model,frame.inspectors,frame.closeInspector,wm.close]);
+    for(const item of inspectorWindows){if(item.kind!=='agent'||model.agents.some(agent=>agent.instanceId===item.params?.instanceId))continue;refocusHud.current=true;wm.close(item.id);frame.closeInspector(item.id,true);}
+  },[model,inspectorWindows,frame.closeInspector,wm.close]);
   // Runs after OfficeFrame restored the opener, so the HUD (not a vanished control) ends up focused.
-  useEffect(()=>{if(refocusHud.current){refocusHud.current=false;frame.hud?.focus();}},[frame.panelOpen,frame.hud,frame.inspectors]);
+  useEffect(()=>{if(refocusHud.current){refocusHud.current=false;frame.hud?.focus();}},[frame.panelOpen,frame.hud,inspectorWindows]);
   const go=(path:string)=>{navigate(path);};
   const select=(target:OfficeTarget)=>{
     // Before the camera moves: centre the selection in what the panel leaves visible.
@@ -247,10 +249,11 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
   };
   const run=currentRun(runs);
   const titleOf=(runId:string,taskId?:string)=>{const r=runs.find(x=>x.runId===runId);return (taskId?r?.tasks.find(t=>t.taskId===taskId)?.title:undefined)??r?.title??taskId??runId;};
-  const inspected=frame.inspectors.map(inspector=>{
+  const inspected=inspectorWindows.map(windowState=>{
+  const inspector=windowState.kind==='agent'?{kind:'agent',instanceId:windowState.params?.instanceId??''} as Inspector:{kind:windowState.kind as Exclude<Inspector,{kind:'agent'}>['kind']} as Inspector;
   const agent=inspector.kind==='agent'?model?.agents.find(a=>a.instanceId===inspector.instanceId):undefined;
-  const toolId=inspector.kind==='agent'?`agent:${inspector.instanceId}`:inspector.kind;
-  const toolWindow=wm.windows.find(item=>item.id===toolId);
+  const toolId=windowState.id;
+  const toolWindow=windowState;
   let content:ReactNode;
   switch(inspector.kind){
     case 'repair': content=<ErrorState error={error} retry={refresh} onPair={onPair}/>;break;
@@ -277,9 +280,9 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
       onOverview={overview} onNavigate={path=>{if(path==='')overview();else go(`${base}/${path}`);}} onDocuments={()=>openInspector({kind:'cabinet'})} onRefresh={refresh}
       onFocusZone={focusZone} onAgentList={()=>openInspector({kind:'unseated'})}
       director={d.directorLayout?{canSend:d.chat.canSend,presenceLabel:presenceLabels[d.presence]}:undefined} onQueue={()=>openInspector({kind:'queue'})}
-      notifications={immersive?<OfficeNotifications connection={connection} session={session} stale={stale} authRequired={authRequired} model={model} onInbox={()=>go(`${base}/review`)} onClarifications={frame.openOverview}/>:undefined}
+      windowOpen={wm.windows.some(item=>item.display!=='minimized')} notifications={immersive?<OfficeNotifications connection={connection} session={session} stale={stale} authRequired={authRequired} model={model} onInbox={()=>go(`${base}/review`)} onClarifications={overview}/>:undefined}
       firstVisit={immersive?<FirstVisit projectId={id} active={!frame.panelOpen&&!dialogueOpen} onDirector={()=>model?.director?select({kind:'director'}):go(`${base}/chat`)} onTasks={()=>go(`${base}/runs`)} onInbox={()=>go(`${base}/review`)}/>:undefined}
-      onChatDraft={draft=>{navigate(`${base}/chat`,{state:{draft}});}} dock={<OperationsDock/>} dockSummary={dockSummary} onDockHeight={frame.setDockPx} onDockOpen={()=>wm.open('operations')} operationsOpen={Boolean(operationsWindow&&operationsWindow.display!=='minimized')} onStatusOpen={()=>wm.open('status')} onRun={runId=>go(`${base}/runs/${encodeURIComponent(runId)}`)}/><Taskbar mode={frame.mode} onMode={frame.setMode} onOverview={overview} onRefresh={refresh} onCloseAll={closeToolsForOverview} projects={projects} projectId={id} onProject={next=>navigate(next?`/projects/${encodeURIComponent(next)}`:'/')} onNavigate={path=>go(`${base}/${path}`)} onDocuments={()=>openInspector({kind:'cabinet'})} onGuide={()=>replayFirstVisit(id)} onStatusOpen={()=>wm.open('status')} statusText={statusText}/></>,frame.hud)}
+      onChatDraft={draft=>{navigate(`${base}/chat`,{state:{draft}});}} dock={<OperationsDock/>} dockSummary={dockSummary} onDockHeight={frame.setDockPx} onDockOpen={()=>wm.open('operations')} operationsOpen={Boolean(operationsWindow&&operationsWindow.display!=='minimized')} onStatusOpen={()=>wm.open('status')} onRun={runId=>go(`${base}/runs/${encodeURIComponent(runId)}`)} taskbar={quickChat => (<Taskbar quickChat={quickChat} mode={frame.mode} onMode={frame.setMode} onOverview={overview} onRefresh={refresh} onCloseAll={closeAllWindows} projects={projects} projectId={id} onProject={next=>navigate(next?`/projects/${encodeURIComponent(next)}`:'/')} onNavigate={path=>go(`${base}/${path}`)} onDocuments={()=>openInspector({kind:'cabinet'})} onGuide={()=>replayFirstVisit(id)} onStatusOpen={()=>wm.open('status')} statusText={statusText}/>)} /> </>,frame.hud)}
     {frame.windowHost&&operationsWindow&&createPortal(<GameWindow id="operations" kind="operations" title="Thao tác đã gửi" icon="tasks" color="var(--win-c-work)" rect={operationsWindow.rect} display={operationsWindow.display} z={operationsWindow.z} active={topWindowId==='operations'} closable minimizable maximizable movable={window.innerWidth>=1100} resizable={window.innerWidth>=1100} onFocus={()=>wm.focus('operations')} onClose={()=>wm.close('operations')} onMinimize={()=>wm.minimize('operations')} onToggleMaximize={()=>wm.toggleMaximize('operations')} onMove={(dx,dy)=>wm.move('operations',dx,dy)} onResize={(dx,dy)=>wm.resize('operations',dx,dy)}><OperationsDock/></GameWindow>,frame.windowHost)}
     {frame.windowHost&&statusWindow&&createPortal(<GameWindow id="status" kind="status" title="Trạng thái văn phòng" icon="settings" color="var(--win-c-system)" rect={statusWindow.rect} display={statusWindow.display} z={statusWindow.z} active={topWindowId==='status'} closable minimizable maximizable movable={window.innerWidth>=1100} resizable={window.innerWidth>=1100} onFocus={()=>wm.focus('status')} onClose={()=>wm.close('status')} onMinimize={()=>wm.minimize('status')} onToggleMaximize={()=>wm.toggleMaximize('status')} onMove={(dx,dy)=>wm.move('status',dx,dy)} onResize={(dx,dy)=>wm.resize('status',dx,dy)}><dl className="status-window-details"><dt>Phiên</dt><dd>{session?.state??'Đang đọc phiên'}</dd><dt>Kết nối</dt><dd role="status">{statusLink.label}</dd><dt>Director</dt><dd>{d.directorLayout?presenceLabels[d.presence]:'Chưa có bàn Director'}</dd><dt>Nhân viên</dt><dd>{agentCounts(model).join(' · ')||'Chưa có dữ liệu nhân viên'}</dd><dt>Chất lượng dữ liệu</dt><dd>{model?.tier??(error?'Không đọc được dữ liệu':'Đang tải')}</dd><dt>Điểm cần lưu ý</dt><dd>{statusBlockers}</dd><dt>Ghép nối lại</dt><dd>{authRequired?'Cần ghép nối lại':'Không cần'}</dd><dt>Dữ liệu cũ</dt><dd>{stale?'Có':'Không'}</dd></dl></GameWindow>,frame.windowHost)}
   </>;

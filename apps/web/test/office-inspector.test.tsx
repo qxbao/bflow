@@ -161,7 +161,7 @@ test('an agent that vanishes after the model loaded closes its inspector and ret
   const main = () => document.getElementById('main')!;
   expect(await screen.findByRole('dialog',{name:'Developer #1'})).toBeTruthy();
   body = wf([conv]);
-  fireEvent.click(within(screen.getByRole('navigation', { name: 'Lối tắt' })).getByRole('button', { name: 'Tải lại dữ liệu' }));
+  fireEvent.click(within(screen.getByRole('navigation', { name: 'Thanh tác vụ' })).getByRole('button', { name: 'Tải lại dữ liệu' }));
   await waitFor(() => expect(screen.queryByRole('dialog',{name:'Developer #1'})).toBeNull());
   expect(main().classList.contains('hidden')).toBe(true);
   await waitFor(() => expect(document.activeElement).toBe(document.getElementById('office-hud')));

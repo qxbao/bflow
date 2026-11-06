@@ -132,5 +132,5 @@ test('visual HUD is pinned outside the panel and holds exactly one operations do
   expect(docks).toHaveLength(1);
   const bar=screen.getByRole('region',{name:'Thanh điều khiển'}),main=document.getElementById('main')!;
   expect(bar.contains(docks[0]!)).toBe(false);expect(main.contains(docks[0]!)).toBe(false);expect(bar.contains(main)).toBe(false);
-  expect(bar.className).toMatch(/\bfixed\b/);expect(bar.className).toMatch(/z-30/);expect(main.style.height).toMatch(/680px|\d+px/);
+  expect(bar.className).toMatch(/\bfixed\b/);expect(bar.className).toMatch(/z-\[120\]/);expect(main.style.height).toMatch(/680px|\d+px/);
 });

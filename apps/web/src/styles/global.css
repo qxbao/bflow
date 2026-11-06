@@ -59,7 +59,10 @@
   --color-input: #cfc4ee; --color-success: #1e6b3a; --color-danger: #a3202a; --color-warning: #7a5600; --color-code: #efe8ff; --color-code-line: #cfc4ee;
 }
 .bwin { position: fixed; display:flex; flex-direction:column; min-width:320px; min-height:240px; border:var(--win-border); border-radius:var(--win-radius); background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); overflow:hidden; }
-.office-windows { pointer-events:none; }
+.bwin[hidden] { display:none!important; }
+.bwin.hidden { display:none!important; }
+.office-windows { pointer-events:none; z-index:0; }
+.office-windows:has([data-window-kind="repair"]:not([hidden])) { z-index:2000; }
 .office-windows .bwin { pointer-events:auto; }
 .bwin[style*="--bwin-preview-width"] { width:var(--bwin-preview-width)!important; height:var(--bwin-preview-height)!important; }
 .bwin.is-active { box-shadow:var(--win-shadow); }
@@ -87,14 +90,13 @@
 .office-3d .bwin-body button { border-radius:0; border:2px solid var(--win-ink); box-shadow:var(--win-shadow-sm); background:#fff; color:var(--win-ink); }
 .office-3d .bwin-body input, .office-3d .bwin-body select, .office-3d .bwin-body textarea { border-radius:0; border:2px solid var(--win-ink); background:#fff; color:var(--win-ink); }
 .office-3d .bwin-body :focus-visible { outline-color:var(--win-c-work); }
-.office-3d.office-panel-open .office-stage, .office-3d.office-panel-open .office-hud-root { right:0; }
-.office-3d.office-panel-open .bwin { animation:bwin-open 120ms ease-out; }
+.office-3d .bwin { animation:bwin-open 120ms ease-out; }
 @keyframes bwin-open { from { opacity:0; scale:.96; } to { opacity:1; scale:1; } }
 @media (prefers-reduced-motion:reduce) { .office-3d .bwin { animation:none!important; } }
 .office-3d .bwin-app { container:workspace / inline-size; }
 .office-3d .bwin-app .workspace-main-content { min-height:0; height:100%; overflow:auto; padding:16px; }
-@media (max-width:1099px) { .office-3d.office-panel-open .office-stage { visibility:hidden; pointer-events:none; } .office-3d.office-panel-open .bwin-app { left:0!important; top:0!important; width:100vw!important; height:calc(100dvh - 56px)!important; } }
-@media (max-width:767px) { .office-3d.office-panel-open .office-stage { visibility:hidden; } }
+@media (min-width:768px) and (max-width:1099px) { .office-3d .bwin-app:not(.hidden),.office-windows .bwin { left:38vw!important; top:0!important; width:62vw!important; height:calc(100dvh - 56px)!important; } .office-3d .office-windows .bwin:not([data-active="true"]):not([data-window-kind="repair"]) { display:none; } }
+@media (max-width:767px) { .office-3d .bwin-app:not(.hidden),.office-windows .bwin { left:0!important; top:0!important; width:100vw!important; height:calc(100dvh - 56px)!important; } .office-3d .office-windows .bwin:not([data-active="true"]):not([data-window-kind="repair"]) { display:none; } .office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .bwin-app:not(.hidden) { display:none!important; } .office-3d:has(.bwin-app:not(.hidden)[data-active="true"]) .office-stage,.office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .office-stage { visibility:hidden; pointer-events:none; } .office-3d:has(.bwin-app:not(.hidden)[data-active="true"]) .office-cameras,.office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .office-cameras { display:none; } }
 .office-3d button, .office-3d input, .office-3d select, .office-3d textarea { border-radius: .5rem; }
 .office-3d fieldset { border-radius: .5rem; }
 
@@ -179,15 +181,8 @@
 .notice h2 { font-size: 1rem; margin: 0; }
 .notice p { font-size: .875rem; margin-block: .5rem; }
 .notice details { margin-bottom: 0; }
-.office-3d { --office-panel-width: clamp(420px, 40vw, 680px); }
-.office-panel { padding: 0 1.5rem 2rem; }
-.office-panel-header { position: sticky; top: 0; z-index: 10; margin-inline: -1.5rem; padding: 1rem 1.5rem; background: var(--color-surface); border-bottom: 1px solid var(--color-line); }
 .office-hud-root { container: office / inline-size; }
-.office-panel-open .office-stage, .office-panel-open .office-hud-root { right: var(--office-panel-width); }
-.office-panel-open .office-panel { width: var(--office-panel-width); }
 .office-3d .workspace-grid { display: block; }
-.office-3d .office-panel .panel { padding: 1.5rem; }
-.office-3d .office-panel h1 { font-size: 1.5rem; }
 .office-topbar { display: grid; grid-template-columns: minmax(0, 18rem) auto; gap: .75rem; align-items: start; }
 .office-topbar > .office-mode { justify-self: end; }
 .office-status summary::-webkit-details-marker { display: none; }
@@ -205,7 +200,6 @@
 .office-rail { left: .75rem; right: auto; top: 50%; transform: translateY(-42%); }
 .office-rail button { min-height: 44px; width: 72px; font-size: 11px; }
 .office-rail.office-rail-anchored { bottom: auto; transform: none; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; transition: top .18s ease; }
-.office-panel-open .office-quick-chat { display: none; }
 .office-cameras { margin-inline: auto; }
 .chat-layout { position: relative; border-radius: 1rem; overflow: clip; }
 .chat-toolbar { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
@@ -238,30 +232,9 @@
   .office-topbar section { max-width: 17rem; }
   .office-topbar [aria-label="Trạng thái văn phòng"] { font-size: .75rem; }
   .office-cameras button span { display: none; }
-  .office-quick-chat { max-width: 26rem; }
 }
 @media (min-width: 1024px) { .workspace-navigation { position: sticky; top: 1rem; } }
-@media (max-width: 1099px) {
-  .office-panel-open .office-panel { width: 100%; }
-  .office-panel-open .office-stage { right: 0; visibility: hidden; pointer-events: none; }
-  .office-panel-open .office-hud-root { right: 0; visibility: hidden; pointer-events: none; }
-  .office-panel-open .office-hud-root [data-hud-bottom] { visibility: visible; position: fixed; bottom: 0; left: 1rem; right: 1rem; padding: .5rem; }
-  .office-panel-open .office-hud-root [data-hud-bottom] > :not([data-hud-dock]) { visibility: hidden; }
-  .office-panel-open .office-hud-root [data-hud-bottom] > button { visibility: visible; }
-  .office-panel-open .office-hud-root { z-index: 50; }
-  .office-panel { padding-bottom: calc(var(--hud-h, 0px) + 2rem); }
-}
-@media (max-width: 600px) {
-  .workspace-main { padding-inline: 1rem; }
-  .office-panel-header { margin-inline: -1rem; padding-inline: 1rem; }
-  .office-rail { left: .5rem; }
-  .office-rail button { width: 58px; min-height: 40px; }
-  .office-topbar section { padding: .75rem; }
-  .office-topbar section h2 { font-size: 1rem; }
-  .office-cameras { margin-left: 4.5rem; }
-  .chat-thread { height: calc(100dvh - 14rem); min-height: 26rem; }
-  .chat-thread > header, .chat-thread > form { padding: 1rem; }
-}
+@media (max-width: 600px) { .chat-thread { height:calc(100dvh - 14rem); min-height:26rem; } .chat-thread > header,.chat-thread > form { padding:1rem; } }
 @media (max-height: 650px) {
   .office-rail { top: 6.5rem; bottom: 7rem; transform: none; overflow-y: auto; }
   .office-topbar section > div { display: none; }
@@ -272,25 +245,6 @@
 .office-status summary { min-height: 2rem; }
 .office-cameras details[open] > div { grid-template-columns: repeat(3, 2.75rem); }
 .office-cameras details[open] > div > button { min-width: 2.75rem; min-height: 2.75rem; padding-inline: .25rem; }
-@media (max-width: 1099px) { .office-panel-open [data-hud-bottom] > div:last-child { display: none; } }
-
-/* The opt-in interaction frame floats above the scene at every viewport width. Keep the legacy side panel rules untouched. */
-.office-immersive.office-panel-open .office-stage,
-.office-immersive.office-panel-open .office-hud-root { right: 0; visibility: visible; }
-.office-immersive.office-panel-open .office-stage { right: 0; visibility: visible; }
-.office-immersive.office-panel-open .office-panel {
-  left: 50%; right: auto; top: 50%; bottom: auto; width: min(1080px, calc(100vw - 32px));
-  max-height: 90dvh; transform: translate(-50%, -50%); translate: none; z-index: 60;
-}
-@media (max-width: 1099px) {
-  .office-immersive.office-panel-open .office-stage,
-  .office-immersive.office-panel-open .office-hud-root { visibility: visible; }
-  .office-immersive.office-panel-open .office-stage { visibility: visible; }
-  .office-immersive.office-panel-open .office-panel {
-    left: 50%; right: auto; top: 50%; bottom: auto; width: calc(100vw - 24px);
-    max-height: calc(100dvh - 24px); transform: translate(-50%, -50%); translate: none;
-  }
-}
 .overview-session-details { border: 0; margin: 0; padding: 0; }
 .overview-session-details > summary { margin-bottom: .75rem; }
 .new-work-disclosure { border: 1px solid var(--color-line); border-radius: 1rem; padding: 1rem 1.5rem; background: var(--color-surface); }
@@ -299,7 +253,6 @@
 @media (min-height: 650px) {
   .workspace-main:has(.chat-layout) { display: flex; flex-direction: column; height: calc(100dvh - 4.25rem); padding-bottom: 1.5rem; }
   .workspace-shell:has(.chat-layout) > footer { display: none; }
-  .office-panel:has(.chat-layout) { height: 100dvh; }
   .chat-layout { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .chat-layout > div { flex: 1; min-height: 0; }
   .chat-history { flex-shrink: 0; max-height: min(16rem, 30dvh); }
@@ -324,21 +277,23 @@
 .status-window-details { display:grid; grid-template-columns:minmax(9rem,auto) minmax(0,1fr); gap:8px 16px; margin:0; }
 .status-window-details dt { margin:0; font:600 12px var(--font-mono); }
 .status-window-details dd { margin:0; overflow-wrap:anywhere; }
-.app-window-restore { position:fixed; left:12px; bottom:66px; z-index:121; border:2px solid var(--win-ink); border-radius:0; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
 @media (min-width:768px) and (max-width:1099px) {
-  .office-3d.office-panel-open .bwin-app { left:38vw!important; width:62vw!important; }
-  .office-windows .bwin { left:38vw!important; top:0!important; width:62vw!important; height:calc(100dvh - 56px)!important; }
-  .office-3d.office-panel-open .office-stage { visibility:hidden; }
+  .office-3d .bwin-app:not(.hidden),.office-windows .bwin { left:38vw!important; top:0!important; width:62vw!important; height:calc(100dvh - 56px)!important; }
+  .office-3d .office-windows .bwin:not([data-active="true"]):not([data-window-kind="repair"]) { display:none; }
+  .office-3d .office-topbar > section[aria-label="Văn phòng Bflow"] { width:256px; }
 }
 @media (max-width:767px) {
   .bflow-taskbar { min-height:56px; padding:4px; gap:4px; }
-  .taskbar-windows { max-width:38vw; }
-  .taskbar-windows button { max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .taskbar-mode button { min-width:36px; padding-inline:4px; }
+  .taskbar-start { padding-inline:2px; font-size:9px; }
+  .taskbar-windows { max-width:16vw; }
+  .taskbar-windows button { max-width:72px; overflow:hidden; padding-inline:4px; text-overflow:ellipsis; white-space:nowrap; }
+  .taskbar-mode button { min-width:36px; padding-inline:3px; }
   .office-3d .office-rail { display:none; }
-  .office-3d.office-panel-open .bwin-app,.office-windows .bwin { left:0!important; top:0!important; width:100vw!important; height:calc(100dvh - 56px)!important; max-height:none!important; border-radius:0; }
-  .office-3d:has(.office-windows .bwin:not([hidden])) .office-stage { visibility:hidden; }
-  .office-3d:has(.office-windows .bwin:not([hidden])) .office-cameras { display:none; }
+  .office-3d .bwin-app:not(.hidden),.office-windows .bwin { left:0!important; top:0!important; width:100vw!important; height:calc(100dvh - 56px)!important; max-height:none!important; border-radius:0; }
+  .office-3d .office-windows .bwin:not([data-active="true"]):not([data-window-kind="repair"]) { display:none; }
+  .office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .bwin-app:not(.hidden) { display:none!important; }
+  .office-3d:has(.bwin-app:not(.hidden)[data-active="true"]) .office-stage,.office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .office-stage { visibility:hidden; }
+  .office-3d:has(.bwin-app:not(.hidden)[data-active="true"]) .office-cameras,.office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .office-cameras { display:none; }
   .bwin-titlebar { min-height:48px; }
   .bwin-controls button { width:40px; height:40px; }
 }
@@ -347,28 +302,38 @@
 .office-3d [data-hud-bottom] { bottom:56px!important; }
 .office-3d .office-topbar > section[aria-label="Văn phòng Bflow"] { width:288px; border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
 .office-3d .office-topbar h2 { font:800 16px/1.2 var(--font-mono); }
-.office-3d .office-current-run { width:100%; min-height:0; border:0; border-radius:0; padding:0; background:transparent; color:var(--win-ink); box-shadow:none; font:600 13px/1.35 var(--font-prose); }
+.office-3d .office-current-run { width:100%; min-height:32px; border:0; border-radius:0; padding:0; background:transparent; color:var(--win-ink); box-shadow:none; font:600 13px/1.35 var(--font-prose); }
 .office-3d .office-current-run:hover { text-decoration:underline; background:transparent; color:var(--win-ink); }
 .office-3d .office-topbar select { border:2px solid var(--win-ink); border-radius:0; background:#fff; color:var(--win-ink); }
 .office-3d .office-rail { left:16px; top:164px; bottom:72px; width:80px; max-height:none!important; overflow-y:auto; transform:none; border:0; border-radius:0; background:transparent; box-shadow:none; }
 .office-3d .office-rail button { width:72px; min-height:72px; justify-content:flex-start; gap:2px; padding:3px; border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow-sm); font:600 10px/1.15 var(--font-mono); }
 .office-3d .office-rail button svg { width:36px; height:36px; padding:5px; border:1px solid var(--win-ink); border-radius:4px; background:var(--win-panel); color:var(--win-c-system); }
 .office-3d .office-rail button:hover { background:var(--win-panel); color:var(--win-ink); }
+@media (max-height:650px) and (min-width:768px) { .office-3d .office-rail { display:grid; grid-template-columns:repeat(2,72px); grid-auto-rows:72px; gap:8px; width:160px; } }
 .office-3d .office-cameras { border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); box-shadow:var(--win-shadow); }
 .office-3d .office-cameras button { border:2px solid var(--win-ink); border-radius:0; background:#fff; color:var(--win-ink); box-shadow:var(--win-shadow-sm); }
-.office-3d .office-quick-chat { border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
-.office-3d .office-quick-chat input { color:var(--win-ink); }
-.office-3d .office-quick-chat input::placeholder { color:var(--color-muted); }
-.office-3d.office-panel-open .office-quick-chat { display:flex; }
-.office-3d.office-panel-open .office-hud-root { visibility:visible; right:0; pointer-events:none; }
-.office-3d.office-panel-open .office-hud-root [data-hud-bottom] { position:fixed; left:12px; right:12px; bottom:56px!important; visibility:visible; z-index:125; }
-.office-3d.office-panel-open .office-hud-root [data-hud-bottom] > :not([data-hud-dock]) { visibility:visible; }
-.office-3d.office-panel-open .office-hud-root [data-hud-bottom] > button { visibility:visible; }
+.office-3d .taskbar-quick-chat { flex:1; min-width:200px; max-width:380px; border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow-sm); }
+.office-3d .taskbar-quick-chat input { min-height:36px; border:0; border-radius:0; background:transparent; color:var(--win-ink); }
+.office-3d .taskbar-quick-chat input::placeholder { color:var(--color-muted); }
+.office-3d .taskbar-quick-chat button { min-width:36px; min-height:36px; }
 .office-3d [data-component="OfficeNotifications"] { position:fixed; top:16px; right:16px; z-index:60; width:min(320px,calc(100vw - 32px)); border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
 .office-3d [data-component="FirstVisit"] { border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
 @media (max-height:650px) { .office-3d .office-rail { top:164px; bottom:72px; } }
+@media (max-height:840px) and (min-width:768px) { .office-3d .office-rail.office-rail-anchored { display:grid; grid-template-columns:repeat(2,72px); grid-auto-rows:72px; gap:8px; width:160px; } }
 @media (max-width:767px) { .office-3d [data-hud-bottom] { bottom:56px!important; } }
+@media (max-width:767px) {
+  .office-3d .bflow-taskbar { gap:3px; }
+  .office-3d .taskbar-status { display:none; }
+  .office-3d .taskbar-quick-chat { min-width:110px; max-width:none; flex:1; padding-left:4px; gap:3px; }
+  .office-3d .taskbar-quick-chat input { min-width:36px; width:100%; padding-inline:4px; font-size:11px; }
+  .office-3d .taskbar-quick-chat button { min-width:36px; padding-inline:3px; }
+  .office-3d .taskbar-quick-chat input::placeholder { content:'Chat'; }
+  .office-3d .taskbar-quick-chat > svg { display:none; }
+  .office-3d:has(.bwin-app:not(.hidden)) .office-topbar,.office-3d:has(.office-windows .bwin:not([hidden])) .office-topbar { display:none!important; }
+}
 @media (prefers-reduced-motion:reduce) { .bwin, .bflow-taskbar { animation:none!important; transition:none!important; } }
+@media (pointer:coarse) { .bwin-controls button { width:44px; height:44px; min-height:44px; } .bwin-resize { width:44px; min-height:44px; } .bflow-taskbar button { min-height:44px; } }
+@media (pointer:coarse) { .office-3d .taskbar-quick-chat button { min-width:44px; min-height:44px; } }
 @media (min-height: 650px) {
   .chat-layout > div { display: flex; flex-direction: column; }
   .chat-layout > div > :not(.chat-thread) { flex-shrink: 0; }

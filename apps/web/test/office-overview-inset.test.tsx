@@ -44,8 +44,9 @@ test('Toàn cảnh eases the camera only after a route panel has closed, without
   await waitFor(() => expect(main().classList.contains('hidden')).toBe(false));
   await screen.findByRole('region', { name: 'Bản văn bản của văn phòng' });
   const openInset = (): number => insets.at(-1)?.right ?? -1;
-  await waitFor(() => expect(openInset()).toBe(0));
+  await waitFor(() => expect(openInset()).toBeGreaterThan(0));
   const openRight = openInset();
+  expect(openRight).toBeGreaterThan(0);
   calls.length = 0;
   fireEvent.click(within(screen.getByRole('group', { name: 'Góc nhìn camera' })).getByRole('button', { name: 'Toàn cảnh' }));
   await waitFor(() => expect(calls).toContain('focus:overview'));
@@ -54,10 +55,10 @@ test('Toàn cảnh eases the camera only after a route panel has closed, without
   const focusAt = calls.indexOf('focus:overview');
   expect(focusAt).toBeGreaterThan(0);
   expect(calls[focusAt - 1]).toBe('inset');
-  // The adjacent panel is handled by the scene host width; only the left HUD rail remains in the camera inset.
+  // Closing the app window clears its right-side scene reservation; only the desktop icon rail remains.
   const closed = insets[insets.length - 1]!;
-  expect(closed.right).toBe(openRight);
-  expect(closed.left).toBe(88);
+  expect(closed.right).toBe(0);
+  expect(closed.left).toBe(176);
   expect(calls.filter(c => c === 'focus:overview')).toHaveLength(1);
 });
 

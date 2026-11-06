@@ -91,3 +91,9 @@ test('repair window has a modal surface with no dismiss controls', () => {
   expect(screen.queryByRole('button', { name: 'Thu nhỏ Ghép nối lại' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Phóng to Ghép nối lại' })).toBeNull();
 });
+
+test('Escape in a non-active window leaves arbitration to the window manager',()=>{
+  const props=renderWindow({active:false});
+  fireEvent.keyDown(screen.getByLabelText('Thanh tiêu đề Developer 1'),{key:'Escape'});
+  expect(props.onClose).not.toHaveBeenCalled();
+});

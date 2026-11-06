@@ -78,6 +78,7 @@ export interface OfficeHudProps {
   mode: UiMode;
   onMode: (mode: UiMode) => void;
   panelOpen: boolean;
+  windowOpen?: boolean;
   immersive?: boolean;
   /** Optional stable compact status slot for the opt-in immersive presentation. */
   notifications?: ReactNode;
@@ -113,6 +114,7 @@ export interface OfficeHudProps {
   operationsOpen?: boolean;
   onStatusOpen?: () => void;
   onRun?: (runId:string) => void;
+  taskbar?: (quickChat:ReactNode)=>ReactNode;
 }
 
 /**
@@ -157,7 +159,7 @@ export function OfficeHud(p: OfficeHudProps) {
   const link = connectionText(p.connection, p.session?.state === 'stopped' || p.session?.state === 'unavailable');
   const warn = p.stale || p.authRequired || link.degraded || blockers > 0;
   const done = run ? run.tasks.filter(t => t.status === 'succeeded').length : 0;
-  const hideOnPhone = p.panelOpen ? 'max-md:hidden' : '';
+  const hideOnPhone = p.panelOpen||p.windowOpen ? 'max-md:hidden' : '';
   const submit = (event: FormEvent): void => {
     event.preventDefault();
     const text = draft.trim();
@@ -166,11 +168,15 @@ export function OfficeHud(p: OfficeHudProps) {
     p.onChatDraft(text);
   };
   const operationsOpen=p.operationsOpen??dockOpen;
+  const quickChat=<form onSubmit={submit} className="taskbar-quick-chat m-0 flex min-w-0 items-center gap-2 py-1 pr-1 pl-3">
+    <Icon name="chat"/><input aria-label="Trò chuyện với Bflow" placeholder={chat ? (p.director ? 'Trò chuyện với Director…' : 'Trò chuyện với Bflow...') : 'Chưa trò chuyện được lúc này'} disabled={!chat} value={draft} onChange={e => setDraft(e.target.value)} className="min-w-0 flex-1 rounded-none border-0 bg-transparent px-1 text-sm"/>
+    <button type="submit" disabled={!chat || !draft.trim()} aria-label="Mở trò chuyện với nội dung này" title="Mở trò chuyện (chưa gửi)" className="shrink-0 rounded-lg border-transparent px-2.5"><Icon name="send"/></button>
+  </form>;
   const rail: [IconName, string, () => void, number?, string?][] = [
     ['overview', 'Tổng quan', p.onOverview, clarifications, 'Câu hỏi chờ trả lời: '], ['tasks', 'Công việc', () => p.onNavigate('runs')], ['decision', 'Quyết định', () => p.onNavigate('review'), pending, 'Đang chờ: '],
     ['chat', 'Trò chuyện', () => p.onNavigate('chat')],
     ...(desk && p.onQueue ? [['issues', 'Sự cố', p.onQueue, queue?.availability === 'ready' ? queue.open : undefined, 'Sự cố đang mở: '] as [IconName, string, () => void, number?, string?]] : []),
-    ['agents', 'Nhân viên', () => p.onNavigate('agents')], ['docs', 'Tài liệu', p.onDocuments], ['settings', 'Cài đặt', () => p.onNavigate('settings')], ['refresh', 'Tải lại dữ liệu', p.onRefresh],
+    ['agents', 'Nhân viên', () => p.onNavigate('agents')], ['docs', 'Tài liệu', p.onDocuments], ['settings', 'Cài đặt', () => p.onNavigate('settings')],
   ];
   const cams: [OfficeFocusZone, IconName, string][] = [['overview', 'all', 'Toàn cảnh'], ['conversation', 'chat', desk ? 'Director' : 'Trợ lý'], ['coordinator', 'coordinator', 'Điều phối'], ['developer', 'developer', 'Lập trình'], ['qa', 'qa', 'Kiểm tra']];
   return <>
@@ -221,12 +227,9 @@ export function OfficeHud(p: OfficeHudProps) {
           {p.immersive&&<details className="relative"><summary className={`${camButton} cursor-pointer list-none ${panel}`} aria-label="Điều khiển camera">Camera</summary><div className={`absolute bottom-full left-0 z-30 mb-1 grid grid-cols-3 gap-1 p-1 ${panel}`}><span/><button type="button" aria-label="Di chuyển góc nhìn lên" onClick={()=>p.onCameraControl?.('up')}>↑</button><span/><button type="button" aria-label="Di chuyển góc nhìn sang trái" onClick={()=>p.onCameraControl?.('left')}>←</button><button type="button" aria-label="Thu nhỏ" onClick={()=>p.onCameraControl?.('zoom-out')}>−</button><button type="button" aria-label="Di chuyển góc nhìn sang phải" onClick={()=>p.onCameraControl?.('right')}>→</button><span/><button type="button" aria-label="Phóng to" onClick={()=>p.onCameraControl?.('zoom-in')}>+</button><span/><button type="button" aria-label="Di chuyển góc nhìn xuống" onClick={()=>p.onCameraControl?.('down')}>↓</button></div></details>}
           {p.overflow > 0 && <button type="button" className={`${camButton} text-accent`} aria-label={`Còn ${p.overflow} lập trình viên chưa hiện trong cảnh. Mở danh sách nhân viên`} title="Mở danh sách nhân viên" onClick={p.onAgentList}>+{p.overflow}</button>}
         </CameraBar>
-        <form onSubmit={submit} className={`office-quick-chat pointer-events-auto m-0 flex min-w-0 flex-1 items-center gap-2 py-1 pr-1 pl-3 md:mx-auto md:w-full md:max-w-xl ${panel}`}>
-          <Icon name="chat"/>
-          <input aria-label="Trò chuyện với Bflow" placeholder={chat ? (p.director ? 'Trò chuyện với Director…' : 'Trò chuyện với Bflow...') : 'Chưa trò chuyện được lúc này'} disabled={!chat} value={draft} onChange={e => setDraft(e.target.value)} className="min-w-0 flex-1 rounded-none border-0 bg-transparent px-1 text-sm"/>
-          <button type="submit" disabled={!chat || !draft.trim()} aria-label="Mở trò chuyện với nội dung này" title="Mở trò chuyện (chưa gửi)" className="shrink-0 rounded-lg border-transparent px-2.5"><Icon name="send"/></button>
-        </form>
+        {!p.taskbar&&quickChat}
       </div>
     </div>
+    {p.taskbar?.(quickChat)}
   </>;
 }

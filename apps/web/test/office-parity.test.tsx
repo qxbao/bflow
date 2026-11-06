@@ -347,7 +347,7 @@ const rows: Row[] = [
     await waitFor(() => expect(api.fetcher.mock.calls.some(c => String(c[0]).includes('/runs?limit=25'))).toBe(true));
     const count = (): number => api.fetcher.mock.calls.filter(c => String(c[0]).includes('/session') && String(c[0]).includes('/projects/p/')).length;
     const before = count();
-    await rail('Tải lại dữ liệu');
+    fireEvent.click(within(screen.getByRole('navigation',{name:'Thanh tác vụ'})).getByRole('button',{name:'Tải lại dữ liệu'}));
     await waitFor(() => expect(count()).toBeGreaterThan(before));
   } },
   { row: 31, name: 'read problems in the panel (ReadProblems) with a retry', go: async () => {

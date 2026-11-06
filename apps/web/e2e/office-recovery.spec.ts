@@ -137,7 +137,7 @@ test('3D unknown_delivery shows a "chưa xác định" label and offers no resen
   await expect(mirrorAgent).not.toContainText('Chưa xác định việc đã tới');
   // The next read reports an uncertain delivery.
   state = 'unknown_delivery';
-  await page.getByRole('button', { name: 'Tải lại dữ liệu' }).click();
+  await page.getByRole('navigation',{name:'Thanh tác vụ'}).getByRole('button', { name: 'Tải lại dữ liệu' }).click();
   await expect(mirrorAgent).toContainText('Chưa xác định việc đã tới');
   await expect(mirrorAgent).toContainText('Mức tin cậy: Chưa xác định');
   await expect(page.getByLabel('Trạng thái văn phòng')).toContainText('chưa rõ');
@@ -208,7 +208,7 @@ test('3D shows exactly the seated developers plus an overflow chip, without cras
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-renderer', 'ready');
   // Twenty-three: still twenty seats, and the chip names the three left out.
   developers = 23;
-  await page.getByRole('button', { name: 'Tải lại dữ liệu' }).click();
+  await page.getByRole('navigation',{name:'Thanh tác vụ'}).getByRole('button', { name: 'Tải lại dữ liệu' }).click();
   await expect(mirrorDevs()).toHaveCount(23);
   const chip = page.getByRole('button', { name: 'Còn 3 lập trình viên chưa hiện trong cảnh. Mở danh sách nhân viên' });
   await expect(chip).toHaveText('+3');

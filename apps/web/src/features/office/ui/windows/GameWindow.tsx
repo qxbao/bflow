@@ -163,7 +163,7 @@ export function GameWindow(props: GameWindowProps) {
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   };
   const windowKeyDown=(event:KeyboardEvent<HTMLElement>)=>{
-    if(event.key==='Escape'&&!event.defaultPrevented&&!event.nativeEvent.isComposing){if(event.target instanceof Element&&event.target.closest('dialog[open]'))return;event.preventDefault();if(closable)onClose();return;}
+    if(event.key==='Escape'&&active&&!event.defaultPrevented&&!event.nativeEvent.isComposing){if(event.target instanceof Element&&event.target.closest('dialog[open]'))return;event.preventDefault();if(closable)onClose();return;}
     focusable(event);
   };
 
@@ -179,6 +179,7 @@ export function GameWindow(props: GameWindowProps) {
       data-window-id={id}
       data-window-kind={kind}
       data-display={display}
+      data-active={active?'true':'false'}
       hidden={!visible}
       tabIndex={-1}
       onPointerDown={onFocus}

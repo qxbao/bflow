@@ -6,7 +6,7 @@ export interface SceneWindow { rect: WindowRect; display: 'normal' | 'minimized'
 export function clampRect(rect: WindowRect, viewport: Viewport, min = { w: 320, h: 240 }): WindowRect {
   const w = Math.max(min.w, Math.min(rect.w, viewport.width));
   const h = Math.max(min.h, Math.min(rect.h, viewport.height));
-  return { x: Math.max(0, Math.min(rect.x, viewport.width - Math.min(48, w))), y: Math.max(0, Math.min(rect.y, viewport.height - Math.min(48, h))), w, h };
+  return { x: Math.max(0, Math.min(rect.x, viewport.width - w)), y: Math.max(0, Math.min(rect.y, viewport.height - h)), w, h };
 }
 
 export function defaultRect(kind: WindowKind, viewport: Viewport, index = 0): WindowRect {

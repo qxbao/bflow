@@ -100,14 +100,15 @@ test('keyboard only: Tab reaches the HUD, the stage and every mirror object; arr
   await page.keyboard.press('0'); await page.waitForTimeout(900);
   expect(await stageShot(page)).toBe(before);
 
-  // Enter on a mirror agent opens the inspector; Esc closes it and returns focus to that button.
+  // Enter on a mirror agent opens a tool window; Esc closes it and returns focus to that button.
   const agent = page.getByLabel('Bản văn bản của văn phòng').getByRole('button', { name: /Developer #1/ });
   await agent.focus();
   await page.keyboard.press('Enter');
-  await expect(page.locator('#main')).toBeVisible();
-  await expect(page.locator('#main')).toContainText(/Developer(?: #)?1/);
+  const agentWindow=page.getByRole('dialog',{name:/Developer(?: #)?1/});
+  await expect(agentWindow).toBeVisible();
+  await expect(agentWindow).toContainText(/Developer(?: #)?1/);
   await page.keyboard.press('Escape');
-  await expect(page.locator('#main')).toBeHidden();
+  await expect(agentWindow).toBeHidden();
   await expect(agent).toBeFocused();
   // The same from a rail button.
   await rail(page, /^Tổng quan/).focus();
@@ -172,7 +173,7 @@ for (const width of [375, 768, 1280, 1440]) {
       const outside = controls.filter(c => c.r.left < -0.5 || c.r.right > innerWidth + 0.5 || c.r.top < -0.5 || c.r.bottom > innerHeight + 0.5).map(c => c.name);
       // Name tags only: a message box is wider than the safe-area test its anchor passes, and it is decoration over the character (aria-hidden), not a control label.
       const labels = rects([...document.querySelectorAll('[aria-label="Cảnh văn phòng"] [data-kind="agent"]')]);
-      const covered = labels.filter(l => controls.some(c => overlap(l.r, c.r))).map(l => l.name);
+      const covered = labels.filter(l => controls.some(c => overlap(l.r, c.r))).map(l => `${l.name} x ${controls.filter(c=>overlap(l.r,c.r)).map(c=>`${c.name}@${[c.r.x,c.r.y,c.r.width,c.r.height].map(Math.round).join(',')}`).join(';')}`);
       const small = controls.filter(c => c.r.height < 32 || c.r.width < 32).map(c => `${c.name} ${Math.round(c.r.width)}x${Math.round(c.r.height)}`);
       return { scrollW: root.scrollWidth, bodyW: document.body.scrollWidth, innerW: innerWidth, controls: controls.length, labels: labels.length, clashes, outside, covered, small };
     });
@@ -191,7 +192,9 @@ for (const width of [375, 768, 1280, 1440]) {
       await page.getByText('Camera',{exact:true}).click();
     }
     // The panel opens inside the viewport too, full width on a phone.
-    await rail(page, /^Tổng quan/).click();
+    if(width<768){await page.getByRole('button',{name:'◆ Bflow'}).click();await page.getByRole('group',{name:'Menu Bflow'}).getByRole('button',{name:'Tổng quan'}).click();}
+    else await rail(page, /^Tổng quan/).click();
+    await page.waitForTimeout(150); // Let the 120 ms window-open scale animation settle before measuring its edges.
     const panel = await page.locator('#main').boundingBox();
     expect(panel && panel.x >= -0.5 && panel.x + panel.width <= width + 0.5).toBe(true);
     if (width < 768) expect(Math.round(panel!.width)).toBe(immersiveEnabled ? width - 24 : width);
