@@ -1,4 +1,4 @@
-import { useId, useRef, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
+import { useEffect, useId, useRef, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
 import { StickerIcon, type StickerIconName } from './icons';
 
 export type WindowKind = 'app' | 'agent' | 'unseated' | 'director' | 'director-chat' | 'queue' | 'cabinet' | 'server' | 'repair' | 'operations' | 'status';
@@ -14,12 +14,14 @@ export interface GameWindowProps {
   titleText?: string;
   badge?: ReactNode;
   rect: WindowRect;
+  z?: number;
   display: WindowDisplay;
   active: boolean;
   closable: boolean;
   minimizable: boolean;
   maximizable: boolean;
   resizable: boolean;
+  movable?: boolean;
   hidden?: boolean;
   embedded?: boolean;
   modal?: boolean;
@@ -39,7 +41,7 @@ interface PointerStart { pointerId: number; x: number; y: number; dx: number; dy
 export function GameWindow(props: GameWindowProps) {
   const {
     id, kind, title, icon, color, titleText, badge, rect, display, active, closable, minimizable, maximizable,
-    resizable, hidden = false, embedded = false, modal = kind === 'repair', titleId, nav, children,
+    resizable, movable = true, hidden = false, embedded = false, modal = kind === 'repair', titleId, nav, children,
     onFocus, onClose, onMinimize, onToggleMaximize, onMove, onResize,
   } = props;
   const generatedId = useId();
@@ -47,22 +49,23 @@ export function GameWindow(props: GameWindowProps) {
   const pointer = useRef<PointerStart | undefined>(undefined);
   const titlebar = useRef<HTMLElement>(null);
   const style: CSSProperties = {
-    left: rect.x,
-    top: rect.y,
-    width: rect.w,
-    height: rect.h,
-    zIndex: props.active ? undefined : undefined,
+    left: display==='maximized'?0:rect.x,
+    top: display==='maximized'?0:rect.y,
+    width: display==='maximized'?'100vw':rect.w,
+    height: display==='maximized'?'calc(100dvh - 56px)':rect.h,
+    zIndex: kind === 'repair' ? 2000 : props.z === undefined ? undefined : props.z + 40,
     '--win-accent': color,
     '--win-title-ink': titleText ?? (color.includes('decide') || kind === 'queue' || kind === 'status' ? 'var(--win-ink)' : '#fff'),
   } as CSSProperties;
   const visible = !hidden && display !== 'minimized';
+  useEffect(()=>{if(embedded||!visible||!active)return;const frame=requestAnimationFrame(()=>titlebar.current?.focus());return()=>cancelAnimationFrame(frame);},[embedded,visible,active]);
 
   function windowElement(): HTMLElement | null {
     return embedded ? document.getElementById('main') : titlebar.current?.closest<HTMLElement>('.bwin') ?? null;
   }
 
   function startPointer(event: PointerEvent<HTMLElement>, resize: boolean): void {
-    if (event.button !== 0 || (!resize && (event.target as Element).closest('button, a, input, select, textarea'))) return;
+    if (event.button !== 0 || (!resize && (!movable || (event.target as Element).closest('button, a, input, select, textarea')))) return;
     pointer.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, dx: 0, dy: 0, resize };
     event.currentTarget.setPointerCapture?.(event.pointerId);
     event.preventDefault();
@@ -77,8 +80,8 @@ export function GameWindow(props: GameWindowProps) {
     const element = windowElement();
     if (!element) return;
     if (start.resize) {
-      element.style.width = `${Math.max(320, rect.w + start.dx)}px`;
-      element.style.height = `${Math.max(240, rect.h + start.dy)}px`;
+      element.style.setProperty('--bwin-preview-width', `${Math.max(320, rect.w + start.dx)}px`);
+      element.style.setProperty('--bwin-preview-height', `${Math.max(240, rect.h + start.dy)}px`);
     } else {
       element.style.transform = `translate3d(${start.dx}px, ${start.dy}px, 0)`;
     }
@@ -91,12 +94,13 @@ export function GameWindow(props: GameWindowProps) {
     const element = windowElement();
     if (element) {
       element.style.transform = '';
-      element.style.width = '';
-      element.style.height = '';
+      element.style.removeProperty('--bwin-preview-width');
+      element.style.removeProperty('--bwin-preview-height');
     }
     if (!commit) return;
     if (start.resize) onResize(start.dx, start.dy);
     else if (start.dx !== 0 || start.dy !== 0) onMove(start.dx, start.dy);
+    if (kind === 'director-chat') window.dispatchEvent(new Event('bflow:director-dialogue-state'));
   }
 
   function titleKey(event: KeyboardEvent<HTMLElement>): void {
@@ -106,8 +110,8 @@ export function GameWindow(props: GameWindowProps) {
     const delta = directions[event.key];
     if (delta) {
       event.preventDefault();
-      if (step) onResize(delta[0], delta[1]);
-      else onMove(delta[0], delta[1]);
+      if (step && resizable) onResize(delta[0], delta[1]);
+      else if (!step && movable) onMove(delta[0], delta[1]);
     } else if (event.key === 'Enter' && maximizable) {
       event.preventDefault();
       onToggleMaximize();
@@ -158,9 +162,13 @@ export function GameWindow(props: GameWindowProps) {
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   };
+  const windowKeyDown=(event:KeyboardEvent<HTMLElement>)=>{
+    if(event.key==='Escape'&&!event.defaultPrevented&&!event.nativeEvent.isComposing){if(event.target instanceof Element&&event.target.closest('dialog[open]'))return;event.preventDefault();if(closable)onClose();return;}
+    focusable(event);
+  };
 
   return <>
-    {modal && visible && <div className="bwin-backdrop" aria-hidden="true"/>}
+    {modal && visible && <div className="bwin-backdrop" style={{zIndex:kind==='repair'?1999:(props.z??1)+39}} aria-hidden="true"/>}
     <section
       className={`bwin ${active ? 'is-active' : ''} ${display === 'maximized' ? 'is-maximized' : ''}`}
       style={style}
@@ -174,7 +182,7 @@ export function GameWindow(props: GameWindowProps) {
       hidden={!visible}
       tabIndex={-1}
       onPointerDown={onFocus}
-      onKeyDown={focusable}
+      onKeyDown={windowKeyDown}
     >
       {titlebarElement}
       {navElement}

@@ -59,6 +59,9 @@
   --color-input: #cfc4ee; --color-success: #1e6b3a; --color-danger: #a3202a; --color-warning: #7a5600; --color-code: #efe8ff; --color-code-line: #cfc4ee;
 }
 .bwin { position: fixed; display:flex; flex-direction:column; min-width:320px; min-height:240px; border:var(--win-border); border-radius:var(--win-radius); background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); overflow:hidden; }
+.office-windows { pointer-events:none; }
+.office-windows .bwin { pointer-events:auto; }
+.bwin[style*="--bwin-preview-width"] { width:var(--bwin-preview-width)!important; height:var(--bwin-preview-height)!important; }
 .bwin.is-active { box-shadow:var(--win-shadow); }
 .bwin-titlebar { display:flex; flex:none; align-items:center; gap:8px; min-height:36px; padding:4px 6px; color:var(--win-title-ink,#fff); background:var(--win-accent,var(--win-c-system)); border-bottom:2px solid var(--win-ink); cursor:grab; touch-action:none; }
 .bwin-titlebar:active { cursor:grabbing; }
@@ -74,9 +77,13 @@
 .bwin-nav-buttons span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .bwin-body { flex:1; min-height:0; overflow:auto; padding:16px; color-scheme:light; background:var(--win-body); color:var(--win-ink); scrollbar-color:var(--win-accent) var(--win-panel); }
 .bwin-app .bwin-body { padding:0; }
+.bwin-chrome-host { display:flex; flex:none; flex-direction:column; }
+.classic-chrome-host { display:none; }
+.classic-route-host { display:contents; }
+.bwin-app .workspace-main-content { display:flex; flex:1; min-height:0; flex-direction:column; overflow:auto; }
 .bwin-app .bwin-inspector-host:empty { display:none; }
 .bwin-resize { position:absolute; right:0; bottom:0; width:20px; min-height:20px; padding:0; border:0; background:transparent; cursor:nwse-resize; }
-.bwin-backdrop { position:fixed; inset:0; z-index:90; background:rgb(27 16 51 / .35); backdrop-filter:blur(2px); }
+.bwin-backdrop { position:fixed; inset:0; z-index:90; background:rgb(27 16 51 / .35); backdrop-filter:blur(2px); pointer-events:auto; }
 .office-3d .bwin-body button { border-radius:0; border:2px solid var(--win-ink); box-shadow:var(--win-shadow-sm); background:#fff; color:var(--win-ink); }
 .office-3d .bwin-body input, .office-3d .bwin-body select, .office-3d .bwin-body textarea { border-radius:0; border:2px solid var(--win-ink); background:#fff; color:var(--win-ink); }
 .office-3d .bwin-body :focus-visible { outline-color:var(--win-c-work); }
@@ -302,6 +309,66 @@
     .chat-history { height: 100%; max-height: none; }
   }
 }
+
+/* Retro desktop chrome and the persistent window switcher. */
+.bflow-taskbar { position:fixed; inset:auto 0 0; z-index:120; display:flex; align-items:center; gap:8px; min-height:56px; padding:6px 12px; border-top:2px solid var(--win-ink); background:var(--win-body); color:var(--win-ink); box-shadow:0 -3px 0 var(--win-ink); pointer-events:auto; }
+.bflow-taskbar button { flex:none; min-height:36px; padding:4px 10px; border:2px solid var(--win-ink); border-radius:0; color:var(--win-ink); background:#fff; box-shadow:var(--win-shadow-sm); font:600 11px/1.2 var(--font-mono); }
+.taskbar-start-wrap { position:relative; }
+.taskbar-start { background:#ffc400!important; }
+.taskbar-windows { display:flex; flex:1; min-width:0; gap:6px; overflow-x:auto; }
+.taskbar-windows button[aria-pressed="true"] { background:var(--win-panel); box-shadow:inset 0 -3px var(--win-accent,var(--win-c-system)); }
+.taskbar-end,.taskbar-mode { display:flex; align-items:center; gap:4px; }
+.taskbar-start-menu { position:absolute; bottom:calc(100% + 10px); left:0; display:grid; min-width:220px; gap:6px; padding:10px; border:2px solid var(--win-ink); background:var(--win-body); box-shadow:var(--win-shadow); }
+.taskbar-start-menu button { text-align:left; }
+.taskbar-status { max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.status-window-details { display:grid; grid-template-columns:minmax(9rem,auto) minmax(0,1fr); gap:8px 16px; margin:0; }
+.status-window-details dt { margin:0; font:600 12px var(--font-mono); }
+.status-window-details dd { margin:0; overflow-wrap:anywhere; }
+.app-window-restore { position:fixed; left:12px; bottom:66px; z-index:121; border:2px solid var(--win-ink); border-radius:0; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
+@media (min-width:768px) and (max-width:1099px) {
+  .office-3d.office-panel-open .bwin-app { left:38vw!important; width:62vw!important; }
+  .office-windows .bwin { left:38vw!important; top:0!important; width:62vw!important; height:calc(100dvh - 56px)!important; }
+  .office-3d.office-panel-open .office-stage { visibility:hidden; }
+}
+@media (max-width:767px) {
+  .bflow-taskbar { min-height:56px; padding:4px; gap:4px; }
+  .taskbar-windows { max-width:38vw; }
+  .taskbar-windows button { max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .taskbar-mode button { min-width:36px; padding-inline:4px; }
+  .office-3d .office-rail { display:none; }
+  .office-3d.office-panel-open .bwin-app,.office-windows .bwin { left:0!important; top:0!important; width:100vw!important; height:calc(100dvh - 56px)!important; max-height:none!important; border-radius:0; }
+  .office-3d:has(.office-windows .bwin:not([hidden])) .office-stage { visibility:hidden; }
+  .office-3d:has(.office-windows .bwin:not([hidden])) .office-cameras { display:none; }
+  .bwin-titlebar { min-height:48px; }
+  .bwin-controls button { width:40px; height:40px; }
+}
+.office-3d .office-topbar { left:16px; right:16px; grid-template-columns:288px auto; align-items:start; }
+.office-3d .office-mode { display:none; }
+.office-3d [data-hud-bottom] { bottom:56px!important; }
+.office-3d .office-topbar > section[aria-label="Văn phòng Bflow"] { width:288px; border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
+.office-3d .office-topbar h2 { font:800 16px/1.2 var(--font-mono); }
+.office-3d .office-current-run { width:100%; min-height:0; border:0; border-radius:0; padding:0; background:transparent; color:var(--win-ink); box-shadow:none; font:600 13px/1.35 var(--font-prose); }
+.office-3d .office-current-run:hover { text-decoration:underline; background:transparent; color:var(--win-ink); }
+.office-3d .office-topbar select { border:2px solid var(--win-ink); border-radius:0; background:#fff; color:var(--win-ink); }
+.office-3d .office-rail { left:16px; top:164px; bottom:72px; width:80px; max-height:none!important; overflow-y:auto; transform:none; border:0; border-radius:0; background:transparent; box-shadow:none; }
+.office-3d .office-rail button { width:72px; min-height:72px; justify-content:flex-start; gap:2px; padding:3px; border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow-sm); font:600 10px/1.15 var(--font-mono); }
+.office-3d .office-rail button svg { width:36px; height:36px; padding:5px; border:1px solid var(--win-ink); border-radius:4px; background:var(--win-panel); color:var(--win-c-system); }
+.office-3d .office-rail button:hover { background:var(--win-panel); color:var(--win-ink); }
+.office-3d .office-cameras { border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); box-shadow:var(--win-shadow); }
+.office-3d .office-cameras button { border:2px solid var(--win-ink); border-radius:0; background:#fff; color:var(--win-ink); box-shadow:var(--win-shadow-sm); }
+.office-3d .office-quick-chat { border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
+.office-3d .office-quick-chat input { color:var(--win-ink); }
+.office-3d .office-quick-chat input::placeholder { color:var(--color-muted); }
+.office-3d.office-panel-open .office-quick-chat { display:flex; }
+.office-3d.office-panel-open .office-hud-root { visibility:visible; right:0; pointer-events:none; }
+.office-3d.office-panel-open .office-hud-root [data-hud-bottom] { position:fixed; left:12px; right:12px; bottom:56px!important; visibility:visible; z-index:125; }
+.office-3d.office-panel-open .office-hud-root [data-hud-bottom] > :not([data-hud-dock]) { visibility:visible; }
+.office-3d.office-panel-open .office-hud-root [data-hud-bottom] > button { visibility:visible; }
+.office-3d [data-component="OfficeNotifications"] { position:fixed; top:16px; right:16px; z-index:60; width:min(320px,calc(100vw - 32px)); border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
+.office-3d [data-component="FirstVisit"] { border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
+@media (max-height:650px) { .office-3d .office-rail { top:164px; bottom:72px; } }
+@media (max-width:767px) { .office-3d [data-hud-bottom] { bottom:56px!important; } }
+@media (prefers-reduced-motion:reduce) { .bwin, .bflow-taskbar { animation:none!important; transition:none!important; } }
 @media (min-height: 650px) {
   .chat-layout > div { display: flex; flex-direction: column; }
   .chat-layout > div > :not(.chat-thread) { flex-shrink: 0; }

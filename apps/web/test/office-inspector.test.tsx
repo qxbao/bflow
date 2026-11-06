@@ -104,16 +104,18 @@ test('selecting in the mirror opens the agent inspector in the panel, and object
   const row = await within(mirror).findByRole('button', { name: /Developer #1/ });
   fireEvent.click(row);
   const main = document.getElementById('main')!;
-  expect(await within(main).findByRole('heading', { name: 'Developer #1' })).toBeTruthy();
-  expect(main.classList.contains('hidden')).toBe(false);
+  const agentWindow=await screen.findByRole('dialog',{name:'Developer #1'});
+  expect(within(agentWindow).getByRole('region',{name:'Nhân viên Developer #1'})).toBeTruthy();
+  expect(main.classList.contains('hidden')).toBe(true);
   fireEvent.click(within(mirror).getByRole('button', { name: /Tủ tài liệu/ }));
-  expect(await within(main).findByRole('heading', { name: 'Tủ tài liệu' })).toBeTruthy();
-  expect(within(main).queryByRole('heading', { name: 'Developer #1' })).toBeNull();
+  const cabinet=await screen.findByRole('dialog',{name:'Tài liệu'});
+  expect(within(cabinet).getByRole('heading',{name:'Tủ tài liệu'})).toBeTruthy();
+  expect(screen.getByRole('dialog',{name:'Developer #1'})).toBeTruthy();
   fireEvent.click(within(mirror).getByRole('button', { name: /Máy chủ/ }));
-  expect(await within(main).findByRole('heading', { name: /Máy chủ \(phiên dự án\)/ })).toBeTruthy();
+  expect(await screen.findByRole('dialog',{name:'Máy chủ'})).toBeTruthy();
   fireEvent.click(within(mirror).getByRole('button', { name: /Bảng nhiệm vụ/ }));
-  await waitFor(() => expect(within(main).queryByRole('heading', { name: /Máy chủ/ })).toBeNull());
-  fireEvent.click(screen.getByRole('button', { name: 'Đóng bảng' }));
+  await waitFor(() => expect(main.classList.contains('hidden')).toBe(false));
+  fireEvent.click(screen.getByRole('button', { name: 'Đóng cửa sổ Công việc' }));
   await waitFor(() => expect(main.classList.contains('hidden')).toBe(true));
 });
 
@@ -125,13 +127,14 @@ test('a refused session opens re-pairing in the panel instead of stale data', as
   render(<MemoryRouter initialEntries={['/projects/p']}><App api={new ApiClient()} /></MemoryRouter>);
   await screen.findByText('Cần ghép nối lại');
   const main = document.getElementById('main')!;
-  expect(await within(main).findByLabelText(/Liên kết mở Bflow Web/)).toBeTruthy();
+  const repair=await screen.findByRole('dialog',{name:'Cần ghép nối lại'});
+  expect(await within(repair).findByLabelText(/Liên kết mở Bflow Web/)).toBeTruthy();
   expect(screen.getByLabelText('Trạng thái văn phòng').textContent).toContain('Cần ghép nối lại');
   // Toàn cảnh closes panels but the re-pair view cannot be dismissed.
   fireEvent.click(screen.getByRole('button', { name: 'Toàn cảnh' }));
   await new Promise(resolve => setTimeout(resolve, 20));
-  expect(within(main).getByLabelText(/Liên kết mở Bflow Web/)).toBeTruthy();
-  expect(main.classList.contains('hidden')).toBe(false);
+  expect(within(repair).getByLabelText(/Liên kết mở Bflow Web/)).toBeTruthy();
+  expect(main.classList.contains('hidden')).toBe(true);
 });
 
 test('the skip link targets the HUD in 3D', async () => {
@@ -156,11 +159,11 @@ test('an agent that vanishes after the model loaded closes its inspector and ret
   const mirror = await screen.findByRole('region', { name: 'Bản văn bản của văn phòng' });
   fireEvent.click(await within(mirror).findByRole('button', { name: /Developer #1/ }));
   const main = () => document.getElementById('main')!;
-  expect(await within(main()).findByRole('heading', { name: 'Developer #1' })).toBeTruthy();
+  expect(await screen.findByRole('dialog',{name:'Developer #1'})).toBeTruthy();
   body = wf([conv]);
   fireEvent.click(within(screen.getByRole('navigation', { name: 'Lối tắt' })).getByRole('button', { name: 'Tải lại dữ liệu' }));
-  await waitFor(() => expect(main().classList.contains('hidden')).toBe(true));
-  expect(within(main()).queryByRole('heading', { name: 'Developer #1' })).toBeNull();
+  await waitFor(() => expect(screen.queryByRole('dialog',{name:'Developer #1'})).toBeNull());
+  expect(main().classList.contains('hidden')).toBe(true);
   await waitFor(() => expect(document.activeElement).toBe(document.getElementById('office-hud')));
 });
 
@@ -172,11 +175,12 @@ test('the re-pair view does not close on Esc or by button', async () => {
   render(<MemoryRouter initialEntries={['/projects/p']}><App api={new ApiClient()} /></MemoryRouter>);
   await screen.findByText('Cần ghép nối lại');
   const main = document.getElementById('main')!;
-  await within(main).findByLabelText(/Liên kết mở Bflow Web/);
+  const repair=await screen.findByRole('dialog',{name:'Cần ghép nối lại'});
+  await within(repair).findByLabelText(/Liên kết mở Bflow Web/);
   fireEvent.keyDown(main, { key: 'Escape' });
-  expect(main.classList.contains('hidden')).toBe(false);
-  expect((screen.getByRole('button', { name: 'Đóng bảng' }) as HTMLButtonElement).disabled).toBe(true);
-  expect(within(main).getByLabelText(/Liên kết mở Bflow Web/)).toBeTruthy();
+  expect(main.classList.contains('hidden')).toBe(true);
+  expect(screen.queryByRole('button',{name:'Đóng cửa sổ Cần ghép nối lại'})).toBeNull();
+  expect(within(repair).getByLabelText(/Liên kết mở Bflow Web/)).toBeTruthy();
 });
 
 test('shows the agent terminal text and a link to all staff', async () => {

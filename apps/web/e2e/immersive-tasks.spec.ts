@@ -73,7 +73,7 @@ test('task board deep links, history, modal review draft and stale revision stay
   const revisited = page.getByRole('dialog', { name: /Quyết định phiên bản 1/ });
   await expect(revisited.getByLabel(/Lý do \(bắt buộc/)).toHaveValue('Giữ lại bản nháp khi đổi chế độ và trang.');
   await revisited.getByRole('button', { name: 'Quay lại công việc' }).click();
-  await page.getByRole('button', { name: 'Đóng bảng' }).click();
+  await page.locator('#main').getByRole('button', { name: /^Đóng cửa sổ/ }).click();
   await expect(page).toHaveURL(new RegExp(`${base}$`));
   await page.getByRole('button', { name: 'Web', exact: true }).click();
   await page.getByRole('link', { name: 'Công việc', exact: true }).click();

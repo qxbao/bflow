@@ -1,21 +1,39 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router';
 import type { WebProject } from '@bflow/contracts/web';
 import { FieldHelp } from './FieldHelp';
 import { GameWindow } from '../features/office/ui/windows/GameWindow';
-import { defaultRect } from '../features/office/ui/windows/geometry';
+import { clampRect, defaultRect } from '../features/office/ui/windows/geometry';
 
 /** `dockPx` is the height of the HUD's bottom block; on phones the panel stops above it so the operations dock is never covered. */
-export type VisualShell={panelOpen:boolean;closable:boolean;immersive?:boolean;dockPx:number;onClose:()=>void;onOverview:()=>void;inspectorRef:(element:HTMLElement|null)=>void;hudRef:(element:HTMLElement|null)=>void;stageRef:(element:HTMLElement|null)=>void};
+export type VisualShell={panelOpen:boolean;closable:boolean;immersive?:boolean;dockPx:number;onClose:()=>void;onOverview:()=>void;inspectorRef:(element:HTMLElement|null)=>void;windowsRef:(element:HTMLElement|null)=>void;hudRef:(element:HTMLElement|null)=>void;stageRef:(element:HTMLElement|null)=>void};
 export function isEscapeDismissal(event: Pick<KeyboardEvent, 'key' | 'defaultPrevented' | 'isComposing'>): boolean { return event.key==='Escape'&&!event.defaultPrevented&&!event.isComposing; }
 export function AppShell({projects,projectId,visual,modeSwitch,children}:{projects:WebProject[];projectId?:string;visual?:VisualShell|undefined;modeSwitch?:ReactNode;children:ReactNode}) {
   const navigate=useNavigate(), location=useLocation(), main=useRef<HTMLElement>(null);
   const [menuOpen,setMenuOpen]=useState(false);
+  const [chromeHost,setChromeHost]=useState<HTMLElement|null>(null);
   const [appRect,setAppRect]=useState(()=>defaultRect('app',{width:window.innerWidth,height:window.innerHeight}));
   const [appDisplay,setAppDisplay]=useState<'normal'|'minimized'|'maximized'>('normal');
-  const currentTitle=location.pathname.endsWith('/runs')?'Công việc':location.pathname.includes('/runs/')?'Công việc / Chi tiết':location.pathname.endsWith('/chat')||location.pathname.includes('/chat/')?'Trò chuyện':location.pathname.endsWith('/agents')?'Nhân viên':location.pathname.includes('/issues')?'Sự cố':location.pathname.endsWith('/review')?'Cần bạn quyết định':location.pathname.endsWith('/settings')?'Cài đặt dự án':'Tổng quan';
-  const appMove=(dx:number,dy:number)=>setAppRect(rect=>({...rect,x:Math.max(0,Math.min(window.innerWidth-48,rect.x+dx)),y:Math.max(0,Math.min(window.innerHeight-48,rect.y+dy))}));
-  const appResize=(dw:number,dh:number)=>setAppRect(rect=>({...rect,w:Math.max(420,Math.min(window.innerWidth,rect.w+dw)),h:Math.max(320,Math.min(window.innerHeight,rect.h+dh))}));
+  const [appLayoutLoadedKey,setAppLayoutLoadedKey]=useState<string|null>(null);
+  const appLayoutKey=projectId?`bflow:ui:windows:${encodeURIComponent(projectId)}`:undefined;
+  useEffect(()=>{
+    if(!appLayoutKey){setAppLayoutLoadedKey(null);return;}
+    try{const raw=localStorage.getItem(appLayoutKey);if(raw){const parsed=JSON.parse(raw) as Record<string,unknown>,saved=parsed.app as {rect?:unknown;display?:unknown}|undefined;const rect=saved?.rect as {x?:unknown;y?:unknown;w?:unknown;h?:unknown}|undefined;if(rect&&[rect.x,rect.y,rect.w,rect.h].every(value=>typeof value==='number'&&Number.isFinite(value))){setAppRect(clampRect({x:rect.x as number,y:rect.y as number,w:rect.w as number,h:rect.h as number},{width:window.innerWidth,height:window.innerHeight},{w:420,h:320}));}if(saved?.display==='normal'||saved?.display==='minimized'||saved?.display==='maximized')setAppDisplay(saved.display);}}catch{/* broken/blocked storage leaves the default layout */}
+    setAppLayoutLoadedKey(appLayoutKey);
+  },[appLayoutKey]);
+  useEffect(()=>{
+    if(!appLayoutKey||appLayoutLoadedKey!==appLayoutKey)return;
+    try{const raw=localStorage.getItem(appLayoutKey),parsed=raw?JSON.parse(raw) as Record<string,unknown>:{};localStorage.setItem(appLayoutKey,JSON.stringify({...parsed,app:{rect:appRect,display:appDisplay}}));}catch{/* local layout persistence is optional */}
+  },[appLayoutKey,appLayoutLoadedKey,appRect,appDisplay]);
+  useEffect(()=>{const resize=()=>setAppRect(rect=>clampRect(rect,{width:window.innerWidth,height:window.innerHeight},{w:420,h:320}));window.addEventListener('resize',resize);return()=>window.removeEventListener('resize',resize);},[]);
+  const routeBase=projectId?`/projects/${encodeURIComponent(projectId)}`:'';
+  const routeTail=routeBase?location.pathname.slice(routeBase.length):location.pathname;
+  const currentTitle=routeTail===''||routeTail==='/'?(projectId?'Tổng quan':'Quản lý dự án'):routeTail==='/runs'?'Công việc':routeTail.startsWith('/runs/')?'Công việc / Chi tiết':routeTail==='/chat'||routeTail.startsWith('/chat/')?'Trò chuyện':routeTail==='/agents'?'Nhân viên':routeTail==='/issues'||routeTail.startsWith('/issues/')?'Sự cố':routeTail==='/review'?'Cần bạn quyết định':routeTail==='/settings'?'Cài đặt dự án':'Không tìm thấy';
+  const currentIcon=currentTitle==='Công việc'?'tasks':currentTitle==='Trò chuyện'?'chat':currentTitle==='Nhân viên'?'agents':currentTitle==='Cần bạn quyết định'||currentTitle==='Sự cố'?'decision':currentTitle==='Cài đặt dự án'?'settings':'overview';
+  const currentColor=currentTitle==='Công việc'?'var(--win-c-work)':currentTitle==='Trò chuyện'?'var(--win-c-chat)':currentTitle==='Nhân viên'?'var(--win-c-people)':currentTitle==='Cần bạn quyết định'||currentTitle==='Sự cố'?'var(--win-c-decide)':'var(--win-c-system)';
+  const appMove=(dx:number,dy:number)=>{setAppRect(rect=>({...rect,x:Math.max(0,Math.min(window.innerWidth-48,rect.x+dx)),y:Math.max(0,Math.min(window.innerHeight-48,rect.y+dy))}));requestAnimationFrame(()=>window.dispatchEvent(new Event('bflow:windows-changed')));};
+  const appResize=(dw:number,dh:number)=>{setAppRect(rect=>({...rect,w:Math.max(420,Math.min(window.innerWidth,rect.w+dw)),h:Math.max(320,Math.min(window.innerHeight,rect.h+dh))}));requestAnimationFrame(()=>window.dispatchEvent(new Event('bflow:windows-changed')));};
   const menuButton=useRef<HTMLButtonElement>(null),menu=useRef<HTMLElement>(null);
   const panelClosed=Boolean(visual && !visual.panelOpen),panelClosedRef=useRef(panelClosed);panelClosedRef.current=panelClosed;
   // A closed visual panel is hidden: focus stays with whatever OfficeFrame restores instead of being pulled to <main>.
@@ -51,8 +69,13 @@ export function AppShell({projects,projectId,visual,modeSwitch,children}:{projec
         </nav>
         <p className="mt-6 border-t border-line pt-4 text-xs leading-relaxed text-muted">Đóng trình duyệt không dừng công việc. Bạn có thể quay lại bất cứ lúc nào.</p>
       </aside>
-      {visual && <><section ref={visual.stageRef} aria-label="Văn phòng" className="office-stage fixed inset-0 z-0 m-0 min-w-0 bg-canvas"/><section ref={visual.hudRef} id="office-hud" tabIndex={-1} aria-label="Thanh điều khiển" onKeyDown={e=>{if(isEscapeDismissal(e.nativeEvent) && visual.panelOpen){e.preventDefault();visual.onClose();}}} className="office-hud-root pointer-events-none fixed inset-y-0 left-0 right-0 z-30 m-0"/></>}
-      <main id="main" ref={main} tabIndex={-1} onKeyDown={visual?e=>{if(isEscapeDismissal(e.nativeEvent)){if(e.target instanceof Element && e.target.closest('dialog[open]'))return;e.preventDefault();visual.onClose();}}:undefined} className={visual?`workspace-main bwin bwin-app min-w-0 overflow-hidden bg-surface px-0 pt-0 pb-0 [overflow-wrap:anywhere] focus:outline-none fixed z-40 ${visual.panelOpen&&appDisplay!=='minimized'?'':'hidden'}`:'workspace-main min-w-0 px-4 pt-5 pb-12 [overflow-wrap:anywhere] focus:outline-none sm:px-6 lg:px-10'} style={visual?{left:appDisplay==='maximized'?0:appRect.x,top:appDisplay==='maximized'?0:appRect.y,width:appDisplay==='maximized'?'100vw':appRect.w,height:appDisplay==='maximized'?'calc(100dvh - 56px)':appRect.h,zIndex:40}:undefined}>{visual && <GameWindow id="app" kind="app" title={currentTitle} icon="overview" color="var(--win-c-system)" rect={appRect} display={appDisplay} active closable={visual.closable} minimizable maximizable resizable onFocus={()=>{}} onClose={visual.onClose} onMinimize={()=>setAppDisplay('minimized')} onToggleMaximize={()=>setAppDisplay(display=>display==='maximized'?'normal':'maximized')} onMove={appMove} onResize={appResize} embedded nav={<div className="bwin-nav-buttons"><button aria-label="Quay lại" onClick={()=>navigate(-1)}>←</button><button aria-label="Tiến" onClick={()=>navigate(1)}>→</button><button aria-label="Tải lại trang" onClick={()=>navigate(0)}>⟳</button><span>{currentTitle}</span></div>}/ >}{visual && <div ref={visual.inspectorRef} className="bwin-inspector-host"/>}<div className={visual?'bwin-body workspace-main-content':''}>{children}</div></main>
+      {visual && <><section ref={visual.stageRef} aria-label="Văn phòng" className="office-stage fixed inset-0 z-0 m-0 min-w-0 bg-canvas"/><section ref={visual.hudRef} id="office-hud" tabIndex={-1} aria-label="Thanh điều khiển" onKeyDown={e=>{if(isEscapeDismissal(e.nativeEvent) && visual.panelOpen){e.preventDefault();visual.onClose();}}} className="office-hud-root pointer-events-none fixed inset-y-0 left-0 right-0 z-30 m-0"/><section ref={visual.windowsRef} id="office-windows" aria-label="Cửa sổ công cụ" className="office-windows pointer-events-none fixed inset-0 z-[35] m-0"/></>}
+      <main id="main" ref={main} tabIndex={-1} role={visual?'dialog':undefined} aria-modal={visual?'false':undefined} aria-labelledby={visual?'app-window-title':undefined} data-window-kind={visual?'app':undefined} data-display={visual?appDisplay:undefined} onKeyDown={visual?e=>{if(isEscapeDismissal(e.nativeEvent)){if(e.target instanceof Element && e.target.closest('dialog[open]'))return;e.preventDefault();visual.onClose();}}:undefined} className={visual?`workspace-main bwin bwin-app min-w-0 overflow-hidden bg-surface px-0 pt-0 pb-0 [overflow-wrap:anywhere] focus:outline-none fixed z-40 ${visual.panelOpen&&appDisplay!=='minimized'?'':'hidden'}`:'workspace-main min-w-0 px-4 pt-5 pb-12 [overflow-wrap:anywhere] focus:outline-none sm:px-6 lg:px-10'} style={visual?{left:appDisplay==='maximized'?0:appRect.x,top:appDisplay==='maximized'?0:appRect.y,width:appDisplay==='maximized'?'100vw':appRect.w,height:appDisplay==='maximized'?'calc(100dvh - 56px)':appRect.h,zIndex:40}:undefined}>
+        <div ref={setChromeHost} className={visual?'bwin-chrome-host':'classic-chrome-host'}/>
+        <div className={visual?'bwin-body workspace-main-content':'classic-route-host'}>{children}</div>
+      </main>
+      {visual&&chromeHost&&createPortal(<GameWindow id="app" kind="app" title={currentTitle} titleId="app-window-title" icon={currentIcon} color={currentColor} rect={appRect} display={appDisplay} active closable={visual.closable} minimizable maximizable movable={window.innerWidth>=1100} resizable={window.innerWidth>=1100} onFocus={()=>{}} onClose={visual.onClose} onMinimize={()=>setAppDisplay('minimized')} onToggleMaximize={()=>setAppDisplay(display=>display==='maximized'?'normal':'maximized')} onMove={appMove} onResize={appResize} embedded nav={<div className="bwin-nav-buttons"><button aria-label="Quay lại" onClick={()=>navigate(-1)}>←</button><button aria-label="Tiến" onClick={()=>navigate(1)}>→</button><button aria-label="Tải lại trang" onClick={()=>navigate(0)}>⟳</button><span>{currentTitle}</span></div>}/>,chromeHost)}
+      {visual&&visual.panelOpen&&appDisplay==='minimized'&&<button type="button" className="app-window-restore" onClick={()=>setAppDisplay('normal')}>Khôi phục {currentTitle}</button>}
     </div>
     <footer className={`${visual?'hidden ':''}border-t border-line px-4 py-4 font-data text-xs text-muted sm:px-6`}>Bflow · Web cục bộ · Theo dõi và xem xét công việc</footer>
   </div>;

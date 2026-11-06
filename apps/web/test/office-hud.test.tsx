@@ -63,15 +63,9 @@ test('project switcher, failed and re-pair states, and the Tài liệu button', 
   expect(screen.getByLabelText('Trạng thái văn phòng').textContent).toContain('Chưa có dữ liệu nhân viên');
 });
 
-test('Classic | 3D switch, right rail with the decision badge, and refresh', () => {
+test('right rail with the decision badge and refresh', () => {
   const p = props();
   render(<OfficeHud {...p} />);
-  const group = screen.getByRole('group', { name: 'Chế độ hiển thị' });
-  expect(within(group).getByRole('button', { name: '3D' }).getAttribute('aria-pressed')).toBe('true');
-  fireEvent.click(within(group).getByRole('button', { name: 'Web' }));
-  expect(p.onMode).toHaveBeenCalledWith('classic');
-  fireEvent.click(within(group).getByRole('button', { name: '3D' }));
-  expect(p.onMode).toHaveBeenCalledTimes(1);
   const rail = within(screen.getByRole('navigation', { name: 'Lối tắt' }));
   expect(rail.getAllByRole('button').map(b => b.textContent?.replace(/Đang chờ: /, ''))).toEqual(['Tổng quan', 'Công việc', 'Quyết định2', 'Trò chuyện', 'Nhân viên', 'Tài liệu', 'Cài đặt', 'Tải lại dữ liệu']);
   fireEvent.click(rail.getByRole('button', { name: /Quyết định/ }));

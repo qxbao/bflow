@@ -162,6 +162,6 @@ test('3D raycast smoke: clicking a character in the scene opens its inspector', 
       return false;
     };
     await expect.poll(opened, { timeout: 20000, message: 'a click on a character must open the agent inspector' }).toBe(true);
-    await expect(page.getByRole('button', { name: 'Đóng bảng' })).toBeVisible();
+    await expect(page.locator('#main').getByRole('button', { name: /^Đóng cửa sổ/ })).toBeVisible();
   } finally { await acceptance.close(); }
 });

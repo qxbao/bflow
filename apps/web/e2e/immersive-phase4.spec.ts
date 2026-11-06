@@ -36,7 +36,7 @@ test('three-step guide replays, notices open the inbox, and agent details retain
   await expect(page).toHaveURL(/\/review$/);
   await expect(page.locator('[data-component="DecisionInbox"]')).toBeVisible();
   expect(commands).toEqual([]);
-  await page.getByRole('button', { name: 'Đóng bảng' }).click();
+  await page.locator('#main').getByRole('button', { name: /^Đóng cửa sổ/ }).click();
 
   await mirror(page, /Coordinator/);
   const agent = page.locator('[data-component="AgentDialogue"]');

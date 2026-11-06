@@ -4,8 +4,12 @@ import { phases } from '../../../components/StatusBadge';
 import type { Connection } from '../../../api/events';
 import { connectionText } from '../../../components/ConnectionBanner';
 import type { UiMode } from '../mode';
-import { ModeSwitch } from './ModeSwitch';
 import type { OfficeFocusZone, OfficeModel, OfficePose } from '../model/types';
+import { DesktopIcons } from './windows/DesktopIcons';
+import { ProjectWidget } from './windows/ProjectWidget';
+import { CameraBar } from './windows/CameraBar';
+import { StatusTray } from './windows/StatusTray';
+import { StickerIcon, type StickerIconName } from './windows/icons';
 
 /** Terminal runs are not "being worked on". */
 const FINISHED = new Set(['completed', 'completed_with_parked', 'failed', 'cancelled']);
@@ -51,6 +55,7 @@ const PATHS: Readonly<Record<IconName, ReactNode>> = {
 function Icon({ name }: { name: IconName }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24" className="size-5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">{PATHS[name]}</svg>;
 }
+const sticker:Partial<Record<IconName,StickerIconName>>={overview:'overview',tasks:'tasks',decision:'decision',chat:'chat',issues:'issues',agents:'agents',docs:'docs',settings:'settings',refresh:'refresh'};
 
 const panel = 'rounded-xl border border-line bg-surface/85 backdrop-blur-md';
 const railButton = 'relative flex min-h-12 w-[3.75rem] flex-col items-center justify-center gap-0.5 rounded-lg border-transparent px-1 py-1 text-[0.625rem] leading-tight';
@@ -103,6 +108,11 @@ export interface OfficeHudProps {
   dockSummary: { count: number; attention: boolean };
   /** Set on the shell ancestor so the panel can stop above the dock on small screens. */
   onDockHeight?: (px: number) => void;
+  /** Visual mode opens OperationsDock as a tool window rather than inside the HUD. */
+  onDockOpen?: () => void;
+  operationsOpen?: boolean;
+  onStatusOpen?: () => void;
+  onRun?: (runId:string) => void;
 }
 
 /**
@@ -155,6 +165,7 @@ export function OfficeHud(p: OfficeHudProps) {
     setDraft('');
     p.onChatDraft(text);
   };
+  const operationsOpen=p.operationsOpen??dockOpen;
   const rail: [IconName, string, () => void, number?, string?][] = [
     ['overview', 'Tổng quan', p.onOverview, clarifications, 'Câu hỏi chờ trả lời: '], ['tasks', 'Công việc', () => p.onNavigate('runs')], ['decision', 'Quyết định', () => p.onNavigate('review'), pending, 'Đang chờ: '],
     ['chat', 'Trò chuyện', () => p.onNavigate('chat')],
@@ -164,7 +175,7 @@ export function OfficeHud(p: OfficeHudProps) {
   const cams: [OfficeFocusZone, IconName, string][] = [['overview', 'all', 'Toàn cảnh'], ['conversation', 'chat', desk ? 'Director' : 'Trợ lý'], ['coordinator', 'coordinator', 'Điều phối'], ['developer', 'developer', 'Lập trình'], ['qa', 'qa', 'Kiểm tra']];
   return <>
     <div className={`pointer-events-none office-topbar absolute inset-x-4 top-4 ${hideOnPhone}`}>
-      <section ref={card} aria-label="Văn phòng Bflow" className={`pointer-events-auto m-0 min-w-0 p-3 ${panel}`}>
+      <ProjectWidget ref={card} className={panel}>
         <h2 className="m-0 font-display text-xl leading-none font-extrabold tracking-wide text-ink">Bflow Office</h2>
         <select aria-label="Chuyển dự án" value={p.projectId} onChange={e => p.onProject(e.target.value)} className="mt-1 min-h-9 w-full truncate px-2 py-1 text-xs lg:min-h-8">
           {p.projects.some(x => x.projectId === p.projectId) ? null : <option value={p.projectId}>{p.projectName}</option>}
@@ -174,11 +185,11 @@ export function OfficeHud(p: OfficeHudProps) {
         <div className="mt-2 border-t border-line pt-2">
           <p className="m-0 font-data text-[0.625rem] font-semibold tracking-[.14em] text-accent uppercase">Đang làm</p>
           {run ? <>
-            <p className="m-0 mt-0.5 line-clamp-2 text-sm leading-snug font-semibold text-ink">{run.title}</p>
+            <button type="button" className="office-current-run m-0 mt-0.5 line-clamp-2 text-left text-sm leading-snug font-semibold text-ink" onClick={()=>p.onRun?.(run.runId)}>{run.title}</button>
             <p className="m-0 mt-0.5 font-data text-xs text-muted">{phases[run.sdlcStatus] ?? 'Chưa xác định'}{run.tasks.length > 0 ? ` · ${done}/${run.tasks.length} việc đã xong` : ''}</p>
           </> : <p className="m-0 mt-0.5 font-data text-xs text-muted">Chưa có công việc đang chạy</p>}
         </div>
-        <details aria-label="Trạng thái văn phòng" className="office-status mt-2 border-t border-line pt-1.5 font-data text-xs text-ink"><summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 text-xs"><span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${warn ? 'bg-warning' : 'bg-success'}`}/><span className="min-w-0 flex-1 truncate">Kết nối{p.stale?' · Dữ liệu cũ':p.authRequired?' · Cần ghép nối lại':link.degraded?' · Cần kiểm tra':''}</span><span aria-hidden="true" className="office-status-chevron text-muted">▾</span></summary><div className="flex flex-wrap items-center gap-x-2 gap-y-1 pb-1">
+        <StatusTray><summary onClick={p.onStatusOpen} className="flex min-h-8 cursor-pointer list-none items-center gap-2 text-xs"><span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${warn ? 'bg-warning' : 'bg-success'}`}/><span className="min-w-0 flex-1 truncate">Kết nối{p.stale?' · Dữ liệu cũ':p.authRequired?' · Cần ghép nối lại':link.degraded?' · Cần kiểm tra':''}</span><span aria-hidden="true" className="office-status-chevron text-muted">▾</span></summary><div className="flex flex-wrap items-center gap-x-2 gap-y-1 pb-1">
           <span>{p.session ? SESSION[p.session.state] ?? 'Phiên chưa rõ' : 'Đang đọc phiên'}</span>
           <span aria-hidden="true" className="text-line">|</span>
           <span role="status" className={link.degraded ? 'text-warning' : ''}>{link.label}</span>
@@ -188,29 +199,28 @@ export function OfficeHud(p: OfficeHudProps) {
           {blockers > 0 && <span className="rounded border border-warning px-1.5 text-warning">{blockers} điểm cần lưu ý</span>}
           {p.authRequired && <span className="rounded border border-warning px-1.5 text-warning">Cần ghép nối lại</span>}
           {p.stale && <span className="rounded border border-warning px-1.5 text-warning">Dữ liệu cũ</span>}
-        </div></details>
-      </section>
+        </div></StatusTray>
+      </ProjectWidget>
       {p.immersive && p.notifications}
       {p.immersive && p.firstVisit}
-      <ModeSwitch mode={p.mode} onChange={p.onMode} className="office-mode pointer-events-auto"/>
     </div>
-    <nav aria-label="Lối tắt" style={railGap ? { top: railGap.top + 28, maxHeight: `calc(100% - ${railGap.top + railGap.bottom + 40}px)` } : undefined} className={`pointer-events-auto office-rail absolute flex flex-col gap-1 p-1 ${railGap ? 'office-rail-anchored' : ''} ${panel} ${hideOnPhone}`}>
+    <DesktopIcons {...(railGap ? { style:{ top: railGap.top + 28, maxHeight: `calc(100% - ${railGap.top + railGap.bottom + 40}px)` } } : {})} className={`${railGap ? 'office-rail-anchored' : ''} ${panel} ${hideOnPhone}`}>
       {rail.map(([icon, label, action, badge, badgeText]) => <button type="button" key={label} className={railButton} onClick={action}>
-        <Icon name={icon}/><span className="text-center">{label}</span>
+        {sticker[icon]?<StickerIcon name={sticker[icon]!} className="size-9 shrink-0"/>:<Icon name={icon}/>}<span className="text-center">{label}</span>
         {badge !== undefined && badge > 0 && <span className="absolute top-0.5 right-1.5 min-w-4 rounded-full bg-danger px-1 text-center text-[0.625rem] leading-4 font-semibold text-canvas"><span className="sr-only">{badgeText}</span>{badge}</span>}
       </button>)}
-    </nav>
+    </DesktopIcons>
     <div ref={bottom} data-hud-bottom className={`absolute inset-x-3 bottom-0 flex flex-col gap-2 pb-3 ${p.panelOpen ? 'max-md:pb-0' : ''}`}>
-      {(p.dockSummary.count > 0 || p.dockSummary.attention) && <button type="button" aria-expanded={dockOpen} aria-controls={dockId} onClick={() => setDockOpen(open => !open)} className={`pointer-events-auto self-start rounded-lg px-3 py-1.5 text-xs ${panel} ${p.dockSummary.attention ? 'border-warning text-warning' : ''}`}>Thao tác đã gửi ({p.dockSummary.count})</button>}
+      {(p.dockSummary.count > 0 || p.dockSummary.attention) && <button type="button" aria-expanded={operationsOpen} aria-controls={dockId} onClick={() => p.onDockOpen?p.onDockOpen():setDockOpen(open => !open)} className={`pointer-events-auto self-start rounded-lg px-3 py-1.5 text-xs ${panel} ${p.dockSummary.attention ? 'border-warning text-warning' : ''}`}>Thao tác đã gửi ({p.dockSummary.count})</button>}
       {/* Live region that exists before the state changes, so a screen reader hears the dock needing a look while it stays collapsed. */}
       <span role="status" className="sr-only" data-testid="dock-attention">{p.dockSummary.attention ? 'Có thao tác cần xem trong Thao tác đã gửi' : ''}</span>
-      <div id={dockId} hidden={!dockOpen} data-hud-dock className="pointer-events-auto max-h-[40dvh] overflow-y-auto empty:hidden">{p.dock}</div>
+      <div id={dockId} hidden={Boolean(p.onDockOpen)||!dockOpen} data-hud-dock className="pointer-events-auto max-h-[40dvh] overflow-y-auto empty:hidden">{p.dock}</div>
       <div className={`flex flex-col items-stretch gap-2 ${p.panelOpen ? '' : 'md:flex-row md:items-end'} ${hideOnPhone}`}>
-        <div role="group" aria-label="Góc nhìn camera" className={`office-cameras pointer-events-auto flex flex-wrap gap-1 self-start p-1 ${panel}`}>
+        <CameraBar>
           {cams.map(([zone, icon, label]) => <button type="button" key={zone} aria-label={label} title={label} className={camButton} onClick={() => { if (zone === 'overview') setDockOpen(false); p.onFocusZone(zone); }}><Icon name={icon}/><span className="max-sm:hidden">{label}</span></button>)}
           {p.immersive&&<details className="relative"><summary className={`${camButton} cursor-pointer list-none ${panel}`} aria-label="Điều khiển camera">Camera</summary><div className={`absolute bottom-full left-0 z-30 mb-1 grid grid-cols-3 gap-1 p-1 ${panel}`}><span/><button type="button" aria-label="Di chuyển góc nhìn lên" onClick={()=>p.onCameraControl?.('up')}>↑</button><span/><button type="button" aria-label="Di chuyển góc nhìn sang trái" onClick={()=>p.onCameraControl?.('left')}>←</button><button type="button" aria-label="Thu nhỏ" onClick={()=>p.onCameraControl?.('zoom-out')}>−</button><button type="button" aria-label="Di chuyển góc nhìn sang phải" onClick={()=>p.onCameraControl?.('right')}>→</button><span/><button type="button" aria-label="Phóng to" onClick={()=>p.onCameraControl?.('zoom-in')}>+</button><span/><button type="button" aria-label="Di chuyển góc nhìn xuống" onClick={()=>p.onCameraControl?.('down')}>↓</button></div></details>}
           {p.overflow > 0 && <button type="button" className={`${camButton} text-accent`} aria-label={`Còn ${p.overflow} lập trình viên chưa hiện trong cảnh. Mở danh sách nhân viên`} title="Mở danh sách nhân viên" onClick={p.onAgentList}>+{p.overflow}</button>}
-        </div>
+        </CameraBar>
         <form onSubmit={submit} className={`office-quick-chat pointer-events-auto m-0 flex min-w-0 flex-1 items-center gap-2 py-1 pr-1 pl-3 md:mx-auto md:w-full md:max-w-xl ${panel}`}>
           <Icon name="chat"/>
           <input aria-label="Trò chuyện với Bflow" placeholder={chat ? (p.director ? 'Trò chuyện với Director…' : 'Trò chuyện với Bflow...') : 'Chưa trò chuyện được lúc này'} disabled={!chat} value={draft} onChange={e => setDraft(e.target.value)} className="min-w-0 flex-1 rounded-none border-0 bg-transparent px-1 text-sm"/>

@@ -112,14 +112,14 @@ test('Office3D: Director desk and issue board in the WebGL scene and the accessi
   await page.waitForTimeout(1500);
   await shot(page, '10-office3d-director-desk');
   // The panel closed: the camera stays on the desk, so the WebGL figure itself is in view.
-  await page.getByRole('button', { name: 'Đóng bảng' }).click();
+  await page.getByRole('button', { name: 'Đóng cửa sổ Director' }).click();
   await page.waitForTimeout(1500);
   await blur(page); await page.waitForTimeout(500);
   await shot(page, '10b-office3d-director-desk-scene');
   await mirror(page, /^Bảng sự cố \(/);
   await page.waitForTimeout(1500);
   await shot(page, '11-office3d-issue-board');
-  await page.getByRole('button', { name: 'Đóng bảng' }).click();
+  await page.getByRole('button', { name: 'Đóng cửa sổ Sự cố' }).click();
   await page.waitForTimeout(1500);
   await blur(page); await page.waitForTimeout(500);
   await shot(page, '11b-office3d-issue-board-scene');
@@ -128,7 +128,7 @@ test('Office3D: Director desk and issue board in the WebGL scene and the accessi
   await expect(region.getByRole('button', { name: /^Director: Chưa có mặt\. Mức tin cậy: Đã xác nhận/ })).toHaveCount(1, { timeout: 20000 });
   await mirror(page, /^Director: Chưa có mặt/);
   await page.waitForTimeout(1000);
-  await page.getByRole('button', { name: 'Đóng bảng' }).click();
+  await page.getByRole('button', { name: 'Đóng cửa sổ Director' }).click();
   await page.waitForTimeout(1500);
   await blur(page); await page.waitForTimeout(500);
   await shot(page, '12-office3d-director-absent');

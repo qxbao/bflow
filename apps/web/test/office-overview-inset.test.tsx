@@ -57,7 +57,7 @@ test('Toàn cảnh eases the camera only after a route panel has closed, without
   // The adjacent panel is handled by the scene host width; only the left HUD rail remains in the camera inset.
   const closed = insets[insets.length - 1]!;
   expect(closed.right).toBe(openRight);
-  expect(closed.left).toBe(100);
+  expect(closed.left).toBe(88);
   expect(calls.filter(c => c === 'focus:overview')).toHaveLength(1);
 });
 

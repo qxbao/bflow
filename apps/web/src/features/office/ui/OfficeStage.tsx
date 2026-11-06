@@ -52,7 +52,7 @@ export function OfficeStage({ model, onSelect, links, control, excerpts: excerpt
     const visibility = (): void => renderer.current?.setPaused(document.hidden);
     const updateConnector = (): void => {
       const svg = connector.current, line = connectorLine.current, dot = connectorDot.current, point = directorPoint.current;
-      const panel = document.querySelector<HTMLElement>('.director-dialogue');
+      const panel = document.querySelector<HTMLElement>('[data-window-kind="director-chat"]:not([data-display="minimized"])');
       if (!svg || !line || !dot || !point || !panel || window.innerWidth < 768 || getComputedStyle(panel).display === 'none') { if (svg) svg.style.display = 'none'; return; }
       const rect = el.getBoundingClientRect(), box = panel.getBoundingClientRect(), x1 = point.x + rect.left, y1 = point.y + rect.top, x2 = box.left, y2 = Math.max(box.top + 44, Math.min(box.bottom - 44, y1));
       line.setAttribute('x1', String(x1)); line.setAttribute('y1', String(y1)); line.setAttribute('x2', String(x2)); line.setAttribute('y2', String(y2));
@@ -92,7 +92,7 @@ export function OfficeStage({ model, onSelect, links, control, excerpts: excerpt
           labelLayer?.update(labels);
           const director = labels.find(label => label.id === 'director');
           directorPoint.current = director ? { x: director.x, y: director.y } : undefined;
-          if (director && document.querySelector('.director-dialogue')) updateConnector(); else connector.current?.style.setProperty('display', 'none');
+          if (director && document.querySelector('[data-window-kind="director-chat"]:not([data-display="minimized"])')) updateConnector(); else connector.current?.style.setProperty('display', 'none');
         });
         created.apply(latest.current.model, []);
         if (selected.current) { created.highlight?.(selected.current); created.focus?.(selected.current); }
