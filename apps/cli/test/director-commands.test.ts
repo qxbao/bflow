@@ -134,7 +134,8 @@ describe("director start", () => {
   it.each([
     "Permanent role 'planner' cannot use agent name 'planner': unowned or incompatible agent in pane 'w3:p34'. No topology changes were made. Inspect bflow doctor; configure a different role agentName before retrying bflow up.",
     "Native session changed for planner in pane 'w3:p34'; refusing to adopt or close it.",
-    "Restored terminal for planner is working; preserve its work before retrying bflow up."
+    "Restored terminal for planner is working; preserve its work before retrying bflow up.",
+    "Restored planner identity changed in pane 'w3:p34' (name, provider, topology, terminal or native session differs). Preserve its work and inspect bflow doctor."
   ])("preserves topology recovery guidance instead of suggesting init: %s", async message => {
     const { deps, out, ownerCall } = make({ ensureUp: async () => { throw new Error(message); } });
     expect(await runDirectorCommand(parse(["start", "--json"]), deps)).toBe(1);

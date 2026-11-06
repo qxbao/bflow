@@ -198,6 +198,8 @@ exit 2
     for await (const chunk of f.store.get(failure.evidence)) { if (!chunk.ok) throw new Error(chunk.error.message); chunks.push(chunk.value); }
     const observed = JSON.parse(Buffer.concat(chunks).toString());
     expect(observed.accepted).toBe(false);
+    expect(observed).toMatchObject({ runId: "run-1", taskId: "task-1", attemptId: f.implementationHandle.attemptId,
+      sourceRevision: f.git("rev-parse", "HEAD"), phase: "red" });
     expect(observed.measurementFailure).toMatchObject({ protocol: "vitest_json", outcome: { exitCode: 1 } });
     expect(observed.measurementFailure.outcome.stdout).toContain("TypeError");
     // An unrelated exception beside an otherwise valid run is still a plain infrastructure block, never a repair.

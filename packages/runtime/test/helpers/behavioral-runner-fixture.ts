@@ -7,7 +7,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { expect, it } from "vitest";
-import { PaneBindingSchema, SpecificationSchema } from "@bflow/contracts";
+import { AgentExecutionHandleSchema, PaneBindingSchema, SpecificationSchema } from "@bflow/contracts";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { TestStrategyResolver, recordEvidence } from "../../../test-strategy/src/index.js";
 import { assessment, spec } from "../../../test-strategy/test/fixtures.js";
@@ -46,9 +46,13 @@ export async function fixture(taskType = "bugfix", reporter: "node_tap" | "vites
   const specification = SpecificationSchema.parse({ ...draft, status: "approved", approvedBy: "architect", artifactRef: stored.value });
   const binding = PaneBindingSchema.parse({ schemaVersion: 2, bindingId: "tester-binding", sessionId: "session-1", role: "tester", agentId: "independent-tester", paneId: "tester-pane", workspaceId: "workspace", tabId: "tab", provider: "test", agentKind: "test", cwd, isolationMode: "dedicated_pane", readOnlyWorkspace: true, transportState: "idle", boundAt: new Date().toISOString() });
   const assignment = { message_id: "assignment", type: "task.assignment", run_id: "run-1" };
-  const runtime = { inspect: async (runId?: string) => runId ? { baseRevision: base, tasks: [{ taskId: "task-1", spec: { specification, strategy } }] } : { outbound: [{ taskId: "task-1", message: assignment, handle: { target: { agentId: "developer", paneId: "developer-pane", worktreePath: cwd } } }] }, ports: { policies: { recordEvidence } } } as unknown as AgenticWorkflowRuntime;
+  const implementationHandle = AgentExecutionHandleSchema.parse({ executionId: "implementation-execution", requestId: "implementation-request",
+    attemptId: "implementation-attempt", runId: "run-1", taskId: "task-1", idempotencyKey: "implementation-assignment",
+    target: { transport: "herdr", agentId: "developer", paneId: "developer-pane", worktreePath: cwd },
+    correlation: { token: "implementation-request", provenance: "orchestrator", verified: false }, acceptedAt: new Date().toISOString() });
+  const runtime = { inspect: async (runId?: string) => runId ? { baseRevision: base, tasks: [{ taskId: "task-1", spec: { specification, strategy } }] } : { outbound: [{ taskId: "task-1", message: assignment, handle: implementationHandle }] }, ports: { policies: { recordEvidence } } } as unknown as AgenticWorkflowRuntime;
   const receiptsPath = join(root, "host-receipts");
   const host = new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), [command]);
-  return { cwd, git, commit, command, specification, redRevision, base, binding, host, store: opened.value, restart(commands = [command]) { return new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), commands); }, get strategy() { return strategy; }, accept(result: unknown) { strategy = recordEvidence(strategy, result); } };
+  return { cwd, git, commit, command, specification, redRevision, base, binding, implementationHandle, host, store: opened.value, restart(commands = [command]) { return new HostVerification(() => runtime, () => opened.value, new HostReceiptJournal(receiptsPath, cwd, "session-1"), commands); }, get strategy() { return strategy; }, accept(result: unknown) { strategy = recordEvidence(strategy, result); } };
 }
 // Measurement launches require the production Bubblewrap namespace sandbox.

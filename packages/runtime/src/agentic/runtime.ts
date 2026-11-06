@@ -537,7 +537,7 @@ export class AgenticWorkflowRuntime {
       const core = new CoreSession(this.ports, state, saveAndLog, this.coreRestoreCache);
       await core.restore();
       const outbox = new HerdrOutbox(this.ports, state, saveAndLog, { directorMailbox: this.ports.director !== undefined });
-      if (recoverPhases) await this.recoverPhaseFailures(state, saveAndLog, outbox);
+      if (recoverPhases) await this.recoverPhaseFailures(state, saveAndLog, outbox, core);
       return action(state, saveAndLog, core, outbox);
     }); }
     finally {
@@ -1268,7 +1268,7 @@ export class AgenticWorkflowRuntime {
       await this.drainCancellationControls(state, save, core, outbox);
       await outbox.flush((out, handle) => this.bind(state, core, out, handle));
       const queuedBefore = new Set(state.outbound.filter(out => out.status === "queued").map(out => out.message.message_id));
-      await this.recoverPhaseFailures(state, save, outbox);
+      await this.recoverPhaseFailures(state, save, outbox, core);
       if (state.outbound.some(out => out.status === "queued" && !queuedBefore.has(out.message.message_id))) {
         await outbox.flush((out, handle) => this.bind(state, core, out, handle));
       }
@@ -1644,17 +1644,48 @@ export class AgenticWorkflowRuntime {
     });
   }
   /** Facts the host watchdog needs about one run. Derived from durable state only; activity ignores Conversation-bound notices. */
-  private runFacts(state: JournalState, run: RunRecord): RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] } {
+  private runFacts(state: JournalState, run: RunRecord, currentSnapshot?: WorkflowRunSnapshot): RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] } {
     const now = Date.parse(this.now());
     // A Director mailbox write is not a role handoff: a queued or delivered wake owes no correlated result (R-B2-5).
     const handoffs = state.outbound.filter(out => out.message.run_id === run.runId && out.message.recipient.role !== "conversation" &&
       out.delivery !== "director_mailbox");
-    const messages = [...state.outbound.map(out => out.message), ...state.inbox.map(item => item.message)]
+    const messages = [...state.outbound.map(out => out.message), ...state.inbox.filter(item => item.status === "applied").map(item => item.message)]
       .filter(message => message.run_id === run.runId && message.recipient.role !== "conversation");
+    const currentTaskById = new Map((currentSnapshot?.tasks ?? []).map(task => [task.taskId, task]));
+    const countsAsBusinessActivity = (message: RoleMessage) => {
+      const payload = record(message.payload);
+      if (message.type === "task.status" && payload.kind === "result_reminder") {
+        const reminder = state.outbound.find(out => out.message.message_id === message.message_id);
+        const source = message.causation_id ? state.outbound.find(out => out.message.message_id === message.causation_id) : undefined;
+        // This is a once-only recovery wait, not delivery evidence. Preserve its
+        // anchor when transport releases the source or cancels the reminder.
+        const parentMatches = source !== undefined && (reminder?.parentAssignmentId === source.message.message_id ||
+          reminder?.parentAssignmentId === undefined && message.sender.role === "runtime");
+        return !!reminder && !!source && reminder.message.run_id === run.runId &&
+          parentMatches &&
+          message.message_id === this.holderReminderId(run, source) && payload.runId === run.runId &&
+          payload.sourceMessageId === source.message.message_id && payload.taskId === source.taskId &&
+          !!source.handle &&
+          message.recipient.role === source.message.recipient.role &&
+          message.recipient.agent_id === source.handle.target.agentId && message.recipient.pane_id === source.handle.target.paneId &&
+          this.isCurrentBusinessHolder(source, currentSnapshot);
+      }
+      if (message.type === "task.status" && payload.kind === "policy_phase_outcome") return false;
+      const own = state.outbound.find(out => out.message.message_id === message.message_id);
+      if (own && !this.isCurrentBusinessHolder(own, currentSnapshot)) return false;
+      const source = message.causation_id ? state.outbound.find(out => out.message.message_id === message.causation_id) : undefined;
+      if (source && !this.isCurrentBusinessHolder(source, currentSnapshot)) return false;
+      const taskId = typeof payload.taskId === "string" ? payload.taskId : source?.taskId;
+      const current = typeof taskId === "string" ? currentTaskById.get(taskId) : undefined;
+      if (current && message.type === "verification.requested" && payload.kind === "conditional_evidence")
+        return payload.implementationAttemptId === current.attemptId;
+      if (current && typeof payload.implementationAttemptId === "string") return payload.implementationAttemptId === current.attemptId;
+      return true;
+    };
     const times = [
       Date.parse(run.delegation.requestedAt),
       ...(run.lastWorkflowRejection?.rejectedAt ? [Date.parse(run.lastWorkflowRejection.rejectedAt)] : []),
-      ...messages.map(message => Date.parse(message.occurred_at ?? ""))
+      ...messages.filter(countsAsBusinessActivity).map(message => Date.parse(message.occurred_at ?? ""))
     ].filter(Number.isFinite);
     const pendingDecisionRequests = Object.values(run.userDecisions ?? {}).filter(entry => entry.status === "pending")
       .map(entry => ({ request: ApprovalRequestSchema.parse(entry.request), correlationId: run.delegation.correlationId }));
@@ -1666,7 +1697,8 @@ export class AgenticWorkflowRuntime {
       (!supersededApprovalId || record(out.message.payload).approvalId === supersededApprovalId)) : [];
     const holders = [
       ...handoffs.filter(out => this.outboundOwesResult(state, run, out) ||
-        out.message.recipient.role === "coordinator" && out.status === "accepted" && out.handle !== undefined),
+        out.message.recipient.role === "coordinator" && out.status === "accepted" && out.handle !== undefined)
+        .filter(out => this.isCurrentBusinessHolder(out, currentSnapshot)),
       ...parentApprovalHolders
     ];
     return {
@@ -1694,16 +1726,54 @@ export class AgenticWorkflowRuntime {
    * then calls the report methods below one at a time.
    */
   async watchdogSnapshot(sessionId: string): Promise<(RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] })[]> {
-    return this.transaction(async state => {
+    return this.transaction(async (state, _save, core) => {
       const facts: (RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] })[] = [];
       for (const run of state.runs.filter(item => item.delegation.sessionId === sessionId)) {
         try {
           if (await this.ports.workflowExtensionStarted?.(run.runId)) continue;
-          facts.push(this.runFacts(state, run));
+          facts.push(this.runFacts(state, run, run.coreCreated ? await core.snapshot(run.runId) : undefined));
         } catch { /* Unreadable state is not evidence of a stall. */ }
       }
       return facts;
     });
+  }
+  /** Business liveness follows Core's pinned attempt; old executions remain in the separate reconciliation fence. */
+  private isCurrentBusinessHolder(out: Outbound, snapshot?: WorkflowRunSnapshot): boolean {
+    if (!snapshot) return true;
+    const taskId = out.message.type === "verification.requested" ? record(out.message.payload).taskId : out.taskId;
+    if (typeof taskId !== "string") return true;
+    const current = snapshot.tasks.find(task => task.taskId === taskId);
+    if (!current?.attemptId) return true;
+    if (out.message.type === "task.assignment") {
+      if (current.agentExecution) return out.handle?.executionId === current.agentExecution.executionId &&
+        out.handle.requestId === current.agentExecution.requestId;
+      return out.handle?.attemptId === current.attemptId || out.attemptId === current.attemptId;
+    }
+    if (out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence")
+      return !out.phaseFailure && !out.phaseRetirement && record(out.message.payload).implementationAttemptId === current.attemptId;
+    return true;
+  }
+  /** Clear only an exact obsolete task blocker after Core proves a newer task attempt is authoritative. */
+  private clearSupersededTaskBlocker(state: JournalState, run: RunRecord, snapshot?: WorkflowRunSnapshot): boolean {
+    const action = run.pendingAction;
+    if (!snapshot || !action || action.state !== "pending" || action.kind !== "resume_coordinator" ||
+        run.approval?.status === "pending" && run.decision?.approvalId !== run.approval.approvalId ||
+        Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) return false;
+    const source = state.outbound.find(item => item.message.message_id === action.sourceMessageId && item.message.run_id === run.runId);
+    if (!source || !["task.assignment", "verification.requested"].includes(source.message.type)) return false;
+    const payload = record(source.message.payload), taskId = source.message.type === "task.assignment" ? source.taskId : payload.taskId;
+    if (typeof taskId !== "string") return false;
+    const current = snapshot.tasks.find(item => item.taskId === taskId);
+    if (!current?.attemptId) return false;
+    const blockedAttempt = source.message.type === "task.assignment"
+      ? source.handle?.attemptId ?? source.attemptId
+      : payload.kind === "conditional_evidence" ? payload.implementationAttemptId : undefined;
+    if (typeof blockedAttempt !== "string" || blockedAttempt === current.attemptId) return false;
+    if (run.error !== action.reason) return false;
+    if (run.status === "escalated" && action.previousStatus) run.status = action.previousStatus;
+    delete run.pendingAction;
+    delete run.error;
+    return true;
   }
   /** R-B2-15: Core stays blocked; only parked tasks and their pending descendants remain. No integration or cleanup follows. */
   private completeWithParked(state: JournalState, outbox: HerdrOutbox, run: RunRecord, snapshot: WorkflowRunSnapshot): boolean {
@@ -2058,15 +2128,18 @@ export class AgenticWorkflowRuntime {
    * later episode, or a stall without any holder, becomes a bounded `auto_resume` Coordinator action.
    */
   async reportRunStalled(runId: string, episodeKey: string): Promise<void> {
-    await this.transaction(async (state, save, _core, outbox) => {
+    await this.transaction(async (state, save, core, outbox) => {
       const run = state.runs.find(item => item.runId === runId);
       if (!run) return;
-      const facts = this.runFacts(state, run);
+      const snapshot = run.coreCreated ? await core.snapshot(run.runId) : undefined;
+      this.clearSupersededTaskBlocker(state, run, snapshot);
+      const facts = this.runFacts(state, run, snapshot);
       if (!facts.live || facts.awaitingHuman || facts.activeHandoff || facts.runtimeWork || facts.pendingDecisions.length) return;
       const idleSince = new Date(facts.lastActivityAt).toISOString();
       // The holder is the role whose accepted handoff is still open while its pane is not working: it stopped without reporting.
       // Same holders as RunFacts: only obligations still owing a correlated result (an answered assignment is not a holder).
       const holders = state.outbound.filter(out => out.message.run_id === run.runId && out.message.recipient.role !== "conversation" &&
+        this.isCurrentBusinessHolder(out, snapshot) &&
         (this.outboundOwesResult(state, run, out) || out.message.recipient.role === "coordinator" && out.status === "accepted" && out.handle !== undefined));
       const holder =
         holders.find(out => out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence") ??
@@ -2354,7 +2427,7 @@ export class AgenticWorkflowRuntime {
             const parent = [...state.outbound].reverse().find(item => item.message.type === "task.assignment" &&
               item.message.run_id === run.runId && item.taskId === task.taskId && item.status === "accepted" && item.handle);
             if (this.canEnqueueTaskNotice(state, parent)) {
-              this.phaseNotice(state, outbox, run, task, phase, "passed",
+              await this.phaseNotice(state, outbox, run, task, phase, "passed",
                 "Independent policy phase recorded. Continue the accepted TDD sequence; do not modify frozen Red tests.", result.verificationId);
             } else if (!parent?.cancelRequested) {
               this.escalateExpiredWriterNotice(
@@ -2598,7 +2671,7 @@ export class AgenticWorkflowRuntime {
         const red = VerificationResultSchema.parse(evidence[0]);
         const outcomeId = `resume:${messageId}:${red.verificationId}`;
         if (state.outbound.some(item => item.message.message_id === `phase-notice-${digest([run.runId, task.taskId, "red", outcomeId])}`)) continue;
-        this.phaseNotice(state, outbox, run, task, "red", "passed",
+        await this.phaseNotice(state, outbox, run, task, "red", "passed",
           `Runtime resumed this same assignment after a verified Red receipt (${red.verificationId}). Inspect workspace status and continue the accepted TDD sequence; do not modify frozen tests. No new approval or measurement is granted.`, outcomeId);
         continue;
       }
@@ -2810,7 +2883,7 @@ export class AgenticWorkflowRuntime {
       if (run.resumeReceipts.length > 50) run.resumeReceipts.shift();
       for (const retired of retiredToResume) retired.phaseRetirement!.resumeAuthorizedBy = textField(explicitId);
       if (!options.automatic && explicitId) await this.resumeAcceptedDeveloper(state, save, _core, outbox, run, messageId);
-      await this.recoverPhaseFailures(state, save, outbox);
+      await this.recoverPhaseFailures(state, save, outbox, _core);
       await save();
       return json({ queued: true, messageId, actionId: action.actionId });
     });
@@ -4512,6 +4585,24 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       await save();
       await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       if (selectedProfile) assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
+      if (this.ports.preflightTaskEnvironment) {
+        let readiness;
+        try {
+          readiness = await this.ports.preflightTaskEnvironment({ runId: run.runId, taskId: task.taskId,
+            attemptId: taskState.attemptId!, worktreePath: tree.worktreePath, specification: task.spec.specification,
+            strategy: task.spec.strategy, ownedPaths: strings(record(definition.metadata).ownedPaths) });
+        } catch (error) {
+          readiness = { status: "blocked" as const, checkedAt: this.now(), code: "task_environment_preflight_failed",
+            reason: redactString(String(error)).slice(0, 1000), recovery: "Use check_work or ask the Coordinator to inspect host runner/sandbox readiness." };
+        }
+        if (readiness.status === "blocked") {
+          run.error = `Task environment unavailable for ${task.taskId}: ${readiness.code}: ${readiness.reason}. ${readiness.recovery}`;
+          this.pauseDeveloperAllocation(run, task.taskId, run.error, false);
+          this.progress(state, outbox, run, run.error);
+          await save();
+          break;
+        }
+      }
       const allocation = await this.ports.panes.allocateDeveloper({
         taskId: `${run.runId}-${task.taskId}`, runId: run.runId, worktreePath: tree.worktreePath,
         branchName: tree.branchName, agentName, ...(selectedProfile ? { roleProfile: selectedProfile } : {})
@@ -4932,7 +5023,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           previous.error = `policy_phase_failed:${UNMEASURED_PHASE_SUMMARY}`;
           previous.phaseFailure = { summary: UNMEASURED_PHASE_SUMMARY, repairable: false, applied: false, retryAuthorized: true };
           await save();
-          await this.recoverPhaseFailures(state, save, outbox);
+          await this.recoverPhaseFailures(state, save, outbox, core);
         } else {
           if (record(previous.message.payload).sourceRevision !== sourceRevision) throw new Error("Prior phase measurement is unresolved on another revision; reconcile it before retrying");
           return json({ queued: true, messageId: previous.message.message_id, deliveryStatus: previous.status });
@@ -4959,17 +5050,98 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       await save(); return json({ queued: true, messageId: id });
     });
   }
-  private phaseNotice(state: JournalState, outbox: HerdrOutbox, run: RunRecord, task: TaskRecord,
-    phase: string, status: string, summary: string, outcomeId: string): void {
-    const parent = [...state.outbound].reverse().find(item => item.message.type === "task.assignment" &&
-      item.message.run_id === run.runId && item.taskId === task.taskId && item.status === "accepted" && item.handle);
-    if (!parent?.handle) throw new Error("Policy phase has no active Developer assignment for its outcome");
+  private async phaseNotice(state: JournalState, outbox: HerdrOutbox, run: RunRecord, task: TaskRecord,
+    phase: string, status: string, summary: string, outcomeId: string): Promise<boolean> {
+    const outcome = state.outbound.find(item => item.message.message_id === outcomeId && item.message.run_id === run.runId);
+    const outcomePayload = outcome ? record(outcome.message.payload) : {};
+    const implementationAttemptId = typeof outcomePayload.implementationAttemptId === "string" ? outcomePayload.implementationAttemptId : undefined;
+    const parents = state.outbound.filter(item => item.message.type === "task.assignment" &&
+      item.message.run_id === run.runId && item.taskId === task.taskId && item.status === "accepted" && item.handle &&
+      (implementationAttemptId ? item.handle.attemptId === implementationAttemptId : true));
+    const parent = parents.length === 1 ? parents[0] : undefined;
+    // Preserve stale outcomes as durable evidence, but never turn them into instructions for a newer writer.
+    if (!parent?.handle) return false;
+    const phaseFailureEvidence = outcome?.phaseFailureEvidence;
+    const sourceRevision = typeof outcomePayload.sourceRevision === "string" ? outcomePayload.sourceRevision : undefined;
+    const failureFindings = phaseFailureEvidence ? await this.phaseFailureFindings(run, task, outcome!, phaseFailureEvidence,
+      implementationAttemptId, sourceRevision) : [];
+    if (status === "failed" && outcome?.phaseFailure?.repairable === true && failureFindings.length === 0) return false;
     const id = `phase-notice-${digest([run.runId, task.taskId, phase, outcomeId])}`;
     outbox.enqueueTaskNotice(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
       causation_id: parent.message.message_id, run_id: run.runId, sender: { role: "coordinator" },
       recipient: { role: "developer", agent_id: parent.handle.target.agentId, pane_id: parent.handle.target.paneId }, type: "task.status",
-      payload: json({ kind: "policy_phase_outcome", runId: run.runId, taskId: task.taskId, phase, status, summary, outcomeId }),
-      artifact_references: [], occurred_at: this.now(), idempotency_key: id }), parent);
+      payload: json({ kind: "policy_phase_outcome", runId: run.runId, taskId: task.taskId, phase, status, summary, outcomeId,
+        ...(implementationAttemptId ? { implementationAttemptId } : {}), ...(sourceRevision ? { sourceRevision } : {}),
+        ...(phaseFailureEvidence ? { evidenceArtifacts: [phaseFailureEvidence] } : {}), ...(failureFindings.length ? { failureFindings } : {}) }),
+      artifact_references: phaseFailureEvidence ? [phaseFailureEvidence] : [], occurred_at: this.now(), idempotency_key: id }), parent);
+    return true;
+  }
+  private async phaseFailureFindings(run: RunRecord, task: TaskRecord, request: Outbound, evidence: ArtifactReference,
+    attemptId: string | undefined, sourceRevision: string | undefined): Promise<{ criterionId: string; summary: string }[]> {
+    try {
+      const ref = ArtifactReferenceSchema.parse(evidence), payload = record(request.message.payload);
+      if (!attemptId || !sourceRevision || ref.runId !== run.runId || ref.taskId !== task.taskId ||
+          payload.runId !== run.runId || payload.taskId !== task.taskId || payload.phase === undefined ||
+          payload.implementationAttemptId !== attemptId || payload.sourceRevision !== sourceRevision ||
+          ref.sizeBytes === undefined || ref.sizeBytes > 1_048_576) return [];
+      await this.verifyReferences([ref], run.runId);
+      const chunks: Buffer[] = []; let size = 0;
+      for await (const chunk of this.ports.artifactStore.get(ref)) {
+        const bytes = Buffer.from(unwrap(chunk)); size += bytes.length;
+        if (size > 1_048_576) return [];
+        chunks.push(bytes);
+      }
+      const document = record(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      const observation = record(document.observation);
+      if (document.runId !== run.runId || document.taskId !== task.taskId || document.attemptId !== attemptId ||
+          document.phase !== payload.phase || document.sourceRevision !== sourceRevision || observation.revision !== sourceRevision ||
+          document.accepted !== false || !Array.isArray(document.criteria)) return [];
+      const allowed = new Set(task.spec.specification.acceptanceCriteria.map(criterion => criterion.id));
+      return document.criteria.slice(0, 32).flatMap(value => {
+        const finding = record(value);
+        if (finding.passed !== false || typeof finding.criterionId !== "string" || !allowed.has(finding.criterionId) ||
+            typeof finding.summary !== "string" || finding.summary.trim().length === 0) return [];
+        return [{ criterionId: finding.criterionId, summary: finding.summary.trim().slice(0, 400) }];
+      });
+    } catch { return []; }
+  }
+  /** Bounded authenticated readback for the current writer after a restart or interrupted notice delivery. */
+  async readPolicyFailureContext(bindingInput: PaneBinding, runId: string, taskId: string, attemptId: string): Promise<JsonValue> {
+    const binding = PaneBindingSchema.parse(bindingInput);
+    if (binding.role !== "developer" || !binding.session) throw new Error("Policy failure readback requires the authenticated Developer session");
+    return this.transaction(async (state, _save, core) => {
+      const run = state.runs.find(item => item.runId === runId), task = run?.tasks.find(item => item.taskId === taskId);
+      const current = run?.coreCreated ? (await core.snapshot(runId)).tasks.find(item => item.taskId === taskId) : undefined;
+      const assignment = state.outbound.find(out => out.message.run_id === runId && out.taskId === taskId &&
+        out.message.type === "task.assignment" && out.status === "accepted" && out.handle?.attemptId === attemptId &&
+        out.handle.target.agentId === binding.agentId && out.handle.target.paneId === binding.paneId &&
+        digest(out.handle.target.session) === digest(binding.session));
+      if (!run || !task || !assignment || current?.attemptId !== attemptId || current.agentExecution?.executionId !== assignment.handle?.executionId)
+        throw new Error("Policy failure readback is outside the current accepted Developer assignment");
+      const lease = AgentLeaseSchema.safeParse(assignment.lease);
+      if (!lease.success || lease.data.runId !== runId || lease.data.taskId !== taskId || lease.data.attemptId !== attemptId ||
+          lease.data.agentId !== binding.agentId || lease.data.fencingToken <= 0 ||
+          Date.parse(lease.data.expiresAt) <= Date.parse(this.now()))
+        return json({ runId, taskId, attemptId, actionable: false, reason: "Current writer lease is expired or no longer valid; findings remain for Coordinator reconciliation.", failures: [] });
+      const failures = [];
+      for (const out of state.outbound) {
+        const payload = record(out.message.payload);
+        if (!out.phaseFailure || out.message.run_id !== runId || out.message.type !== "verification.requested" ||
+            payload.taskId !== taskId || payload.implementationAttemptId !== attemptId) continue;
+        const findings = out.phaseFailureEvidence ? await this.phaseFailureFindings(run, task, out, out.phaseFailureEvidence,
+          attemptId, typeof payload.sourceRevision === "string" ? payload.sourceRevision : undefined) : [];
+        failures.push({ requestId: out.message.message_id, phase: payload.phase, sourceRevision: payload.sourceRevision, summary: out.phaseFailure.summary,
+          repairable: out.phaseFailure.repairable, ...(out.phaseFailureEvidence ? { evidenceArtifacts: [out.phaseFailureEvidence] } : {}),
+          ...(findings.length ? { findings } : {}) });
+      }
+      const retainedFailures = failures.slice(-8);
+      const pendingUnmappedFailure = retainedFailures.some(failure => failure.requestId === run.pendingAction?.sourceMessageId &&
+        failure.repairable && !("findings" in failure));
+      const actionable = !pendingUnmappedFailure && retainedFailures.some(failure => failure.repairable && "findings" in failure);
+      return json({ runId, taskId, attemptId, actionable,
+        ...(!actionable ? { reason: "No verified mapped criterion findings are available for this writer; reconcile the exact outcome with the Coordinator." } : {}),
+        failures: retainedFailures });
+    });
   }
   private phaseFailureReply(run: RunRecord, request: Outbound, replay = false): JsonValue {
     const payload = record(request.message.payload), failure = request.phaseFailure!;
@@ -5031,7 +5203,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       request.phaseFailure = { summary: textField(summary), repairable, applied: false };
       request.error = `policy_phase_failed:${summary}`;
       await save(); // preserve the measured outcome before releasing its lease
-      await this.recoverPhaseFailures(state, save, outbox);
+      await this.recoverPhaseFailures(state, save, outbox, _core);
       return this.phaseFailureReply(run, request);
     });
   }
@@ -5048,7 +5220,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       ...inheritedAutoResume(run),
       recovery: automatic ? "auto_resume" : "manual" };
   }
-  private async recoverPhaseFailures(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox): Promise<void> {
+  private async recoverPhaseFailures(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox, core?: CoreSession): Promise<void> {
     for (const request of state.outbound.filter(item => item.phaseFailure && !item.phaseFailure.applied)) {
       const { summary, repairable } = request.phaseFailure!;
       const run = state.runs.find(item => item.runId === request.message.run_id);
@@ -5056,6 +5228,16 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const payload = record(request.message.payload);
       const task = run.tasks.find(item => item.taskId === payload.taskId);
       if (!task) continue;
+      const currentAttempt = core && run.coreCreated
+        ? (await core.snapshot(run.runId)).tasks.find(item => item.taskId === task.taskId)?.attemptId
+        : undefined;
+      if (currentAttempt && typeof payload.implementationAttemptId === "string" && currentAttempt !== payload.implementationAttemptId) {
+        // An interrupted A outcome remains auditable, but it is not B's repair instruction or budget.
+        request.phaseFailure!.applied = true;
+        if (core) this.clearSupersededTaskBlocker(state, run, await core.snapshot(run.runId));
+        await save();
+        continue;
+      }
       await outbox.release(request);
       const failures = state.outbound.filter(item => item.message.run_id === run.runId && item.error?.startsWith("policy_phase_failed:") &&
         record(item.message.payload).taskId === task.taskId && record(item.message.payload).phase === payload.phase &&
@@ -5094,7 +5276,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
             ...inheritedManualResume(run),recovery:"manual"};
           this.progress(state,outbox,run,run.error);
         } else if (this.canEnqueueTaskNotice(state, parent)) {
-          this.phaseNotice(state, outbox, run, task, textField(payload.phase), "failed", summary, request.message.message_id);
+          const noticed = await this.phaseNotice(state, outbox, run, task, textField(payload.phase), "failed", summary, request.message.message_id);
+          if (!noticed) this.escalateExpiredWriterNotice(state, outbox, run, request.message.message_id,
+            "Policy phase evidence did not identify a verified mapped criterion finding; preserve the original evidence and reconcile this exact phase with the Coordinator. No actionable Developer repair notice was delivered.");
         } else {
           this.escalateExpiredWriterNotice(
             state,
@@ -5237,7 +5421,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         continue; // Keep the original control message and any submission handle; never re-send an uncertain notice.
       }
       if (!this.canEnqueueTaskNotice(state, parent)) continue;
-      this.phaseNotice(state, outbox, run, task, phase, request.phaseFailure?.leaseRecoveryRequired ? "failed" : "retry",
+      await this.phaseNotice(state, outbox, run, task, phase, request.phaseFailure?.leaseRecoveryRequired ? "failed" : "retry",
         request.phaseFailure?.leaseRecoveryRequired
           ? `Explicit owner resume restored the same writer lease after: ${request.phaseFailure.summary}. Inspect the independent failure evidence, repair source and commit before requesting this phase again. Frozen Red tests and verification limits remain unchanged.`
           : `Explicit resume authorized a new independent measurement of ${phase} at ${textField(payload.sourceRevision)}. Call request_verification for this phase again; this notice grants no Red evidence or implementation authority.`, request.message.message_id);
@@ -7122,7 +7306,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       catch (error) { parent.error = `Task lease continuation blocked: ${String(error)}`; await save(); continue; }
       if (prior) { if (revive) { prior.status = "queued"; delete prior.error; await save(); } continue; }
       if (!this.canEnqueueTaskNotice(state, parent)) continue;
-      this.phaseNotice(state, outbox, run, task, textField(payload.phase), "retry", `The prior verifier request was retired by a physical human decision without claiming any measurement outcome. Request the same phase at ${textField(payload.sourceRevision)} again. This grants no Red evidence or implementation authority.`, request.message.message_id);
+      await this.phaseNotice(state, outbox, run, task, textField(payload.phase), "retry", `The prior verifier request was retired by a physical human decision without claiming any measurement outcome. Request the same phase at ${textField(payload.sourceRevision)} again. This grants no Red evidence or implementation authority.`, request.message.message_id);
       await save();
     }
   }

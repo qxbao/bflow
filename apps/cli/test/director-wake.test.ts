@@ -17,6 +17,38 @@ const empty = { cursor, timedOut: true, messages: [], issues: [], runtimeEvents:
 const event = { cursor: "m5.i0.b2.rZmVlZDoy", timedOut: false, messages: [{ schemaVersion: 1, seq: 5, messageId: "message-5", author: "user", channel: "web", text: "Làm tiếp", at: "2026-11-05T00:00:00.000Z" }], issues: [], runtimeEvents: [], mailbox: [] };
 
 describe("Codex Director event wake", () => {
+  it("preserves invocation order for watcher state transitions contending on a held lock", async () => {
+    const dir = await root(); let release!: () => void; let held!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { held = resolve; });
+    const holder = withCodexDirectorWatchLock(dir, "session", async () => { held(); await gate; });
+    await entered;
+    const order: number[] = [];
+    const pending = Array.from({ length: 16 }, (_, index) =>
+      withCodexDirectorWatchLock(dir, "session", async () => { order.push(index); }));
+    release();
+    await Promise.all([holder, ...pending]);
+    expect(order).toEqual(Array.from({ length: 16 }, (_, index) => index));
+  });
+
+  it("releases the transition queue after a rejection without serializing unrelated sessions", async () => {
+    const dir = await root(); let release!: () => void; let held!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { held = resolve; });
+    const failed = withCodexDirectorWatchLock(dir, "session", async () => {
+      held(); await gate; throw new Error("transition failed");
+    });
+    const rejected = expect(failed).rejects.toThrow("transition failed");
+    await entered;
+    let completed = false;
+    const next = withCodexDirectorWatchLock(dir, "session", async () => { completed = true; });
+    await withCodexDirectorWatchLock(dir, "unrelated-session", async () => { expect(completed).toBe(false); });
+    release();
+    await rejected;
+    await next;
+    expect(completed).toBe(true);
+  });
+
   it("keeps the model idle through empty waits and queues one wake without acknowledging the event", async () => {
     const dir = await root(); const spawned: string[] = [];
     const state = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async generation => { spawned.push(generation); } });

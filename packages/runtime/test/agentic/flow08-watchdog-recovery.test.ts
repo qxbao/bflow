@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileAgentRegistry } from "@bflow/agent-registry";
 import {
   ApprovalRequestSchema,
@@ -390,6 +390,27 @@ async function activatedHostFixture(roles: readonly ("conversation" | "coordinat
 }
 
 describe("Slice 08 — Outbox, Transport Receipts, Watchdog, Failover & Cancellation Recovery", { timeout: 120_000 }, () => {
+  it("preflights the task environment before allocating a Developer and parks only that same task for Coordinator recovery", async () => {
+    const f = await integrationFixture();
+    const order: string[] = [];
+    f.ports.preflightTaskEnvironment = async input => {
+      order.push(`preflight:${input.taskId}:${input.attemptId}`);
+      return { status: "blocked", checkedAt: T0, code: "task_runner_unavailable", reason: "Pinned test runner missing",
+        recovery: "Restore the local runner and resume this task." };
+    };
+    const allocate = vi.spyOn(f.panes, "allocateDeveloper");
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    await f.runtime.tick();
+    expect(order).toHaveLength(1);
+    expect(order[0]).toMatch(/^preflight:implement:/);
+    expect(allocate).not.toHaveBeenCalled();
+    expect(await f.runtime.inspect("run-1")).toMatchObject({ status: "escalated", error: expect.stringContaining("task_runner_unavailable"),
+      pendingAction: { kind: "resume_coordinator", previousStatus: "implementing" } });
+  });
+  it("keeps pre-Core runs visible to the watchdog without requesting a nonexistent aggregate", async () => {
+    const f = await lightweightRuntimeFixture([makeRun("run-pre-core", "specifying", { coreCreated: false })]);
+    expect((await f.runtime.watchdogSnapshot("session-1")).map(item => item.runId)).toContain("run-pre-core");
+  });
   it("Bug 1: retains Coordinator, Specialist and Verifier leases across pre-turn readyForPrompt TUI lag until working->done, reply, Stop or 45s", async () => {
     const approvedReq = ApprovalRequestSchema.parse({
       schemaVersion: 2,

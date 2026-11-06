@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { lstat, mkdir, readFile, rename, rmdir, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { DirectorWaitResultSchema } from "@bflow/contracts";
 import { z } from "zod";
@@ -18,6 +18,7 @@ const STALE_MS = 120_000;
 const LOCK_STALE_MS = 60_000;
 const LOCK_DEADLINE_MS = 2000;
 const execFileAsync = promisify(execFile);
+const watchTransitions = new Map<string, Promise<void>>();
 
 export async function queueCodexDirectorThread(input: {
   executable: string; cwd: string; threadId: string; message: string; env: Record<string, string | undefined>;
@@ -42,7 +43,19 @@ function statePath(root: string, sessionName: string): string {
 
 /** Cross-process serialization for the short marker transitions; never held during a long wait or queue call. */
 export async function withCodexDirectorWatchLock<T>(root: string, sessionName: string, action: () => Promise<T>): Promise<T> {
-  const lock = `${statePath(root, sessionName)}.lock`;
+  const lock = resolve(`${statePath(root, sessionName)}.lock`);
+  // mkdir retries provide exclusion across processes, but no FIFO ordering.
+  // In this process a later cancellation must follow an already-requested arm,
+  // even when both are waiting for the same filesystem lock.
+  const previous = watchTransitions.get(lock) ?? Promise.resolve();
+  const transition = previous.then(() => withWatchFileLock(lock, action));
+  const settled = transition.then(() => undefined, () => undefined);
+  watchTransitions.set(lock, settled);
+  try { return await transition; }
+  finally { if (watchTransitions.get(lock) === settled) watchTransitions.delete(lock); }
+}
+
+async function withWatchFileLock<T>(lock: string, action: () => Promise<T>): Promise<T> {
   await mkdir(dirname(lock), { recursive: true, mode: 0o700 });
   const deadline = Date.now() + LOCK_DEADLINE_MS;
   for (;;) {

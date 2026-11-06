@@ -380,6 +380,8 @@ describe('Round 3 Slice 2 — Web/CLI/Host lifecycle, interaction, settings & re
       status: 'failed',
       message: expect.stringContaining('unresolved')
     });
+    expect(crashedDoctor.checks.find(c => c.checkId === 'operation-recovery')?.message)
+      .toContain('live Herdr pane, terminal, native-session identity and readiness');
     const crashedStatus = await lifecycle.status();
     expect(crashedStatus.issues.some(issue => issue.includes('was interrupted'))).toBe(true);
 

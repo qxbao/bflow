@@ -713,7 +713,16 @@ describe("Round 2 Slice 9 — Cross-Slice Red-Team & Full-Flow Integration", () 
       // Reproduce genuine pre-populated `out.request` on an unsent task notice:
       // 1) QA records a repairable phase failure, and on the first `flushOutbound()` transport returns a proven temporary rejection ->
       //    HerdrOutbox builds `out.request` (pinning old lease/fence) and leaves `out.status = "queued"` (no `handle`)!
-      await runtime.recordPhaseFailure(qaBinding, qaReq.message.message_id, "Behavioral test code failed without assertion", true);
+      const failureBytes = Buffer.from(JSON.stringify({ runId, taskId: "implement",
+        attemptId: qaReq.message.payload.implementationAttemptId, sourceRevision: redHead, phase: "red",
+        observation: { revision: redHead }, criteria: [{ criterionId: "ac-1", passed: false,
+          summary: "Failed mapped test: Suite xử lý đường dẫn tiếng Việt" }], accepted: false }));
+      const failureArtifactId = `a1-phase-failure-${redHead.slice(0, 12)}`;
+      const failureEvidence = unwrap(await artifacts.put({ options: ArtifactWriteOptionsSchema.parse({ artifactId: failureArtifactId, runId,
+        taskId: "implement", kind: "test-result", mediaType: "application/json",
+        expectedIntegrity: { checksum: { algorithm: "sha256", value: createHash("sha256").update(failureBytes).digest("hex") }, sizeBytes: failureBytes.length },
+        idempotencyKey: failureArtifactId }), content: (async function* () { yield failureBytes; })() }));
+      await runtime.recordPhaseFailure(qaBinding, qaReq.message.message_id, "Behavioral test code failed without assertion", true, failureEvidence);
       transport.customSendHandler = req => ({
         ok: true,
         value: {
