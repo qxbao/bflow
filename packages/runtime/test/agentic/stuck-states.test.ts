@@ -180,6 +180,80 @@ describe("Conversation inbox delivery", () => {
 });
 
 describe("run watchdog facts", () => {
+  it("keeps an old writer's result obligation as a fence but excludes it from current Core business holders", async () => {
+    const f = await fixture();
+    await f.runtime.queueHerdr(message("writer-a", { type: "delegation.request", payload: { objective: "Implement" }, recipient: { role: "developer" } }));
+    await f.runtime.flushOutbound();
+    await f.journal.exclusive(async (state, save) => {
+      const out = state.outbound.find(item => item.message.message_id === "writer-a")!;
+      out.message = RoleMessageSchema.parse({ ...out.message, type: "task.assignment", payload: { taskId: "task-1" } });
+      out.taskId = "task-1";
+      state.runs[0]!.tasks.push({ taskId: "task-1", spec: { specification, strategy: specification.testStrategy!, request: ApprovalRequestSchema.parse({
+        schemaVersion: 2, approvalId: "approval-task", runId: "run-1", target: { type: "run" }, revision: 1, generation: 0,
+        requestedBy: "coordinator", requestedAt: T0, reason: "Accept design", evidence: [], idempotencyKey: "approval-task" }) }, worktrees: [], outboundIds: ["writer-a"] } as never);
+      await save();
+    });
+    const state = await f.runtime.inspect() as unknown as JournalState, run = state.runs[0]!, out = state.outbound.find(item => item.message.message_id === "writer-a")!;
+    state.pendingVerifications ??= [];
+    const owes = (f.runtime as unknown as { outboundOwesResult(state: JournalState, run: RunRecord, out: Outbound): boolean }).outboundOwesResult;
+    expect(owes.call(f.runtime, state, run, out)).toBe(true);
+    const runFacts = (f.runtime as unknown as { runFacts(state: JournalState, run: RunRecord, snapshot: unknown): { acceptedRoles: string[] } }).runFacts;
+    const staleQa = structuredClone(out);
+    staleQa.message = RoleMessageSchema.parse({ ...staleQa.message, message_id: "qa-v1", type: "verification.requested",
+      recipient: { role: "qa" }, payload: { kind: "conditional_evidence", phase: "green", taskId: "task-1", implementationAttemptId: "writer-b" } });
+    staleQa.taskId = "task-1"; staleQa.status = "released"; staleQa.phaseFailure = { summary: "failed", repairable: true, applied: true, recordedAt: T0 } as never;
+    state.outbound.push(staleQa);
+    const writerB = structuredClone(out);
+    writerB.message = RoleMessageSchema.parse({ ...writerB.message, message_id: "writer-b", payload: { taskId: "task-1" } });
+    writerB.attemptId = "writer-b";
+    writerB.handle = { ...out.handle!, executionId: "writer-b-execution", requestId: "writer-b-request", attemptId: "writer-b",
+      target: { ...out.handle!.target, agentId: "developer-b", paneId: "pane-developer-b", session: { source: "test", kind: "id", value: "session-developer-b" } } };
+    state.outbound.push(writerB);
+    const facts = runFacts.call(f.runtime, state, run, { tasks: [{ taskId: "task-1", attemptId: "writer-b", agentExecution: writerB.handle }] });
+    expect(facts.acceptedRoles).toContain("developer");
+    expect(facts.acceptedPanes).toEqual([{ role: "developer", paneId: "pane-developer-b" }]);
+    expect(owes.call(f.runtime, state, run, out)).toBe(true);
+    expect(facts.acceptedRoles).not.toContain("qa");
+    const failoverState = structuredClone(state), sameAttemptOldExecution = failoverState.outbound.find(item => item.message.message_id === "writer-a")!;
+    sameAttemptOldExecution.attemptId = "writer-b";
+    if (sameAttemptOldExecution.handle) sameAttemptOldExecution.handle.attemptId = "writer-b";
+    const failoverFacts = runFacts.call(f.runtime, failoverState, failoverState.runs[0]!, { tasks: [{ taskId: "task-1", attemptId: "writer-b",
+      agentExecution: { executionId: "writer-b-execution", requestId: "writer-b-request" } }] });
+    expect(failoverFacts.acceptedPanes).toEqual([{ role: "developer", paneId: "pane-developer-b" }]);
+
+    const reminderState = structuredClone(state);
+    const currentWriter = reminderState.outbound.find(item => item.message.message_id === "writer-b")!;
+    const expectedReminderId = (f.runtime as any).holderReminderId(reminderState.runs[0], currentWriter);
+    const reminderAt = new Date(Date.parse(T0) + 120_000).toISOString();
+    const reminder = structuredClone(currentWriter);
+    reminder.parentAssignmentId = currentWriter.message.message_id;
+    reminder.message = RoleMessageSchema.parse({ ...currentWriter.message, message_id: expectedReminderId,
+      causation_id: currentWriter.message.message_id, type: "task.status", occurred_at: reminderAt,
+      sender: { role: "coordinator" }, recipient: { role: "developer", agent_id: writerB.handle!.target.agentId, pane_id: writerB.handle!.target.paneId },
+      payload: { kind: "result_reminder", runId: "run-1", taskId: "task-1",
+        sourceMessageId: currentWriter.message.message_id } });
+    reminderState.outbound.push(reminder);
+    const forged = structuredClone(reminder);
+    forged.message = RoleMessageSchema.parse({ ...reminder.message, message_id: "forged-reminder", occurred_at: new Date(Date.parse(T0) + 600_000).toISOString() });
+    reminderState.outbound.push(forged);
+    const staleReminder = structuredClone(reminder);
+    staleReminder.message = RoleMessageSchema.parse({ ...reminder.message,
+      message_id: (f.runtime as any).holderReminderId(reminderState.runs[0], out),
+      causation_id: out.message.message_id, occurred_at: new Date(Date.parse(T0) + 900_000).toISOString(),
+      payload: { kind: "result_reminder", runId: "run-1", taskId: "task-1", sourceMessageId: out.message.message_id } });
+    staleReminder.parentAssignmentId = out.message.message_id;
+    reminderState.outbound.push(staleReminder);
+    const reminderFacts = runFacts.call(f.runtime, reminderState, reminderState.runs[0]!, { tasks: [{ taskId: "task-1", attemptId: "writer-b",
+      agentExecution: writerB.handle }] });
+    expect(reminderFacts.lastActivityAt).toBe(Date.parse(reminderAt));
+    // A transport transition cannot roll the once-only watchdog episode anchor back.
+    currentWriter.status = "released";
+    reminder.status = "cancelled";
+    const afterRelease = runFacts.call(f.runtime, reminderState, reminderState.runs[0]!, { tasks: [{ taskId: "task-1", attemptId: "writer-b",
+      agentExecution: writerB.handle }] });
+    expect(afterRelease.lastActivityAt).toBe(Date.parse(reminderAt));
+  });
+
   it("counts an accepted handoff as activity only while its pane works, and names the holder when it stops", async () => {
     const f = await fixture();
     await f.runtime.queueHerdr(message("assign-dev", { type: "delegation.request", payload: { objective: "Inspect" }, recipient: { role: "developer" } }));

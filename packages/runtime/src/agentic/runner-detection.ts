@@ -269,13 +269,13 @@ export async function disposeDetectedDependencies(): Promise<void> {
  */
 export async function detectTestRunners(
   repositoryRoot: string,
-  options: { nodeExecutable?: string; fs?: DetectionFs; adapters?: readonly RunnerAdapter[] } = {}
+  options: { nodeExecutable?: string; fs?: DetectionFs; adapters?: readonly RunnerAdapter[]; allowDependencyWarming?: boolean } = {}
 ): Promise<RunnerDetection> {
   const fs = options.fs ?? defaultFs;
   try {
     let javascriptDependencySource: string | undefined;
     let javascript = await detect(repositoryRoot, options.nodeExecutable ?? process.execPath, fs);
-    if (!options.fs && javascript.status === "unsupported") {
+    if (!options.fs && options.allowDependencyWarming !== false && javascript.status === "unsupported") {
       // Only a Runtime-owned, lock-verified public npm cache can be created automatically. Other ecosystems remain offline.
       const warmed = await warmNpmDependencies(repositoryRoot);
       if (warmed.status === "ready") {

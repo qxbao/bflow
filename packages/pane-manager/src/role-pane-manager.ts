@@ -323,6 +323,7 @@ export class RolePaneManager {
   readonly #socket: HerdrSocketPort | undefined;
   readonly #clock: () => Date;
   readonly #defaultTimeoutMs: number;
+  readonly #restoredDeadlines = new WeakMap<OperationOptions, Map<string, number>>();
   #allocations: Promise<void> = Promise.resolve();
 
   #serializeAllocation<T>(action: () => Promise<T>): Promise<T> {
@@ -485,22 +486,84 @@ export class RolePaneManager {
     if (outcome.exitCode !== 0 || outcome.failure) return toCommandError(outcome, `Could not label ${role} pane '${paneId}'`);
     parsePaneInfoResult(outcome); return ok(undefined);
   }
-  async #checkRestoredRole(expected: HerdrAgentInfo, role: TopologyRole, options?: OperationOptions): Promise<OperationResult<void>> {
-    const observed = await this.#runHerdr(["agent", "get", expected.paneId], options);
-    let current: HerdrAgentInfo | undefined;
-    if (observed.exitCode === 0 && !observed.failure) {
-      try { current = parseAgentInfoResult(observed, "agent_info"); } catch { /* Uncertain identity stays preserved. */ }
+  async #checkRestoredRole(expected: HerdrAgentInfo, role: TopologyRole, options?: OperationOptions): Promise<OperationResult<HerdrAgentInfo>> {
+    const roleStartupBudget = this.#config.roleConfigs?.[role]?.startupTimeoutMs ?? 60_000;
+    const parsedDeadline = options?.deadline === undefined ? undefined : Date.parse(options.deadline);
+    if (parsedDeadline !== undefined && !Number.isFinite(parsedDeadline))
+      return validationError(`Invalid absolute deadline while reconciling restored ${role} in pane '${expected.paneId}'`);
+    const deadlineKey = `${role}:${expected.paneId}`;
+    let roleDeadlines = options ? this.#restoredDeadlines.get(options) : undefined;
+    if (options && !roleDeadlines) {
+      roleDeadlines = new Map();
+      this.#restoredDeadlines.set(options, roleDeadlines);
     }
-    if (!current || current.name !== expected.name || current.agent !== expected.agent ||
-        current.paneId !== expected.paneId || current.workspaceId !== expected.workspaceId || current.tabId !== expected.tabId ||
-        current.terminalId !== expected.terminalId || !current.session || !expected.session ||
-        current.session.source !== expected.session.source || current.session.kind !== expected.session.kind ||
-        current.session.value !== expected.session.value || !["idle", "done"].includes(current.agentStatus) ||
-        current.interactiveReady === false || current.launchPending === true) {
-      return conflictError(`Restored terminal for ${role} in pane '${expected.paneId}' changed or is no longer ready. Preserve its work, inspect bflow doctor, then retry bflow up after reconciliation.`,
-        { role, agentName: expected.name ?? role, paneId: expected.paneId, sessionId: this.#config.sessionId, reason: "restored_terminal_not_ready" });
+    const deadline = parsedDeadline ?? (roleDeadlines?.get(deadlineKey) ?? Date.now() + roleStartupBudget);
+    roleDeadlines?.set(deadlineKey, deadline);
+    const transientStates = new Set(["starting", "accepted", "unknown"]);
+    let lastReason = "agent_observation_unavailable";
+    let attempt = 0;
+    while (true) {
+      if (options?.signal?.aborted) return { ok: false, error: { code: "cancelled", retryable: false,
+        message: `Restored ${role} observation was cancelled; pane '${expected.paneId}' and its work were preserved.`,
+        details: { role, paneId: expected.paneId, sessionId: this.#config.sessionId, reason: "restored_observation_cancelled" } } };
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const observed = await this.#runHerdr(["agent", "get", expected.paneId], { ...options,
+        timeoutMs: Math.max(1, Math.min(options?.timeoutMs ?? remaining, remaining)) });
+      if (options?.signal?.aborted || observed.failure === "aborted") return { ok: false, error: { code: "cancelled", retryable: false,
+        message: `Restored ${role} observation was cancelled; pane '${expected.paneId}' and its work were preserved.`,
+        details: { role, paneId: expected.paneId, sessionId: this.#config.sessionId, reason: "restored_observation_cancelled" } } };
+      let current: HerdrAgentInfo | undefined;
+      if (observed.exitCode === 0 && !observed.failure) {
+        try { current = parseAgentInfoResult(observed, "agent_info"); }
+        catch { return conflictError(`Herdr returned a malformed agent identity while reconciling ${role} in pane '${expected.paneId}'. Preserve its work and inspect bflow doctor.`,
+          { role, agentName: expected.name ?? role, paneId: expected.paneId, sessionId: this.#config.sessionId, reason: "malformed_agent_observation" }); }
+      } else {
+        const mapped = mapCommandFailure(observed);
+        if (mapped?.code !== "not_found" && observed.failure !== "timeout") {
+          return conflictError(`Could not safely observe restored ${role} in pane '${expected.paneId}' (${mapped?.code ?? "protocol_error"}). Preserve its work and inspect bflow doctor.`,
+            { role, agentName: expected.name ?? role, paneId: expected.paneId, sessionId: this.#config.sessionId, reason: mapped?.code === "corruption" ? "malformed_agent_observation" : "agent_observation_failed" });
+        }
+      }
+      if (current) {
+        const mismatchField = current.name !== expected.name ? "name" : current.agent !== expected.agent ? "provider" :
+          current.paneId !== expected.paneId ? "pane" : current.workspaceId !== expected.workspaceId ? "workspace" :
+          current.tabId !== expected.tabId ? "tab" : current.terminalId !== expected.terminalId ? "terminal" :
+          !expected.session ? "recorded_native_session_missing" : current.session === undefined && !transientStates.has(current.agentStatus) ? "native_session_missing" :
+          current.session !== undefined && current.session.source !== expected.session.source ? "native_session_source" :
+          current.session !== undefined && current.session.kind !== expected.session.kind ? "native_session_kind" :
+          current.session !== undefined && current.session.value !== expected.session.value ? "native_session_identity" : undefined;
+        if (mismatchField !== undefined) {
+          return conflictError(`Restored ${role} identity changed in pane '${expected.paneId}' (name, provider, topology, terminal or native session differs). Preserve its work and inspect bflow doctor.`,
+            { role, agentName: expected.name ?? role, paneId: expected.paneId, sessionId: this.#config.sessionId, reason: "restored_identity_mismatch", mismatchField });
+        }
+        const recovering = transientStates.has(current.agentStatus);
+        if (current.agentStatus === "working" || current.agentStatus === "blocked" ||
+            !recovering && (current.interactiveReady === false || current.launchPending === true)) {
+          return conflictError(`Restored ${role} in pane '${expected.paneId}' is ${current.agentStatus} or awaiting interaction. Preserve its work and resolve it before retrying bflow up.`,
+            { role, agentName: expected.name ?? role, paneId: expected.paneId, sessionId: this.#config.sessionId, reason: current.agentStatus === "working" ? "restored_role_busy" : "restored_role_interaction_required" });
+        }
+        if (current.session === undefined && !transientStates.has(current.agentStatus)) {
+          return conflictError(`Restored ${role} in pane '${expected.paneId}' no longer reports its recorded native session. Preserve its work and inspect bflow doctor.`,
+            { role, agentName: expected.name ?? role, paneId: expected.paneId, sessionId: this.#config.sessionId, reason: "restored_identity_mismatch" });
+        }
+        if (["idle", "done"].includes(current.agentStatus)) return ok(current);
+        if (!recovering) {
+          return conflictError(`Restored ${role} in pane '${expected.paneId}' has unsupported readiness state '${current.agentStatus}'. Preserve its work and inspect bflow doctor.`,
+            { role, agentName: expected.name ?? role, paneId: expected.paneId, sessionId: this.#config.sessionId, reason: "restored_role_not_ready" });
+        }
+        lastReason = "restored_role_recovering";
+      }
+      await new Promise<void>(resolve => {
+        const finish = () => { options?.signal?.removeEventListener("abort", abort); resolve(); };
+        const timer = setTimeout(finish, Math.min(Math.min(500, 75 * 2 ** Math.min(attempt++, 3)), Math.max(1, deadline - Date.now())));
+        const abort = () => { clearTimeout(timer); finish(); };
+        options?.signal?.addEventListener("abort", abort, { once: true });
+        if (options?.signal?.aborted) abort();
+      });
     }
-    return ok(undefined);
+    return conflictError(`Restored ${role} in pane '${expected.paneId}' did not become ready before the startup deadline (${lastReason}). Preserve its work and inspect bflow doctor.`,
+      { role, agentName: expected.name ?? role, paneId: expected.paneId, sessionId: this.#config.sessionId, reason: lastReason });
   }
 
   async #startupBlocked(role: TopologyRole, agentName: string, kind: string, paneId: string, state: string, options?: OperationOptions): Promise<OperationResult<never>> {
@@ -675,7 +738,8 @@ export class RolePaneManager {
 
   async initializeTopology(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
     try {
-      return await this.#reconcileTopologyInternal(false, options);
+      if (options?.deadline !== undefined && !Number.isFinite(Date.parse(options.deadline))) return validationError("Invalid operation deadline for role startup");
+      return await this.#reconcileTopologyInternal(false, this.#boundedOptions(options));
     } catch (err) {
       return toProtocolError(err, "Failed to initialize topology");
     }
@@ -683,10 +747,23 @@ export class RolePaneManager {
 
   async reconcileTopology(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
     try {
-      return await this.#reconcileTopologyInternal(true, options);
+      if (options?.deadline !== undefined && !Number.isFinite(Date.parse(options.deadline))) return validationError("Invalid operation deadline for role reconciliation");
+      return await this.#reconcileTopologyInternal(true, this.#boundedOptions(options));
     } catch (err) {
       return toProtocolError(err, "Failed to reconcile topology");
     }
+  }
+
+  #boundedOptions(options?: OperationOptions): OperationOptions {
+    // Preserve the manager's role-level startup allowance for direct library
+    // calls. Only turn a caller-supplied timeout/deadline into a shared budget.
+    if (options?.timeoutMs === undefined && options?.deadline === undefined) return { ...options };
+    const now = Date.now();
+    const localDeadline = now + Math.max(1, options?.timeoutMs ?? Number.POSITIVE_INFINITY);
+    const suppliedDeadline = options?.deadline === undefined ? undefined : Date.parse(options.deadline);
+    const deadline = suppliedDeadline !== undefined && Number.isFinite(suppliedDeadline)
+      ? Math.min(localDeadline, suppliedDeadline) : localDeadline;
+    return { ...options, deadline: new Date(deadline).toISOString() };
   }
 
   async shutdownTopology(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
@@ -891,13 +968,20 @@ export class RolePaneManager {
         // Herdr can restore a pane and resume its native session under a new terminal.
         // Only the exact recorded native identity proves ownership across that change;
         // a matching name/pane or a missing session never permits adoption or closure.
-        const restoredTerminal = recordedIdentity && !sameTerminal && binding.session !== undefined && sameNativeSession;
+        const restoringNativeIdentity = recordedIdentity && !sameTerminal && binding.session !== undefined &&
+          (sameNativeSession || occupant.session === undefined && occupant.agentStatus === "unknown");
+        const restoredTerminal = restoringNativeIdentity;
         const recordedOccupant = recordedIdentity && (sameTerminal || restoredTerminal);
-        if (recordedOccupant && !sameNativeSession) {
-          return conflictError(`Native session changed for ${role} in pane '${occupant.paneId}'; refusing to adopt or close it as the old role execution. Preserve work and inspect bflow doctor before recovery.`);
+        if (recordedOccupant && occupant.session !== undefined && !sameNativeSession) {
+          const mismatchField = occupant.session.source !== binding.session?.source ? "native_session_source" :
+            occupant.session.kind !== binding.session?.kind ? "native_session_kind" : "native_session_identity";
+          return conflictError(`Native session changed for ${role} in pane '${occupant.paneId}'; refusing to adopt or close it as the old role execution. Preserve work and inspect bflow doctor before recovery.`,
+            { role, agentName, paneId: occupant.paneId, sessionId: this.#config.sessionId, reason: "restored_identity_mismatch", mismatchField });
         }
         if (restoredTerminal) {
-          if (!["idle", "done"].includes(occupant.agentStatus) || occupant.interactiveReady === false || occupant.launchPending === true) {
+          const recovering = ["starting", "accepted", "unknown"].includes(occupant.agentStatus);
+          if ((!recovering && !["idle", "done"].includes(occupant.agentStatus)) ||
+              !recovering && (occupant.interactiveReady === false || occupant.launchPending === true)) {
             return conflictError(
               `Restored terminal for ${role} in pane '${occupant.paneId}' of Herdr session '${this.#config.sessionId}' is ${occupant.agentStatus} or not interactively ready. Preserve its work, inspect bflow doctor and this exact session; let the role settle or resolve its startup before retrying bflow up. No topology changes were made.`,
               { role, agentName, paneId: occupant.paneId, sessionId: this.#config.sessionId, reason: "restored_terminal_not_ready" }
@@ -905,7 +989,7 @@ export class RolePaneManager {
           }
           restoredTerminals.add(occupant.paneId);
         }
-        if (recordedOccupant && sameNativeSession && (occupant.agent === agentKind || replacesRecordedLaunch)) continue;
+        if (recordedOccupant && (sameNativeSession || restoringNativeIdentity) && (occupant.agent === agentKind || replacesRecordedLaunch)) continue;
 
         // Preserve legacy no-env discovery only in the role's intended tab, with the intended provider.
         // An env-bearing launch always needs the exact saved binding; a name and label cannot prove env.
@@ -1148,6 +1232,18 @@ export class RolePaneManager {
       const reusable = env === undefined || originalTerminal && savedBinding?.metadata?.["launchId"] === launch?.launchId;
       const staleBinding = env !== undefined && savedBinding !== undefined && !reusable ? savedBinding : undefined;
 
+      // `agent list` can expose the restored record while `agent get` is still
+      // rebuilding its native session. Reconcile that exact recorded pane before
+      // treating an unknown snapshot as a blocker or considering any replacement.
+      if (savedBinding && restoredTerminals.has(savedBinding.paneId)) {
+        const listed = liveAgents.find(agent => agent.paneId === savedBinding.paneId);
+        if (listed?.agentStatus === "unknown") {
+          const checked = await this.#checkRestoredRole({ ...listed, ...(savedBinding.session ? { session: savedBinding.session } : {}) }, role, options);
+          if (!checked.ok) return checked;
+          liveAgents = liveAgents.map(agent => agent.paneId === checked.value.paneId ? checked.value : agent);
+        }
+      }
+
       let healthyOccupant: HerdrAgentInfo | null = null;
       if (savedBinding && reusable) {
         const liveOccupant = liveAgents.find(
@@ -1185,6 +1281,11 @@ export class RolePaneManager {
       }
 
       if (healthyOccupant) {
+        if (restoredTerminals.has(healthyOccupant.paneId)) {
+          const checked = await this.#checkRestoredRole({ ...healthyOccupant, ...(savedBinding?.session ? { session: savedBinding.session } : {}) }, role, options);
+          if (!checked.ok) return checked;
+          healthyOccupant = checked.value;
+        }
         if (savedBinding?.session && healthyOccupant.session && savedManifest?.status !== "down" &&
             savedBinding.paneId === healthyOccupant.paneId &&
             (savedBinding.session.source !== healthyOccupant.session.source || savedBinding.session.kind !== healthyOccupant.session.kind || savedBinding.session.value !== healthyOccupant.session.value))
@@ -1227,7 +1328,7 @@ export class RolePaneManager {
       const restoredAgent = staleBinding && restoredTerminals.has(staleBinding.paneId)
         ? liveAgents.find(agent => agent.paneId === staleBinding.paneId) : undefined;
       if (restoredAgent) {
-        const checked = await this.#checkRestoredRole(restoredAgent, role, options);
+        const checked = await this.#checkRestoredRole({ ...restoredAgent, ...(staleBinding?.session ? { session: staleBinding.session } : {}) }, role, options);
         if (!checked.ok) return checked;
       }
 
@@ -1324,7 +1425,7 @@ export class RolePaneManager {
         const reserved = await persistProgress();
         if (!reserved.ok) return reserved;
         if (restoredAgent) {
-          const checked = await this.#checkRestoredRole(restoredAgent, role, options);
+          const checked = await this.#checkRestoredRole({ ...restoredAgent, ...(staleBinding?.session ? { session: staleBinding.session } : {}) }, role, options);
           if (!checked.ok) return checked;
         }
       }

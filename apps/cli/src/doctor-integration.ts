@@ -615,7 +615,7 @@ export async function runDoctorDiagnostics(
           checkId: "operation-recovery",
           name: "operation-recovery",
           status: "failed",
-          message: `Environment operation '${intentPhase}' is unresolved. ${intentPhase === "stopping" ? "Run bflow down --yes to resume checked shutdown." : "Run bflow up to reconcile existing panes; resolve interactive dialogs in the named session, or bflow down --yes to stop safely."} Do not delete .bflow.`,
+          message: `Environment operation '${intentPhase}' is unresolved. ${intentPhase === "stopping" ? "Run bflow down --yes to resume checked shutdown." : intentPhase === "manager_pending" ? "Stored role bindings have not been reconciled against live Herdr pane, terminal, native-session identity and readiness. Run bflow up to recheck the exact recorded roles; preserve any pane whose identity differs, resolve dialogs in the named session, or run bflow down --yes for checked shutdown." : "Run bflow up to reconcile existing panes; resolve interactive dialogs in the named session, or bflow down --yes to stop safely."} Do not delete .bflow.`,
           remediation: intentPhase === "stopping" ? "Run bflow down --yes" : "Run bflow up or bflow down --yes"
         });
       }
