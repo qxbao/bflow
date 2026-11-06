@@ -379,9 +379,10 @@ export class HostDevelopment {
     const rawResumeContext = await this.runtime().taskHandover(binding, { runId: context.runId, taskId: context.taskId });
     const isAgy = context.binding.agentKind === "agy" || context.binding.provider === "agy";
     const resumeContext = isAgy ? deferredTaskHandover(rawResumeContext) : rawResumeContext;
+    const policyFailureContext = await this.runtime().readPolicyFailureContext(context.binding, context.runId, context.taskId, context.attemptId);
     const reply = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async task => {
       const fullEvidence = task.spec.strategy.metadata?.tddEvidence ?? [];
-      const fullReply = { resumeContext, runId: context.runId, taskId: context.taskId, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
+      const fullReply = { resumeContext, policyFailureContext, runId: context.runId, taskId: context.taskId, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
         branch: (await this.git(context.cwd, ["branch", "--show-current"])).trim(), worktreePath: context.cwd,
         tddDecision: task.spec.strategy.tddDecision, recordedEvidence: fullEvidence,
         ...(rawRework !== undefined ? { reworkContext: rawRework } : {}) };
@@ -425,12 +426,26 @@ export class HostDevelopment {
     const rawRework = record(context.message.payload).reworkContext;
     const reworkGeneration = rawRework !== null && typeof rawRework === "object" && !Array.isArray(rawRework) && typeof (rawRework as Record<string, unknown>).reworkGeneration === "number"
       ? ((rawRework as Record<string, unknown>).reworkGeneration as number) : undefined;
-    const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => ({
-      commands: this.commandsFor(task, strings(record(definition.metadata).ownedPaths)),
-      head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
-      originalRevision: (task.worktrees[0] ?? task.worktrees.at(-1))!.baseCommitHash
-    }));
-    if (!selected.commands.length) throw new Error("No automated checks for this task: configure an owner command or make the accepted criteria and test files resolvable");
+    // Same authenticated assignment is an explicit readiness refresh point after the host environment changes.
+    await this.runners.refresh();
+    const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => {
+      let commands;
+      try { commands = this.commandsFor(task, strings(record(definition.metadata).ownedPaths)); }
+      catch (error) { return { blocked: `Host runner readiness is unavailable: ${String(error).slice(0, 800)}` }; }
+      if (!commands.length) return { blocked: "No automated checks are currently ready for this accepted task." };
+      let environmentReadiness;
+      try {
+        environmentReadiness = await this.runtime().ports.preflightTaskEnvironment?.({ runId: context.runId, taskId: context.taskId,
+          attemptId: context.attemptId, worktreePath: context.cwd, specification: task.spec.specification,
+          strategy: task.spec.strategy, ownedPaths: strings(record(definition.metadata).ownedPaths) });
+        if (environmentReadiness?.status === "blocked") return { blocked: `${environmentReadiness.code}: ${environmentReadiness.reason}` };
+      } catch (error) { return { blocked: `Host environment readiness could not be refreshed: ${String(error).slice(0, 800)}` }; }
+      return { commands, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
+        originalRevision: (task.worktrees[0] ?? task.worktrees.at(-1))!.baseCommitHash, environmentReadiness };
+    });
+    if ("blocked" in selected) return json({ status: "blocked", classification: "infrastructure", independentAcceptanceEvidence: false,
+      runId: context.runId, taskId: context.taskId, attemptId: context.attemptId, reason: selected.blocked,
+      recovery: "Restore local runner/browser/sandbox prerequisites, then call check_work again on this same assignment. No package installation or network access is performed." });
     const measurements = [];
     for (const command of selected.commands) {
       const rtk = await this.rtk?.resolve({ role: "developer", runId: context.runId, taskId: context.taskId,
@@ -448,7 +463,9 @@ export class HostDevelopment {
     const evidence = ArtifactReferenceSchema.parse(stored.value);
     for (const item of measurements) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId)
       await this.rtk?.consume(item.rtk.invocationId, evidence);
-    return json({ independentAcceptanceEvidence: false, sourceRevision: selected.head, ...(reworkGeneration !== undefined ? { reworkGeneration } : {}), evidence, measurements });
+    return json({ independentAcceptanceEvidence: false, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
+      sourceRevision: selected.head, worktreePath: context.cwd, ...(reworkGeneration !== undefined ? { reworkGeneration } : {}),
+      ...(selected.environmentReadiness ? { environmentReadiness: selected.environmentReadiness } : {}), evidence, measurements });
   }
   /**
    * Concludes the preserved P18 merge with the resolver's edits. Only the conflicted files may differ from what the merge staged,

@@ -55,6 +55,7 @@ export interface OpenAgenticWorkspaceOptions {
   behavioralChecks?: AgenticRuntimePorts["behavioralChecks"];
   behavioralGates?: () => readonly QualityGate[];
   validateTaskCommands?: AgenticRuntimePorts["validateTaskCommands"];
+  preflightTaskEnvironment?: AgenticRuntimePorts["preflightTaskEnvironment"];
   fastPathMode?: AgenticRuntimePorts["fastPathMode"];
   authenticateMessage: AgenticRuntimePorts["authenticateMessage"];
   /** Called after Conversation applied a Runtime outbox message; the host records it as a durable notice for the model. */
@@ -526,6 +527,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       maxConcurrency: options.maxDeveloperCapacity ?? 2, taskChecks: options.taskChecks, workflowChecks: options.workflowChecks,
       ...(options.behavioralChecks ? { behavioralChecks: options.behavioralChecks } : {}),
       ...(options.validateTaskCommands ? { validateTaskCommands: options.validateTaskCommands } : {}),
+      ...(options.preflightTaskEnvironment ? { preflightTaskEnvironment: options.preflightTaskEnvironment } : {}),
       ...(options.fastPathMode ? { fastPathMode: options.fastPathMode } : {}),
       authenticateMessage: async message => await authenticateNativeHerdrMessage(message) || await options.authenticateMessage(message),
       deliverToConversation: async message => {

@@ -2,8 +2,8 @@
 // the renderer stays a drawing layer. One grid cell is one world unit; cell (gx, gy) has its centre at x = gx + 0.5, z = gy + 0.5.
 // Rooms (north is the far wall, the camera looks from the south):
 //   back row  : Conversation | Coordination (Planner, Coordinator, Architect, Specifier) | Task Board (hero wall screen above its own zone, at the right)
-//   front row : Developer zone (20 seats in north-south rows, rows appear as agents arrive) | an empty spare room | Verification (Reviewer, QA, Tester,
-//               Security, print corner) above a second empty spare room
+//   front row : Developer zone (20 seats in north-south rows, rows appear as agents arrive) | Creative Space (bar, four billiard tables, arcades;
+//               whoever is not working spends the time here) | Verification (Reviewer, QA, Tester, Security, print corner) above the pool room
 // Every room is laid out mirror-symmetric about its own centre line, and every door sits in the middle of its wall.
 import { findPath } from '../model/path';
 import { DIRECTOR_SEAT } from '../model/seats';
@@ -31,7 +31,7 @@ export const WORLD: { w: number; d: number } = { w: GRID_W, d: GRID_H };
 
 /**
  * Developer pool: 20 seats in four north-south lines of desks with a one-cell aisle between neighbouring lines, mirror-symmetric about the centre of
- * the Developer zone (x 4.5), in the left half of the front row (the right half is the empty spare room). Seats fill across (five rows of four),
+ * the Developer zone (x 4.5), in the left half of the front row (the right half is the Creative Space). Seats fill across (five rows of four),
  * centre lines first, so a partly used row stays balanced.
  */
 export const DEVELOPER_COLUMNS = [3, 5, 1, 7] as const;
@@ -96,10 +96,12 @@ export const BOARD_X = 23.5;
  * Desks that are always drawn, with or without a session: the Director Team (Planner, Architect, Specifier) and the Reviewer and QA desks. Other
  * fixed-role desks, the legacy Coordinator's included, appear with their agent (the Conversation seat is the executive desk).
  */
-const BASE_DESKS: readonly Cell[] = (['coordination:planner', 'coordination:architect', 'coordination:specifier', 'verification:reviewer', 'verification:qa'] as const).map(k => FIXED_BASES[k] as Cell);
+const BASE_SEATS = ['coordination:planner', 'coordination:architect', 'coordination:specifier', 'verification:reviewer', 'verification:qa'] as const;
 
 /** Non-interactive decoration that blocks a cell. */
-export const PLANT_CELLS: readonly Cell[] = [{ gx: 10, gy: 7 }, { gx: 17, gy: 7 }, { gx: 10, gy: 17 }, { gx: 17, gy: 17 }];
+export const PLANT_CELLS: readonly Cell[] = [{ gx: 10, gy: 7 }, { gx: 17, gy: 7 }];
+/** Centre line of the Creative Space (x 10..17) and of the pool room (x 19..27): both rooms are laid out mirror-symmetric about it. */
+export const CREATIVE_X = 14, POOL_X = 23.5;
 /** The long meeting table of the Task Board zone, five cells wide, centred under the board; its chairs are decor around it. */
 export const TABLE_CELLS: readonly Cell[] = [21, 22, 23, 24, 25].map(gx => ({ gx, gy: 4 }));
 
@@ -117,11 +119,11 @@ const PARTITION_RUNS: readonly PartitionRun[] = [
   // Back row: Conversation | Coordination | Task Board, a door in the middle of each wall. The Conversation wall continues the Developer one (x 9).
   { axis: 'v', line: 9, from: 1, to: 3, a: NORTH_WALL }, { axis: 'v', line: 9, from: 5, to: 7, b: CROSSING },
   { axis: 'v', line: 18, from: 1, to: 3, a: NORTH_WALL }, { axis: 'v', line: 18, from: 5, to: 7, b: CROSSING },
-  // Front row: Developer | spare room (door in the middle of the Developer wall) | QA / Reviewer and the spare room below it (a door in the middle
+  // Front row: Developer | Creative Space (door in the middle of the Developer wall) | QA / Reviewer and the pool room below it (a door in the middle
   // of each of their west walls).
   { axis: 'v', line: 9, from: 9, to: 12, a: CROSSING }, { axis: 'v', line: 9, from: 14, to: 18, b: 0 },
   { axis: 'v', line: 18, from: 9, to: 10, a: CROSSING }, { axis: 'v', line: 18, from: 12, to: 15 }, { axis: 'v', line: 18, from: 17, to: 18, b: 0 },
-  // Splits the front-right room: QA / Reviewer above, a second spare room below, with a door in the middle.
+  // Splits the front-right room: QA / Reviewer above, the pool room below, with a door in the middle.
   { axis: 'h', line: 14, from: 19, to: 22, a: CROSSING }, { axis: 'h', line: 14, from: 24, to: 27, b: 0 },
 ];
 const runCells = (r: PartitionRun): Cell[] => Array.from({ length: r.to - r.from + 1 }, (_, i) => (r.axis === 'h' ? { gx: r.from + i, gy: r.line } : { gx: r.line, gy: r.from + i }));
@@ -153,6 +155,8 @@ export const DECOR_SIZE: Readonly<Record<string, { w: number; d: number }>> = {
   bookcase_lux_w: { w: 2.9, d: 0.45 }, bookcase_lux_e: { w: 2.9, d: 0.45 }, statue: { w: 1.0, d: 0.5 }, sofa_lux: { w: 2.4, d: 0.95 }, tea_table: { w: 1.0, d: 0.6 }, rug_lux: { w: 3.4, d: 2.6 },
   meeting_chair: { w: 0.55, d: 0.55 }, globe: { w: 0.5, d: 0.5 }, painting: { w: 1.0, d: 0.05 }, floor_lamp: { w: 0.38, d: 0.38 }, printer: { w: 0.8, d: 0.5 }, paper_cabinet: { w: 0.8, d: 0.45 }, plant_tall: { w: 0.6, d: 0.6 }, plant_small: { w: 0.2, d: 0.2 }, pendant_lamp: { w: 0.7, d: 0.7 },
   whiteboard: { w: 2, d: 0.08 }, window: { w: 2.1, d: 0.16 }, wall_art: { w: 0.9, d: 0.03 },
+  bar_counter: { w: 8, d: 1.4 }, wine_wall: { w: 8, d: 0.4 }, bar_stool: { w: 0.4, d: 0.4 }, billiard_table: { w: 2.2, d: 1.2 },
+  arcade_a: { w: 0.75, d: 0.7 }, arcade_b: { w: 0.75, d: 0.7 }, pool: { w: 7, d: 2.6 }, diving_board: { w: 0.6, d: 0.6 },
 };
 export type DecorWall = 'north' | 'west' | 'east';
 /**
@@ -180,10 +184,60 @@ export const DECOR: readonly DecorItem[] = [
   deco('meeting_chair', 20, 4, { ry: Math.PI / 2 }), deco('meeting_chair', 26, 4, { ry: -Math.PI / 2 }),
   // Developer: a water cooler either side of the door from the Director room, against the north partition.
   deco('water_cooler', 3, 8, { wall: 'north' }), deco('water_cooler', 5, 8, { wall: 'north' }), deco('wall_art', 0, 13, { mount: 'wall', wall: 'west' }),
-  // Verification: the print corner on the middle of the east wall, a printer and a paper cabinet either side under the whiteboard. The spare room
-  // below stays empty.
+  // Verification: the print corner on the middle of the east wall, a printer and a paper cabinet either side under the whiteboard.
   deco('printer', 27, 10, { wall: 'east' }), deco('whiteboard', 27, 11, { mount: 'wall', wall: 'east' }), deco('paper_cabinet', 27, 12, { wall: 'east' }),
+  // Creative Space, mirror-symmetric about x 14 and clear of its four doors: two arcade cabinets either side of the double door from the Director
+  // Team room (against that partition, facing into the room), two rows of two billiard tables, then the bar along the front edge: a wine
+  // wall the whole width of the room and in front of it the rounded counter, as wide as the room, with six stools.
+  ...[10, 11, 16, 17].map((gx, i) => deco(i === 0 || i === 3 ? 'arcade_a' : 'arcade_b', gx, 8, { wall: 'north' })),
+  deco('billiard_table', 12, 11, { off: [-0.4, 0.15] }), deco('billiard_table', 15, 11, { off: [0.4, 0.15] }),
+  deco('billiard_table', 12, 14, { off: [-0.4, -0.2] }), deco('billiard_table', 15, 14, { off: [0.4, -0.2] }),
+  ...[11, 12, 13, 14, 15, 16].map(gx => deco('bar_stool', gx, 16, { off: [0, 0.25] })),
+  deco('bar_counter', 14, 17, { ry: Math.PI, off: [-0.5, 0.35] }), deco('wine_wall', 14, 18, { ry: Math.PI, off: [-0.5, 0.25] }),
+  // Pool room: one long pool centred on the room (x 23.5), clear of both doors, with a diving board at either end reaching over the water.
+  deco('pool', 23, 17, { off: [0, -0.2] }), deco('diving_board', 19, 17, { ry: Math.PI / 2, off: [0, -0.2] }), deco('diving_board', 27, 17, { ry: -Math.PI / 2, off: [0, -0.2] }),
 ];
+/** What a figure does at a leisure spot; the scene maps it to a clip (`perch` is seated on a bar stool, `swim` treads water in the pool). */
+export type LoungeActivity = 'stand' | 'play' | 'perch' | 'swim';
+/** A place where a figure that is not working spends its time: floor position, heading (0 faces +z), activity and height of the feet above the floor. */
+export interface LoungeSpot { x: number; z: number; heading: number; activity: LoungeActivity; lift: number }
+const E = Math.PI / 2, W = -Math.PI / 2, N = Math.PI;
+/** Seat top of a bar stool above that of a desk chair: a perched figure is lifted by it. A swimmer stands in the pool with the waterline at the chest. */
+const STOOL_LIFT = 0.415, SWIM_LIFT = -0.55;
+const spot = (x: number, z: number, heading: number, activity: LoungeActivity): LoungeSpot => ({ x, z, heading, activity, lift: activity === 'perch' ? STOOL_LIFT : activity === 'swim' ? SWIM_LIFT : 0 });
+/**
+ * Leisure spots, mirror-symmetric about the centre line of their room. An idle figure takes a random free one and
+ * moves on to another after a while, so any spot of the Creative Space or the pool may be in use.
+ */
+export const LOUNGE_SPOTS: readonly LoungeSpot[] = [
+  spot(13.5, 16.75, 0, 'perch'), spot(14.5, 16.75, 0, 'perch'),
+  spot(12.5, 16.75, 0, 'perch'), spot(15.5, 16.75, 0, 'perch'),
+  spot(11.5, 16.75, 0, 'perch'), spot(16.5, 16.75, 0, 'perch'),
+  // Arcades.
+  spot(11.5, 9.75, N, 'play'), spot(16.5, 9.75, N, 'play'),
+  spot(10.5, 9.75, N, 'play'), spot(17.5, 9.75, N, 'play'),
+  // Back row of billiard tables: a shot from the outer end, the long side or the gap between the tables.
+  spot(10.55, 11.65, E, 'play'), spot(17.45, 11.65, W, 'play'),
+  spot(12.1, 10.7, 0, 'play'), spot(15.9, 10.7, 0, 'play'),
+  spot(13.6, 11.65, W, 'stand'), spot(14.4, 11.65, E, 'stand'),
+  spot(12.1, 12.6, N, 'play'), spot(15.9, 12.6, N, 'play'),
+  // Front row of billiard tables; the camera side holds a player who waits for the shot.
+  spot(10.55, 14.3, E, 'play'), spot(17.45, 14.3, W, 'play'),
+  spot(12.1, 13.35, 0, 'play'), spot(15.9, 13.35, 0, 'play'),
+  spot(13.6, 14.3, W, 'stand'), spot(14.4, 14.3, E, 'stand'),
+  spot(11.6, 15.25, N, 'stand'), spot(16.4, 15.25, N, 'stand'),
+  // Pool.
+  spot(21.6, 16.8, 0, 'swim'), spot(25.4, 16.8, 0, 'swim'),
+  spot(22.6, 17.9, 0, 'swim'), spot(24.4, 17.9, 0, 'swim'),
+  spot(POOL_X, 16.8, 0, 'swim'),
+  spot(21.4, 17.95, 0, 'swim'), spot(25.6, 17.95, 0, 'swim'),
+  spot(POOL_X, 17.95, 0, 'swim'),
+];
+/**
+ * Service points of the bartender, inside the curve of the bar counter between it and the wine wall, from one end to the other. The bartender is
+ * always there while a session runs and walks from one to another, facing the patrons (north) while serving.
+ */
+export const BAR_POINTS: readonly Vec2[] = [11.3, 12.6, CREATIVE_X, 15.4, 16.7].map(x => ({ x, z: 18.15 }));
 const WALL_FACE = 0.07, PARTITION_FACE = 0.1, PENDANT_Y = 2.9, TABLE_Y = 0.41;
 const WALL_RY: Readonly<Record<DecorWall, number>> = { north: 0, west: Math.PI / 2, east: -Math.PI / 2 };
 /** World placement of a decor item: position (y is 0 for the floor) and rotation about y. */
@@ -232,24 +286,27 @@ export interface DeskPlan {
   developerRows: number;
   /** Cells of every desk that is drawn, and therefore blocks passers-by. */
   desks: Cell[];
+  /** Seat id of each drawn desk, parallel to `desks`. */
+  seats: string[];
 }
 /** Which desks exist for the occupied seats. Unused developer rows have no desks and do not block paths. */
 export function deskPlan(occupiedSeats: readonly string[]): DeskPlan {
   const cols = DEVELOPER_COLUMNS.length;
   let maxDev = 0;
-  const desks: Cell[] = [...BASE_DESKS];
+  const seats: string[] = [...BASE_SEATS];
+  const desks: Cell[] = seats.map(k => FIXED_BASES[k] as Cell);
   const have = new Set(desks.map(c => `${c.gx},${c.gy}`));
   for (const seat of occupiedSeats) {
     if (seat.startsWith('developer:')) { maxDev = Math.max(maxDev, Number(seat.slice(10)) || 0); continue; }
     const c = seatCell(seat);
-    if (c && seat !== 'conversation:conversation' && seat !== DIRECTOR_SEAT && !have.has(`${c.gx},${c.gy}`)) { have.add(`${c.gx},${c.gy}`); desks.push(c); }
+    if (c && seat !== 'conversation:conversation' && seat !== DIRECTOR_SEAT && !have.has(`${c.gx},${c.gy}`)) { have.add(`${c.gx},${c.gy}`); desks.push(c); seats.push(seat); }
   }
   const developerRows = Math.min(DEVELOPER_ROWS.length, Math.max(MIN_DEVELOPER_ROWS, Math.ceil(Math.min(maxDev, DEVELOPER_SEAT_COUNT) / cols) + 1));
-  for (let n = 1; n <= Math.min(DEVELOPER_SEAT_COUNT, developerRows * cols); n++) desks.push(seatCell(`developer:${n}`) as Cell);
-  return { developerRows, desks };
+  for (let n = 1; n <= Math.min(DEVELOPER_SEAT_COUNT, developerRows * cols); n++) { desks.push(seatCell(`developer:${n}`) as Cell); seats.push(`developer:${n}`); }
+  return { developerRows, desks, seats };
 }
 
-export type ZoneId = 'conversation' | 'coordination' | 'taskboard' | 'developer' | 'spare' | 'verification' | 'lobby';
+export type ZoneId = 'conversation' | 'coordination' | 'taskboard' | 'developer' | 'creative' | 'verification' | 'pool' | 'lobby';
 export interface Zone { id: ZoneId; x0: number; y0: number; x1: number; y1: number }
 /** Cell rectangles, inclusive. The developer zone is cut to the rows drawn. */
 export function zones(developerRows: number): Zone[] {
@@ -259,9 +316,9 @@ export function zones(developerRows: number): Zone[] {
     { id: 'coordination', x0: 10, y0: 1, x1: 17, y1: 7 },
     { id: 'taskboard', x0: 19, y0: 1, x1: 27, y1: 7 },
     { id: 'developer', x0: 0, y0: 9, x1: 8, y1: Math.min(GRID_H - 1, 9 + rows * 2) },
-    { id: 'spare', x0: 10, y0: 9, x1: 17, y1: 18 },
+    { id: 'creative', x0: 10, y0: 9, x1: 17, y1: 18 },
     { id: 'verification', x0: 19, y0: 9, x1: 27, y1: 13 },
-    { id: 'spare', x0: 19, y0: 15, x1: 27, y1: 18 },
+    { id: 'pool', x0: 19, y0: 15, x1: 27, y1: 18 },
   ];
 }
 /** Rows of the Developer zone needed for `count` Developers (the occupied rows plus the next free one). */
@@ -297,6 +354,8 @@ export const ZONE_TITLES: readonly { id: ZoneId; text: string }[] = [
   { id: 'taskboard', text: 'Task Board' },
   { id: 'developer', text: 'Developer Zone' },
   { id: 'verification', text: 'QA / Reviewer' },
+  { id: 'creative', text: 'Creative Space' },
+  { id: 'pool', text: 'Swimming Pool' },
 ];
 /**
  * Zone titles for a layout: in a Director layout the control room (the old Conversation room) is titled Director and the coordination
@@ -307,10 +366,13 @@ export function zoneTitles(director: boolean | undefined): { id: ZoneId; text: s
   return ZONE_TITLES.map(t => { const text = director === undefined ? ({ conversation: 'Điều hành', coordination: 'Chuyên môn' } as Partial<Record<ZoneId, string>>)[t.id] : director ? DIRECTOR_ZONE_TITLES[t.id] : undefined; return text ? { ...t, text } : t; });
 }
 export interface ZoneSign { id: ZoneId; text: string; x: number; y: number; z: number; w: number; h: number }
-/** Signs face +z (south, towards the camera). Back rooms: on the north wall above head height; the board: on its top frame; front rooms: a lintel over the room's door, resting on the partition either side (clear of the water coolers below). */
+/**
+ * Signs face +z (south, towards the camera). Back rooms: on the north wall above head height; the board: on its top frame; front rooms: a lintel over
+ * the room's door, resting on the partition either side (clear of the water coolers below); the pool room: a lintel over its door from QA / Reviewer.
+ */
 const SIGN_AT: Readonly<Record<string, { x: number; y: number; z: number }>> = {
   conversation: { x: 4.5, y: 3.05, z: 0.14 }, coordination: { x: 14, y: 3.05, z: 0.14 }, taskboard: { x: BOARD_X, y: 3.4, z: 0.32 },
-  developer: { x: 4.5, y: 1.6, z: 8.62 }, verification: { x: 23.5, y: 1.6, z: 8.62 },
+  developer: { x: 4.5, y: 1.6, z: 8.62 }, verification: { x: 23.5, y: 1.6, z: 8.62 }, creative: { x: CREATIVE_X, y: 1.6, z: 8.62 }, pool: { x: POOL_X, y: 1.6, z: 14.62 },
 };
 export const SIGN_HEIGHT = 0.5;
 export const ZONE_SIGNS: readonly ZoneSign[] = ZONE_TITLES.map(t => ({ ...t, ...(SIGN_AT[t.id] as { x: number; y: number; z: number }), w: Math.max(1.6, t.text.length * 0.17 + 0.5), h: SIGN_HEIGHT }));

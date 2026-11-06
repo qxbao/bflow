@@ -98,7 +98,9 @@ function select(state: AutoParkState, policy: AutoParkPolicy, now: number, prepa
           Object.values(run.userDecisions ?? {}).some(item => item.status === "pending" && item.taskId === task.taskId)) continue;
       const pending = state.pendingVerifications.filter(item => jobField(item.job, "runId") === run.runId && jobField(item.job, "taskId") === task.taskId);
       if (pending.some(item => !exhaustedTaskVerification(item, run, task, current.attemptId)) || task.verificationPending && !pending.length) continue;
-      const executions = related.filter(out => !out.parentAssignmentId && out.handle && (out.status === "accepted" || out.handle.executionId === current.agentExecution?.executionId));
+      const executions = related.filter(out => !out.parentAssignmentId && out.handle &&
+        (current.agentExecution ? out.handle.executionId === current.agentExecution.executionId && out.handle.requestId === current.agentExecution.requestId
+          : out.status === "accepted"));
       if (!preparing && (executions.some(out => !stopped(out, task, now)) || current.agentExecution &&
           !executions.some(out => digest(out.handle) === digest(current.agentExecution) && stopped(out, task, now)) ||
           task.failovers?.some(entry => !["dispatched", "cancelled"].includes(entry.phase) && !proofMatches(entry.stopProof, entry.sourceHandle, now) &&
@@ -112,7 +114,14 @@ function select(state: AutoParkState, policy: AutoParkPolicy, now: number, prepa
         const identity = action?.invalidAssignment;
         const source = action && related.find(out => out.message.message_id === (identity?.messageId ?? action.sourceMessageId) &&
           (!identity || identity.taskId === task.taskId && identity.attemptId === out.attemptId && identity.implementationAttemptId === current.attemptId));
-        if (run.status === "escalated" && action?.state === "pending" && source &&
+        const sourcePayload = source ? jobField(source.message, "payload") : undefined;
+        const sourceIsCurrentAttempt = source?.message.type === "task.assignment"
+          ? current.agentExecution ? source.handle?.executionId === current.agentExecution.executionId && source.handle.requestId === current.agentExecution.requestId
+            : !current.attemptId || (source.handle?.attemptId ?? source.attemptId) === current.attemptId
+          : source?.message.type === "verification.requested" && jobField(sourcePayload, "kind") === "conditional_evidence"
+            ? !current.attemptId || source.phaseFailure === undefined && source.phaseRetirement === undefined && jobField(sourcePayload, "implementationAttemptId") === current.attemptId
+            : true;
+        if (run.status === "escalated" && action?.state === "pending" && source && sourceIsCurrentAttempt &&
             ["task.assignment", "verification.requested"].includes(source.message.type) && taskLogBusinessTaskId(source) === task.taskId &&
             (action.recovery === "manual" || action.recovery === "auto_resume" && (action.resumeAttempts ?? 0) >= policy.maxAutoResumesBeforePark))
           kind = identity ? "other" : STRUCTURAL_DELIVERY_BLOCKERS.test(action.reason) ? "transport_failure" : action.reason.includes("refused messages") ? "other" : "transport_failure";

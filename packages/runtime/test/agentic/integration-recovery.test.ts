@@ -1,12 +1,14 @@
+import { createHash } from "node:crypto";
 import { writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ArtifactWriteOptionsSchema } from "@bflow/contracts";
 import { type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
 import { TestRunnerSource } from "../../src/agentic/task-commands.js";
 import { digest } from "../../src/agentic/journal.js";
 import { WorkflowProposalRejected } from "../../src/agentic/workflow-rejection.js";
 import { draft, workflow } from "../../../specification/test/fixtures.js";
-import { cleanups, git, fixture } from "../helpers/agentic-integration-fixture.js";
+import { cleanups, git, fixture, unwrap } from "../helpers/agentic-integration-fixture.js";
 
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn(); });
 
@@ -300,13 +302,23 @@ it.skipIf(process.platform === "win32")("recovers the exact failed phase after a
   await f.runtime.flushOutbound();
   const request = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.message_id === queued.messageId);
   const qa = f.panes.bindings.find(item => item.paneId === request.handle.target.paneId)!;
+  const requestPayload = request.message.payload;
+  const failureBytes = Buffer.from(JSON.stringify({ runId: "run-1", taskId: "implement",
+    attemptId: requestPayload.implementationAttemptId, sourceRevision: requestPayload.sourceRevision, phase: requestPayload.phase,
+    observation: { revision: requestPayload.sourceRevision },
+    criteria: [{ criterionId: "ac-1", passed: false, summary: "Mapped test did not produce required Red assertion evidence" }], accepted: false }));
+  const failureArtifactId = `recovery-phase-failure-${String(requestPayload.sourceRevision).slice(0, 12)}`;
+  const failureEvidence = unwrap(await f.ports.artifactStore.put({ options: ArtifactWriteOptionsSchema.parse({ artifactId: failureArtifactId,
+    runId: "run-1", taskId: "implement", kind: "test-result", mediaType: "application/json",
+    expectedIntegrity: { checksum: { algorithm: "sha256", value: createHash("sha256").update(failureBytes).digest("hex") }, sizeBytes: failureBytes.length },
+    idempotencyKey: failureArtifactId }), content: (async function* () { yield failureBytes; })() }));
   const journal = (f.runtime as any).journal, exclusive = journal.exclusive.bind(journal);
   const spy = vi.spyOn(journal, "exclusive").mockImplementation((action: any) => exclusive(async (current: any, save: any) => action(current, async () => {
     await save();
     if (current.outbound.find((out: any) => out.message.message_id === queued.messageId)?.status === "released")
       throw new Error("crash after released checkpoint");
   })));
-  await expect(f.runtime.recordPhaseFailure(qa, queued.messageId, "Actual assertion failure", true)).rejects.toThrow("crash after released checkpoint");
+  await expect(f.runtime.recordPhaseFailure(qa, queued.messageId, "Actual assertion failure", true, failureEvidence)).rejects.toThrow("crash after released checkpoint");
   spy.mockRestore();
   const reopened = f.restart(), beforeRecovery = await reopened.inspect() as any;
   expect(beforeRecovery.outbound.find((out: any) => out.message.message_id === queued.messageId).phaseFailure.applied).toBe(false);
@@ -315,11 +327,11 @@ it.skipIf(process.platform === "win32")("recovers the exact failed phase after a
   const failed = restored.outbound.find((out: any) => out.message.message_id === queued.messageId);
   expect(failed).toMatchObject({ status: "released", error: "policy_phase_failed:Actual assertion failure", phaseFailure: { applied: true } });
   expect(restored.outbound.filter((out: any) => out.parentAssignmentId === assignment.message.message_id)).toHaveLength(1);
-  expect(await reopened.recordPhaseFailure(qa, queued.messageId, "Actual assertion failure", true)).toMatchObject({ alreadyRecorded: true });
+  expect(await reopened.recordPhaseFailure(qa, queued.messageId, "Actual assertion failure", true, failureEvidence)).toMatchObject({ alreadyRecorded: true });
   await expect(reopened.requestPhaseVerification(binding, "run-1", "implement", "red", revision)).rejects.toThrow("already failed");
   const again = await reopened.inspect() as any;
   expect(again.outbound.filter((out: any) => out.parentAssignmentId === assignment.message.message_id)).toHaveLength(1);
-  await expect(reopened.recordPhaseFailure(qa, queued.messageId, "Different result", true)).rejects.toThrow("Conflicting");
+  await expect(reopened.recordPhaseFailure(qa, queued.messageId, "Different result", true, failureEvidence)).rejects.toThrow("Conflicting");
 });
 
 it("resumes the existing Developer after accepted Red was paused by a stale blocker, without reassigning or replacing evidence", async () => {

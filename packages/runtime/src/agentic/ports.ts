@@ -124,9 +124,15 @@ export interface DirectorRuntimePort {
   /** Durable, idempotent per park episode key. */
   upsertIssue(input: IssueInput): Promise<void>;
 }
+export type TaskEnvironmentReadiness =
+  | { status: "ready"; mode: "host_mounted_pinned"; checkedAt: string; checks: string[] }
+  | { status: "blocked"; checkedAt: string; code: string; reason: string; recovery: string };
 export interface AgenticRuntimePorts {
   /** Director session mode; absent in v2 (Conversation/Coordinator pane) sessions. */
   director?: DirectorRuntimePort;
+  /** Host-owned readiness for the accepted task's verification environment, before creating a Developer pane. */
+  preflightTaskEnvironment?: (input: { runId: string; taskId: string; attemptId: string; worktreePath: string;
+    specification: Specification; strategy: TestStrategy; ownedPaths: string[] }) => Promise<TaskEnvironmentReadiness>;
   /** Host-private routing; extension SDKs retain their own Core DAG and approval ownership. */
   workflowExtensionOwns?(runId: string): Promise<boolean>;
   workflowExtensionStarted?(runId: string): Promise<boolean>;

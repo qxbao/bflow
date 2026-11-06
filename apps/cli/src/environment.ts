@@ -900,16 +900,18 @@ export class EnvironmentLifecycle {
       // A provider dialog needs its exact live pane. Shutting it down makes the
       // advertised inspect/resolve/retry recovery impossible on every launch.
       const preserveStartupDialog = roleDispatchAttempted && startupError instanceof EnvironmentError &&
-        startupError.contractError.code === "conflict" && startupDetails !== null && typeof startupDetails === "object" &&
+        ["conflict", "cancelled"].includes(startupError.contractError.code) && startupDetails !== null && typeof startupDetails === "object" &&
         !Array.isArray(startupDetails) && startupDetails.sessionId === repository.sessionName &&
         typeof startupDetails.paneId === "string" && typeof startupDetails.reason === "string";
       if (preserveStartupDialog) {
-        const reason = startupDetails.reason;
+        const reason = typeof startupDetails.reason === "string" ? startupDetails.reason : "";
         cleanupOutcome = reason === "unowned_agent_name_collision"
           ? "was not attempted because an agent-name collision requires ownership reconciliation; session and panes were preserved"
-          : reason === "restored_terminal_not_ready"
-            ? "was not attempted because a restored role is still working or not ready; session and panes were preserved"
-            : "was not attempted because an interactive startup dialog requires a choice; session and panes were preserved";
+          : ["restored_terminal_not_ready", "restored_role_busy", "restored_role_interaction_required", "restored_role_recovering", "restored_role_not_ready"].includes(reason)
+            ? "was not attempted because a restored role is busy, recovering or not ready; session and panes were preserved"
+            : ["restored_identity_mismatch", "malformed_agent_observation", "agent_observation_failed", "agent_observation_unavailable", "restored_observation_cancelled"].includes(reason)
+              ? "was not attempted because live role identity/readiness could not be reconciled with the stored binding; session and panes were preserved"
+              : "was not attempted because an interactive startup dialog requires a choice; session and panes were preserved";
       }
       if (startupError !== undefined && cleanupEligible && !preserveStartupDialog) {
         try {

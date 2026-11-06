@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   SessionManifestSchema,
   pinRoleProfile,
@@ -1126,6 +1126,172 @@ describe("RolePaneManager Verification Suite", () => {
     const observed = await manager.inspectRoleHealth("chat"); expect(observed.ok && observed.value.status).toBe("agent_replaced");
     const retry = await manager.reconcileTopology(); expect(retry.ok).toBe(false);
     if (!retry.ok) expect(retry.error.message).toContain("Native session changed");
+  });
+
+  it("waits through one missing agent observation while the exact restored native session rehydrates", async () => {
+    const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+    const first = await manager.initializeTopology(); expect(first.ok).toBe(true); if (!first.ok) return;
+    const chat = first.value.panes.find(p => p.role === "conversation")!;
+    const agent = runner.agents.get("chat")!;
+    const nativeSession = { source: "herdr:codex", kind: "id", value: "rehydrating-chat-session" };
+    runner.agents.set("chat", { ...agent, terminalId: "term-restored", session: nativeSession });
+    const pane = runner.panes.get(chat.paneId)!;
+    runner.panes.set(chat.paneId, { ...pane, terminalId: "term-restored" });
+    const saved = await manager.getManifest(); expect(saved.ok && saved.value).toBeTruthy();
+    if (!saved.ok || !saved.value) return;
+    const bound = { ...saved.value, panes: saved.value.panes.map(p => p.paneId === chat.paneId
+      ? { ...p, terminalId: "term-original", session: nativeSession } : p) };
+    expect((await store.save(bound)).ok).toBe(true);
+    let transientReads = 0;
+    runner.onCommand = invocation => {
+      if (invocation.args[0] === "agent" && invocation.args[1] === "list") {
+        const agents = [...runner.agents.values()].map(agent => agent.name === "chat"
+          ? runner.toAgentJson({ ...agent, agentStatus: "unknown", interactiveReady: false, launchPending: true, session: undefined })
+          : runner.toAgentJson(agent));
+        return { exitCode: 0, stderr: "", stdout: JSON.stringify({ id: "1", result: { type: "agent_list", agents } }) };
+      }
+      if (invocation.args[0] === "agent" && invocation.args[1] === "get" && invocation.args[2] === chat.paneId && transientReads++ === 0) {
+        return { exitCode: 1, stdout: "", stderr: JSON.stringify({ id: "1", error: { code: "agent_not_found", message: "rehydrating" } }) };
+      }
+      return undefined;
+    };
+    const beforeStarts = runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start").length;
+    const result = await manager.reconcileTopology({ timeoutMs: 1_000 });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+    expect(transientReads).toBeGreaterThan(1);
+    expect(runner.calls.some(c => c.args[0] === "pane" && c.args[1] === "close" && c.args[2] === chat.paneId)).toBe(false);
+    expect(runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start")).toHaveLength(beforeStarts);
+  });
+
+  it("refuses a changed native identity on the refreshed restored-pane observation", async () => {
+    const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+    const first = await manager.initializeTopology(); expect(first.ok).toBe(true); if (!first.ok) return;
+    const chat = first.value.panes.find(p => p.role === "conversation")!;
+    const agent = runner.agents.get("chat")!;
+    const recorded = { source: "herdr:codex", kind: "id", value: "recorded-chat-session" };
+    runner.agents.set("chat", { ...agent, terminalId: "term-restored", session: recorded });
+    const saved = await manager.getManifest(); if (!saved.ok || !saved.value) throw new Error("Missing manifest");
+    expect((await store.save({ ...saved.value, panes: saved.value.panes.map(p => p.paneId === chat.paneId
+      ? { ...p, terminalId: "term-original", session: recorded } : p) })).ok).toBe(true);
+    const pane = runner.panes.get(chat.paneId)!;
+    runner.panes.set(chat.paneId, { ...pane, terminalId: "term-restored" });
+    runner.onCommand = invocation => invocation.args[0] === "agent" && invocation.args[1] === "get" && invocation.args[2] === chat.paneId
+      ? { exitCode: 0, stderr: "", stdout: JSON.stringify({ id: "1", result: { type: "agent_info", agent: runner.toAgentJson({
+          ...runner.agents.get("chat")!, session: { ...recorded, value: "foreign-chat-session" } }) } }) }
+      : undefined;
+    const beforeStarts = runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start").length;
+    const result = await manager.reconcileTopology({ timeoutMs: 500 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details).toMatchObject({ reason: "restored_identity_mismatch" });
+    expect(runner.calls.some(c => c.args[0] === "pane" && c.args[1] === "close" && c.args[2] === chat.paneId)).toBe(false);
+    expect(runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start")).toHaveLength(beforeStarts);
+  });
+
+  it("keeps a restored role with unreadable readiness evidence preserved until its fixed deadline", async () => {
+    const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+    const first = await manager.initializeTopology(); expect(first.ok).toBe(true); if (!first.ok) return;
+    const chat = first.value.panes.find(p => p.role === "conversation")!;
+    const agent = runner.agents.get("chat")!;
+    const nativeSession = { source: "herdr:codex", kind: "id", value: "unavailable-chat-session" };
+    runner.agents.set("chat", { ...agent, terminalId: "term-restored", session: nativeSession });
+    const saved = await manager.getManifest(); if (!saved.ok || !saved.value) throw new Error("Missing manifest");
+    expect((await store.save({ ...saved.value, panes: saved.value.panes.map(p => p.paneId === chat.paneId
+      ? { ...p, terminalId: "term-original", session: nativeSession } : p) })).ok).toBe(true);
+    const pane = runner.panes.get(chat.paneId)!; runner.panes.set(chat.paneId, { ...pane, terminalId: "term-restored" });
+    runner.onCommand = invocation => invocation.args[0] === "agent" && invocation.args[1] === "get" && invocation.args[2] === chat.paneId
+      ? { exitCode: 1, stdout: "", stderr: "not-json" } : undefined;
+    const beforeStarts = runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start").length;
+    const result = await manager.reconcileTopology({ timeoutMs: 80 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(JSON.stringify(result.error)).not.toContain("not-json");
+    expect(runner.calls.some(c => c.args[0] === "pane" && c.args[1] === "close" && c.args[2] === chat.paneId)).toBe(false);
+    expect(runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start")).toHaveLength(beforeStarts);
+  });
+
+  it("refuses a busy restored native role without replacing or closing it", async () => {
+    const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+    const first = await manager.initializeTopology(); expect(first.ok).toBe(true); if (!first.ok) return;
+    const chat = first.value.panes.find(p => p.role === "conversation")!;
+    const nativeSession = { source: "herdr:codex", kind: "id", value: "busy-chat-session" };
+    const agent = runner.agents.get("chat")!;
+    runner.agents.set("chat", { ...agent, terminalId: "term-restored", session: nativeSession, agentStatus: "working" });
+    const saved = await manager.getManifest(); if (!saved.ok || !saved.value) throw new Error("Missing manifest");
+    expect((await store.save({ ...saved.value, panes: saved.value.panes.map(p => p.paneId === chat.paneId
+      ? { ...p, terminalId: "term-original", session: nativeSession } : p) })).ok).toBe(true);
+    const pane = runner.panes.get(chat.paneId)!; runner.panes.set(chat.paneId, { ...pane, terminalId: "term-restored" });
+    const beforeStarts = runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start").length;
+    const result = await manager.reconcileTopology(); expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details).toMatchObject({ reason: "restored_terminal_not_ready", paneId: chat.paneId });
+    expect(runner.calls.some(c => c.args[0] === "pane" && c.args[1] === "close" && c.args[2] === chat.paneId)).toBe(false);
+    expect(runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start")).toHaveLength(beforeStarts);
+  });
+
+  it("preserves the exact restored pane when readiness reconciliation is cancelled", async () => {
+    const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+    const first = await manager.initializeTopology(); expect(first.ok).toBe(true); if (!first.ok) return;
+    const chat = first.value.panes.find(p => p.role === "conversation")!;
+    const nativeSession = { source: "herdr:codex", kind: "id", value: "cancelled-chat-session" };
+    const agent = runner.agents.get("chat")!;
+    runner.agents.set("chat", { ...agent, terminalId: "term-restored", session: nativeSession });
+    const saved = await manager.getManifest(); if (!saved.ok || !saved.value) throw new Error("Missing manifest");
+    expect((await store.save({ ...saved.value, panes: saved.value.panes.map(p => p.paneId === chat.paneId
+      ? { ...p, terminalId: "term-original", session: nativeSession } : p) })).ok).toBe(true);
+    runner.panes.set(chat.paneId, { ...runner.panes.get(chat.paneId)!, terminalId: "term-restored" });
+    const controller = new AbortController();
+    runner.onCommand = invocation => {
+      if (invocation.args[0] === "agent" && invocation.args[1] === "get" && invocation.args[2] === chat.paneId) controller.abort();
+      return undefined;
+    };
+    const beforeStarts = runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start").length;
+    const result = await manager.reconcileTopology({ signal: controller.signal, timeoutMs: 1_000 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details, JSON.stringify(result)).toMatchObject({ reason: "restored_observation_cancelled", paneId: chat.paneId });
+    expect(runner.calls.some(c => c.args[0] === "pane" && c.args[1] === "close" && c.args[2] === chat.paneId)).toBe(false);
+    expect(runner.calls.filter(c => c.args[0] === "agent" && c.args[1] === "start")).toHaveLength(beforeStarts);
+  });
+
+  it("retains replacement intent and preserves the old pane when the second env-role check sees a changed session", async () => {
+    const promptPath = resolve("agents/chat/system-prompt.md");
+    const launch = (id: string) => ({ provider: "codex" as const, argv: ["-c", `model_instructions_file=${JSON.stringify(promptPath)}`], env: { HOME: "/safe/home" },
+      launchId: id, launchFingerprint: `${id}-fingerprint` });
+    const socket = { request: async (method: string, params: Record<string, unknown>) => {
+      const args = method === "workspace.create"
+        ? ["workspace", "create", "--cwd", String(params["cwd"]), "--label", String(params["label"]), "--no-focus"]
+        : method === "tab.create"
+          ? ["tab", "create", "--workspace", String(params["workspace_id"]), "--cwd", String(params["cwd"]), "--label", String(params["label"]), "--no-focus"]
+          : ["pane", "split", String(params["target_pane_id"]), "--direction", String(params["direction"] ?? "right"), "--cwd", String(params["cwd"] ?? "/workspace"), "--no-focus"];
+      const outcome = await runner.run({ args });
+      return { ok: true as const, value: JSON.parse(outcome.stdout).result };
+    } };
+    const oldConfig = { ...config, roleConfigs: { chat: { launch: launch("chat-old") } } };
+    const initialManager = createRolePaneManager({ config: oldConfig, runner, store, socket, worktreeInspector: inspector });
+    const initial = await initialManager.initializeTopology(); expect(initial, JSON.stringify(initial)).toMatchObject({ ok: true }); if (!initial.ok) return;
+    const chat = initial.value.panes.find(p => p.role === "conversation")!;
+    const nativeSession = { source: "herdr:codex", kind: "id", value: "env-chat-session" };
+    runner.agents.set("chat", { ...runner.agents.get("chat")!, terminalId: "term-restored", session: nativeSession });
+    runner.panes.set(chat.paneId, { ...runner.panes.get(chat.paneId)!, terminalId: "term-restored" });
+    const saved = await initialManager.getManifest(); if (!saved.ok || !saved.value) throw new Error("Missing manifest");
+    expect((await store.save({ ...saved.value, panes: saved.value.panes.map(p => p.paneId === chat.paneId
+      ? { ...p, terminalId: "term-original", session: nativeSession } : p) })).ok).toBe(true);
+    const nextManager = createRolePaneManager({ config: { ...config, roleConfigs: { chat: { launch: launch("chat-new") } } },
+      runner, store, socket, worktreeInspector: inspector });
+    let gets = 0;
+    runner.onCommand = invocation => {
+      if (invocation.args[0] === "agent" && invocation.args[1] === "get" && invocation.args[2] === chat.paneId) {
+        gets++;
+        if (gets === 2) {
+          const current = { ...runner.agents.get("chat")!, session: { ...nativeSession, value: "changed-at-recheck" } };
+          return { exitCode: 0, stderr: "", stdout: JSON.stringify({ id: "1", result: { type: "agent_info", agent: runner.toAgentJson(current) } }) };
+        }
+      }
+      return undefined;
+    };
+    const result = await nextManager.reconcileTopology({ timeoutMs: 2_000 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details).toMatchObject({ reason: "restored_identity_mismatch", mismatchField: "native_session_identity" });
+    expect(runner.calls.filter(c => c.args[0] === "pane" && c.args[1] === "close" && c.args[2] === chat.paneId)).toHaveLength(0);
+    const after = await nextManager.getManifest(); expect(after.ok && after.value).toBeTruthy();
+    if (after.ok && after.value) expect(after.value.panes.find(p => p.paneId === chat.paneId)?.metadata?.["replacementLaunchIntent"]).toBeTruthy();
   });
 
   // Scenario 1: Khởi tạo topology (Initialize full topology)

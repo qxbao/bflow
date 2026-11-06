@@ -290,6 +290,33 @@ export class HostVerification {
     return { cwd: textField(value.cwd), base: textField(value.base), revision: textField(value.revision), command: whitespaceCommand,
       exitCode: Number(value.exitCode), output: value.output, diff: value.diff };
   }
+  /** Criterion summaries are derived only from host captured failed tests, static output or owner app-check results. */
+  private phaseFailureCriteria(specification: Specification, strategy: TestStrategy, measurements: readonly unknown[],
+    appSuites: readonly unknown[] = [], staticAnalyses: readonly unknown[] = [], runnerFailedNames: readonly string[] = []): { criterionId: string; passed: false; summary: string }[] {
+    const failedNames = new Set(measurements.flatMap(value => {
+      const results = record(value).testResults;
+      return Array.isArray(results) ? results.map(record).filter(item => item.passed === false && typeof item.name === "string").map(item => String(item.name)) : [];
+    }));
+    const appFailures = new Map(appSuites.flatMap(value => {
+      const criteria = record(value).criteria;
+      return Array.isArray(criteria) ? criteria.map(record).filter(item => item.passed === false && typeof item.criterionId === "string")
+        .map(item => [String(item.criterionId), typeof item.summary === "string" ? item.summary : "owner app check failed"] as const) : [];
+    }));
+    const staticFailure = staticAnalyses.find(value => record(value).exitCode !== 0);
+    const output: { criterionId: string; passed: false; summary: string }[] = [];
+    for (const criterion of specification.acceptanceCriteria) {
+      if (criterion.required === false || criterion.status === "waived") continue;
+      const mapped = strategy.criterionMappings.find(item => item.criterionId === criterion.id)?.testNames ?? [];
+      const failed = mapped.filter(name => [...failedNames].some(actual => includesTestIdentity([name], actual)) ||
+        runnerFailedNames.some(actual => includesTestIdentity([name], actual)));
+      const app = appFailures.get(criterion.id);
+      const summary = app ?? (failed.length ? `Failed mapped tests: ${failed.join(", ")}` :
+        ["static_analysis", "typecheck"].includes(criterion.verificationMethod) && staticFailure ?
+          `Static analysis failed: ${String(record(staticFailure).output ?? "diagnostic unavailable").slice(0, 300)}` : undefined);
+      if (summary) output.push({ criterionId: criterion.id, passed: false, summary: summary.slice(0, 400) });
+    }
+    return output.slice(0, 32);
+  }
   private async artifact(runId: string, taskId: string | undefined, body: unknown, artifactId?: string) {
     const bytes = Buffer.from(JSON.stringify(body)); const id = artifactId ?? `host-observation-${randomUUID()}`;
     return ArtifactReferenceSchema.parse(unwrap(await this.store().put({ options: ArtifactWriteOptionsSchema.parse({ artifactId: id, runId, ...(taskId ? { taskId } : {}), kind: "test-result", mediaType: "application/json",
@@ -1153,7 +1180,8 @@ export class HostVerification {
       if (digest(current) !== digest(captured)) throw new Error("Policy review source changed after inspection");
       const judgments = this.judgments(review.criteria, allCriteria.map(c => c.id));
       if (!judgments.every(c => c.passed)) {
-        const evidence = await this.artifact(runId, taskId, { phase, observation: current, policyReview: reviewAssignment.stamp, criteria: judgments, accepted: false });
+        const evidence = await this.artifact(runId, taskId, { runId, taskId, attemptId: record(assignment.handle).attemptId,
+          sourceRevision: revision, phase, observation: current, policyReview: reviewAssignment.stamp, criteria: judgments, accepted: false });
         throw new HostBehavioralFailure("Independent manual review failed; request repairs", evidence);
       }
       manual = { captured, criteria: judgments };
@@ -1172,7 +1200,11 @@ export class HostVerification {
         if (!(error instanceof NodeTapTestCodeFailure) && !(error instanceof RtkRequiredToolUnavailable && error.originalOutcome)) throw error;
         const observation = await this.capture(cwd, taskBase, revision);
         const originalOutcome = error instanceof NodeTapTestCodeFailure ? error.outcome : error.originalOutcome!;
-        const evidence = await this.artifact(runId, taskId, { phase, observation, verifiedBy: binding.agentId, accepted: false,
+        const attemptId = textField(record(assignment.handle).attemptId);
+        const runnerTestCodeFailure = error instanceof NodeTapTestCodeFailure && !(error instanceof RtkRequiredToolUnavailable);
+        const evidence = await this.artifact(runId, taskId, { runId, taskId, attemptId, sourceRevision: revision, phase, observation,
+          criteria: runnerTestCodeFailure ? this.phaseFailureCriteria(spec, strategy, [], [], [], error.failedTestNames) : [],
+          verifiedBy: binding.agentId, accepted: false,
           measurementFailure: { protocol: error instanceof BehavioralIdentityRepair ? error.protocol : error instanceof VitestTestCodeFailure ? "vitest_json" : error instanceof NodeTapTestCodeFailure ? "node_tap" : "rtk_required", summary: error.message,
             outcome: originalOutcome, ...(error instanceof NodeTapTestCodeFailure && error.rtk ? { rtk: error.rtk } : {}),
             ...(error instanceof RtkRequiredToolUnavailable ? { rawOutput: error.rawOutput ?? "", reasonCode: error.reasonCode } : {}) } });
@@ -1201,7 +1233,10 @@ export class HostVerification {
     }
     // Red needs a runner assertion failure: an app check can also fail because the app does not start, which proves no target behavior.
     if (phase === "red" ? !measured.some(item => item.targetFailure) : (measured.some(item => item.failed) || appFailed)) {
-      const evidence = await this.artifact(runId, taskId, { phase, observation, measurements: measured, verifiedBy: binding.agentId, accepted: false });
+      const evidence = await this.artifact(runId, taskId, { runId, taskId, attemptId: record(assignment.handle).attemptId, sourceRevision: revision, phase, observation,
+        criteria: this.phaseFailureCriteria(spec, strategy, measured, appSuites),
+        appCheckFindings: appSuites.flatMap(suite => suite.criteria.map(criterion => ({ suiteId: suite.suiteId, criterionId: criterion.criterionId,
+          summary: criterion.summary.slice(0, 400) }))), measurements: measured, verifiedBy: binding.agentId, accepted: false });
       for (const item of measured) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, evidence);
       throw new HostBehavioralFailure(phase === "red" ? "Red requires an independently observed assertion failure" : "Behavioral acceptance failed; request repairs",
         evidence, measured.flatMap(item => (item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.compressedOutput
@@ -1218,7 +1253,8 @@ export class HostVerification {
       staticAnalyses.push({ command, exitCode: analysis.exitCode, output: analysis.output });
     }
     if (staticAnalyses.some(item => item.exitCode !== 0)) {
-      const evidence = await this.artifact(runId, taskId, { phase, observation, measurements: measured, staticAnalyses, verifiedBy: binding.agentId, accepted: false });
+      const evidence = await this.artifact(runId, taskId, { runId, taskId, attemptId: record(assignment.handle).attemptId, sourceRevision: revision, phase, observation,
+        criteria: this.phaseFailureCriteria(spec, strategy, measured, appSuites, staticAnalyses), measurements: measured, staticAnalyses, verifiedBy: binding.agentId, accepted: false });
       for (const item of measured) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, evidence);
       throw new HostBehavioralFailure(`Static analysis failed: ${staticAnalyses.filter(item => item.exitCode !== 0).map(item => `${item.command}: ${item.output}`).join("; ")}`, evidence, []);
     }

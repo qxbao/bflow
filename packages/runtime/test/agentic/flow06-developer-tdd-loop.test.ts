@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
-import type { PaneBinding, Specification } from "@bflow/contracts";
+import { ArtifactWriteOptionsSchema, type PaneBinding, type Specification } from "@bflow/contracts";
 import { prepareDependencyBaseWorktree } from "../../src/agentic/dependency-base.js";
 import { HostDevelopment } from "../../src/agentic/host-development.js";
 import { AgenticJournal } from "../../src/agentic/journal.js";
@@ -63,11 +63,22 @@ describe("Flow 06 — Developer TDD Red/Green handshake, polyglot paths, rework 
     const leaseBefore = state.outbound.find((out: any) => out.message.message_id === assignment.message.message_id).lease;
 
     // QA records a repairable Red failure (e.g., syntax error or passing test instead of failing assertion).
+    const failureBytes = Buffer.from(JSON.stringify({ runId: "run-1", taskId: "implement",
+      attemptId: req1.message.payload.implementationAttemptId, sourceRevision: rev1, phase: "red",
+      observation: { revision: rev1 }, criteria: [{ criterionId: f.spec.acceptanceCriteria[0]!.id, passed: false,
+        summary: "Failed mapped test without a missing-behavior assertion" }], accepted: false }));
+    const failureArtifactId = `flow06-red-failure-${rev1.slice(0, 12)}`;
+    const failureEvidence = (await f.ports.artifactStore.put({ options: ArtifactWriteOptionsSchema.parse({ artifactId: failureArtifactId, runId: "run-1",
+      taskId: "implement", kind: "test-result", mediaType: "application/json",
+      expectedIntegrity: { checksum: { algorithm: "sha256", value: createHash("sha256").update(failureBytes).digest("hex") }, sizeBytes: failureBytes.length },
+      idempotencyKey: failureArtifactId }), content: (async function* () { yield failureBytes; })() }));
+    if (!failureEvidence.ok) throw new Error(`Could not store mapped Red failure evidence: ${failureEvidence.error.message}`);
     const failureReply = (await f.runtime.recordPhaseFailure(
       qaBinding,
       queued1.messageId,
       "Red test exited 0 without failing assertion",
-      true
+      true,
+      failureEvidence.value
     )) as any;
     expect(failureReply.status).toBe("implementing");
 
@@ -980,6 +991,8 @@ describe("Flow 06 — Developer TDD Red/Green handshake, polyglot paths, rework 
         ]
       }),
       taskHandover: async () => ({ available: false, reason: "none" }),
+      readPolicyFailureContext: async (_binding: PaneBinding, runId: string, taskId: string, attemptId: string) =>
+        ({ runId, taskId, attemptId, actionable: false, failures: [] }),
       withDeveloperWorkspace: async (_b: unknown, _r: string, _t: string, cb: (...args: any[]) => Promise<unknown>) =>
         cb(
           {

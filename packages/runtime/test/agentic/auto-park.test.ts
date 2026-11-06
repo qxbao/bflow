@@ -83,6 +83,20 @@ describe("selectAutoParkCandidates", () => {
     run.pendingAction!.invalidAssignment!.implementationAttemptId = "stale-attempt";
     expect(choose(s)).toEqual([]);
   });
+  it("does not auto-park a newer Core attempt because its pending blocker points to old writer A", () => {
+    const s = structuredClone(base), source = s.outbound.find(out => out.message.type === "task.assignment")!;
+    const current = s.snapshots["run-1"]!.tasks.find(task => task.taskId === "implement")!;
+    const currentAttempt = current.attemptId!;
+    source.attemptId = "writer-a";
+    if (source.handle) source.handle.attemptId = "writer-a";
+    current.attemptId = "writer-b";
+    s.runs[0]!.pendingAction!.sourceMessageId = source.message.message_id;
+    expect(choose(s)).toEqual([]);
+    // Uncertain old work remains a fence even though it cannot drive B's business park.
+    source.status = "unknown_delivery";
+    expect(selectAutoParkStopCandidates(s, policy, Date.now())).toEqual([]);
+    expect(currentAttempt).toBeTruthy();
+  });
   it("does not treat other failover holds as an exhausted provider budget", () => {
     const s = structuredClone(base);
     s.runs[0]!.tasks[0]!.failovers = [{ phase: "blocked", reason: "pending_human_gate", sourceHandle,

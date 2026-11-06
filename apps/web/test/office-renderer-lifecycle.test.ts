@@ -13,7 +13,8 @@ vi.mock('three', async () => {
     constructor() { f.gl = this; }
   } };
 });
-vi.mock('../src/features/office/scene/assets', () => ({ acquireModels: async () => ({ models: { furniture: {}, character: {} }, release: f.release }) }));
+// A running session draws the staff of every unoccupied desk, so the character model must be clonable.
+vi.mock('../src/features/office/scene/assets', () => ({ acquireModels: async () => { const { Group } = await import('three'); return { models: { furniture: {}, character: { scene: new Group(), animations: [] } }, release: f.release }; } }));
 vi.mock('../src/features/office/scene/stage', async importOriginal => {
   const { Group } = await import('three');
   const real = await importOriginal<typeof import('../src/features/office/scene/stage')>();
