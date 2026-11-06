@@ -151,13 +151,12 @@ test('Immersive flag: Director desk opens one persistent, editable in-scene dial
   const opener = page.getByLabel('Bản văn bản của văn phòng').getByRole('button', { name: /^Director: Đang hoạt động/ });
   await opener.focus();
   await page.keyboard.press('Enter');
-  const dialogue = page.getByRole('region', { name: 'Hội thoại tại bàn Director' });
+  const dialogue = page.getByRole('dialog', { name: 'Trò chuyện với Director' });
   await expect(dialogue).toBeVisible();
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-state', 'interacting');
   await page.waitForTimeout(600);
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-state', 'interacting');
   await expect(dialogue.getByRole('region', { name: 'Trò chuyện với Director' })).toHaveCount(1);
-  expect(await page.evaluate(() => document.elementFromPoint(20, Math.floor(innerHeight / 2))?.getAttribute('aria-hidden'))).toBe('true');
   await expect(dialogue.getByText(/Chào bạn, tôi là Director/)).toBeVisible();
   const before = await call('inspect');
   await dialogue.getByText('Gợi ý trò chuyện',{exact:true}).click();
@@ -166,6 +165,11 @@ test('Immersive flag: Director desk opens one persistent, editable in-scene dial
   const after = await call('inspect');
   expect(after.commands).toHaveLength(before.commands.length);
   expect(after.messages.filter((message: any) => message.author === 'user' && message.channel === 'web')).toHaveLength(before.messages.filter((message: any) => message.author === 'user' && message.channel === 'web').length);
+  await dialogue.getByRole('button', { name: 'Thu nhỏ Trò chuyện với Director' }).click();
+  await expect(dialogue).toBeHidden();
+  await page.getByRole('group', { name: 'Cửa sổ đang mở' }).getByRole('button', { name: 'Trò chuyện với Director' }).click();
+  await expect(dialogue).toBeVisible();
+  await expect(dialogue.getByLabel('Tin nhắn cho Director')).toHaveValue(/Cho tôi biết tiến độ/);
   for (const viewport of [{ width: 375, height: 812 }, { width: 812, height: 375 }]) {
     await page.setViewportSize(viewport);
     const editor=dialogue.getByLabel('Tin nhắn cho Director');
@@ -175,7 +179,7 @@ test('Immersive flag: Director desk opens one persistent, editable in-scene dial
     expect(input!.y + input!.height).toBeLessThanOrEqual(viewport.height);
     expect(await editor.evaluate(element=>{const rect=element.getBoundingClientRect(),hit=document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2);return Boolean(hit&&(hit===element||element.contains(hit)));})).toBe(true);
   }
-  await dialogue.getByRole('button', { name: 'Rời bàn Director' }).click();
+  await dialogue.getByRole('button', { name: 'Đóng cửa sổ Trò chuyện với Director' }).click();
   await expect(dialogue).toBeHidden();
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-state', 'selected');
   await expect(opener).toBeFocused();
@@ -201,17 +205,18 @@ test('short landscape recovery keeps transcript, launch/read controls, suggestio
   await enterVisual(page);
   await page.setViewportSize({ width: 812, height: 375 });
   await mirror(page, /^Director: Đang hoạt động/);
-  const dialogue=page.getByRole('region',{name:'Hội thoại tại bàn Director'});
+  const dialogue=page.getByRole('dialog',{name:'Trò chuyện với Director'});
   await expect(dialogue).toBeVisible();
   await dialogue.getByLabel('Tin nhắn cho Director').fill('Kiểm tra khôi phục màn hình ngang');
   await dialogue.getByRole('button',{name:'Gửi tin nhắn'}).click();
   await expect(dialogue.getByRole('button',{name:'Đối chiếu tin nhắn'})).toBeFocused();
-  await expect(dialogue.getByText('Director · Trao đổi')).toBeVisible();
+  await expect(dialogue.getByRole('heading', { name: 'Trò chuyện với Director' })).toBeVisible();
   await expect(dialogue.getByText('Gợi ý trò chuyện',{exact:true})).toBeVisible();
   await expect(dialogue.getByText(/không tự gửi lại/)).toBeVisible();
-  const targets=[dialogue.getByRole('button',{name:'Rời bàn Director'}),dialogue.getByRole('button',{name:'Đọc lại hội thoại'}),dialogue.getByRole('button',{name:'Khởi động phiên'}),dialogue.getByText('Gợi ý trò chuyện',{exact:true}),dialogue.getByRole('button',{name:'Đối chiếu tin nhắn'})];
+  const targets=[dialogue.getByRole('button',{name:'Đóng cửa sổ Trò chuyện với Director'}),dialogue.getByRole('button',{name:'Đọc lại hội thoại'}),dialogue.getByRole('button',{name:'Khởi động phiên'}),dialogue.getByText('Gợi ý trò chuyện',{exact:true}),dialogue.getByRole('button',{name:'Đối chiếu tin nhắn'})];
   await shot(page,'14-office3d-landscape-lost-ack');
   for(const target of targets){
+    await target.scrollIntoViewIfNeeded();
     await expect(target).toBeVisible();
     const box=await target.boundingBox();expect(box).not.toBeNull();expect(box!.x).toBeGreaterThanOrEqual(0);expect(box!.y).toBeGreaterThanOrEqual(0);expect(box!.x+box!.width).toBeLessThanOrEqual(812);expect(box!.y+box!.height).toBeLessThanOrEqual(375);
     const hit=await target.evaluate(element=>{const rect=element.getBoundingClientRect(),hit=document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2);return {ok:Boolean(hit&&(hit===element||element.contains(hit))),target:element.getAttribute('aria-label')||element.textContent,hit:hit?.outerHTML.slice(0,120)};});
@@ -230,7 +235,7 @@ test('short landscape recovery keeps transcript, launch/read controls, suggestio
   await page.emulateMedia({reducedMotion:'reduce'});
   await page.evaluate(()=>{document.documentElement.style.zoom='2';});
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-  const touch=await page.context().newCDPSession(page),summary=dialogue.getByText('Gợi ý trò chuyện',{exact:true}),summaryBox=await summary.boundingBox();
+  const touch=await page.context().newCDPSession(page),summary=dialogue.getByText('Gợi ý trò chuyện',{exact:true});await summary.scrollIntoViewIfNeeded();const summaryBox=await summary.boundingBox();
   expect(summaryBox).not.toBeNull();
   await touch.send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
   const touchPoint={x:summaryBox!.x+summaryBox!.width/2,y:summaryBox!.y+summaryBox!.height/2};

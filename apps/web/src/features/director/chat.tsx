@@ -29,7 +29,7 @@ export function DirectorChat({initialDraft='',handoffKey='',immersive=false}:{in
   },[last?.messageId,items.length]);
   const lastOwn=[...items].reverse().find(item=>item.author==='user');
   const replied=Boolean(lastOwn&&items.some(item=>item.author==='director'&&item.seq>lastOwn.seq));
-  return <section data-component="DirectorChat" aria-label="Trò chuyện với Director" className={`chat-thread m-0 min-w-0 bg-surface ${immersive?'flex h-full min-h-0 flex-col':''}`}>
+  return <section data-component="DirectorChat" aria-label="Trò chuyện với Director" className={`chat-thread m-0 min-w-0 bg-surface ${immersive?'director-dialogue flex h-full min-h-0 flex-col':''}`}>
     <header className={`flex flex-wrap items-center gap-3 border-b border-line px-4 py-3 ${immersive?'max-[480px]:gap-1 max-[480px]:px-2 max-[480px]:py-1':''}`}>
       <span aria-hidden="true" className={`flex size-10 shrink-0 items-center justify-center rounded-full bg-steel font-data font-semibold text-surface ${immersive?'max-[480px]:size-8':''}`}>D</span>
       <div className="min-w-0 grow basis-40"><h2 className="m-0 truncate text-base">Director</h2><DirectorPresenceStatus compact/></div>

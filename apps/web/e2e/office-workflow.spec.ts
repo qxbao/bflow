@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { startAcceptanceHost } from './acceptance-fixture';
-import { browserOptions, enterVisual, mirror, openDock, openProject, rail, sceneReady, stableCount, startDirectHost, type DirectHost } from './office-fixture';
+import { browserOptions, closeDecisionReviewIfOpen, enterVisual, mirror, openDock, openProject, rail, sceneReady, stableCount, startDirectHost, type DirectHost } from './office-fixture';
 // V8.2: the Classic direct-actions scenario (same W07 host) repeated only through the 3D mode: HUD rail, DOM mirror buttons, the panel and the HUD dock.
 // The Classic spec's final "Tổng quan" link expectation is stale at baseline and is deliberately not copied.
 test.use(browserOptions());
@@ -75,7 +75,7 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
   await Promise.all([page, other].map(tab => tab.getByRole('button', { name: 'Duyệt gói' }).evaluate((b: HTMLButtonElement) => b.click())));
   await expect.poll(async () => (await host.call('inspect')).phase).toBe('blocked');
   await other.close();
-  if (await page.getByRole('button', { name: 'Quay lại công việc' }).isVisible().catch(()=>false)) await page.getByRole('button', { name: 'Quay lại công việc' }).click();
+  await closeDecisionReviewIfOpen(page);
 
   // Resume follows availableActions; cancel needs a reason and the accepted state is not "stopped".
   await expect(page.getByRole('button', { name: 'Tiếp tục', exact: true })).toBeEnabled();
@@ -158,12 +158,12 @@ test('3D raycast smoke: clicking a character in the scene opens its inspector', 
         if (!box) continue;
         for (const dy of [14, 28, 44, 60]) {
           await page.mouse.click(box.x + box.width / 2, box.y + box.height + dy);
-          if (await page.getByRole('main').getByText('Mức tin cậy', { exact: true }).isVisible().catch(() => false)) return true;
+          if (await page.locator('#office-windows [data-window-kind="agent"]').isVisible().catch(() => false)) return true;
         }
       }
       return false;
     };
     await expect.poll(opened, { timeout: 20000, message: 'a click on a character must open the agent inspector' }).toBe(true);
-    await expect(page.locator('#main').getByRole('button', { name: /^Đóng cửa sổ/ })).toBeVisible();
+  await expect(page.locator('#office-windows [data-window-kind="agent"]').getByRole('button', { name: /^Đóng cửa sổ/ })).toBeVisible();
   } finally { await acceptance.close(); }
 });
