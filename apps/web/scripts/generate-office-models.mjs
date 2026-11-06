@@ -223,6 +223,9 @@ const mats = g => {
   g.material('tie', '#a3192b', { rough: 0.45 });
   g.material('lapel', '#1b2436', { rough: 0.5 });
   g.material('lips', '#d4677a', { rough: 0.5 });
+  g.material('frame', '#141416', { rough: 0.35 });
+  g.material('vest', '#18191d', { rough: 0.55 });
+  g.material('logo', '#f2c230', { rough: 0.4, emissive: '#3a2a04' });
 };
 
 // ---------- character.glb ----------
@@ -234,16 +237,22 @@ function character() {
     const x = k === 'l' ? -1 : 1;
     return [
       { name: `thigh_${k}`, t: [x * 0.075, 0, 0], parts: [limb(0.1, 0.17, 0.11, -0.065, 'trousers')], children: [
-        { name: `shin_${k}`, t: [0, -0.135, 0], parts: [limb(0.09, 0.19, 0.1, -0.085, 'trousers'), { g: place(box(0.105, 0.05, 0.15, 0.02), { t: [0, -0.2, 0.025] }), m: 'shoe' }] },
+        // Two dress-up children of the shin: `pants_<k>`, the trouser leg (default), and `calf_<k>`, a bare lower leg under shorts.
+        { name: `shin_${k}`, t: [0, -0.135, 0], parts: [{ g: place(box(0.105, 0.05, 0.15, 0.02), { t: [0, -0.2, 0.025] }), m: 'shoe' }], children: [
+          { name: `pants_${k}`, parts: [limb(0.09, 0.19, 0.1, -0.085, 'trousers')] },
+          { name: `calf_${k}`, parts: [limb(0.075, 0.19, 0.08, -0.085, 'skin')] },
+        ] },
       ] },
     ];
   };
-  // Each arm has two dress-up children: `sleeve_<k>` in the outfit colour (default) and `bare_<k>`, a skin arm for a sleeveless top.
+  // Each arm has three dress-up children: `sleeve_<k>` in the outfit colour (default), `bare_<k>`, a skin arm for a sleeveless top or a T-shirt, and
+  // `tsleeve_<k>`, the short T-shirt sleeve worn over the bare arm.
   const arm = k => {
     const x = k === 'l' ? -1 : 1;
     return { name: `arm_${k}`, t: [x * 0.2, 0.25, 0], parts: [{ g: place(ball(0.05, 0.05, 0.05, 8, 6), { t: [0, -0.215, 0] }), m: 'skin' }], children: [
       { name: `sleeve_${k}`, parts: [limb(0.085, 0.2, 0.09, -0.09, 'outfit', 0.03)] },
       { name: `bare_${k}`, parts: [limb(0.07, 0.2, 0.075, -0.09, 'skin', 0.03)] },
+      { name: `tsleeve_${k}`, parts: [limb(0.095, 0.085, 0.1, -0.03, 'outfit', 0.03)] },
     ] };
   };
   // Three dress-up hair styles under the head (the scene shows one): `hair_short` (dome with a straight fringe, the default), `hair_spiky`
@@ -261,10 +270,20 @@ function character() {
     ] },
     { name: 'hair_long', parts: [
       { g: place(ball(0.255, 0.2, 0.24, 14, 7), { t: [0, 0.255, -0.03] }), m: 'hair' },
-      { g: place(box(0.26, 0.05, 0.05, 0.02), { t: [-0.05, 0.315, 0.17], r: [0, 0, 10] }), m: 'hair' },
+      // fringe parted in the middle, sweeping down to either side
+      ...[-1, 1].map(x => ({ g: place(box(0.17, 0.06, 0.05, 0.02), { t: [x * 0.085, 0.31, 0.172], r: [0, 0, x * -16] }), m: 'hair' })),
       ...[-1, 1].map(x => ({ g: place(box(0.075, 0.36, 0.15, 0.03), { t: [x * 0.215, 0.1, 0.03] }), m: 'hair' })),
       { g: place(box(0.42, 0.38, 0.12, 0.05), { t: [0, 0.09, -0.15] }), m: 'hair' },
       { g: place(ball(0.2, 0.06, 0.06, 10, 6), { t: [0, -0.1, -0.15] }), m: 'hair' },
+    ] },
+    // Large round black glasses: a thin rim of fourteen short bars round each eye, a bridge and temples back to the ears.
+    { name: 'glasses', parts: [
+      ...[-1, 1].flatMap(x => Array.from({ length: 14 }, (_, i) => {
+        const a = (i / 14) * Math.PI * 2, r = 0.076;
+        return { g: place(box(0.036, 0.008, 0.008, 0), { t: [x * 0.09 + r * Math.cos(a), 0.155 + r * Math.sin(a), 0.236], r: [0, 0, (a * 180) / Math.PI + 90] }), m: 'frame' };
+      })),
+      { g: place(box(0.03, 0.008, 0.008, 0), { t: [0, 0.165, 0.236] }), m: 'frame' },
+      ...[-1, 1].map(x => ({ g: place(box(0.007, 0.007, 0.2, 0), { t: [x * 0.18, 0.16, 0.13], r: [0, x * 18, 0] }), m: 'frame' })),
     ] },
     // Feminine face details (lashes and lips), shown with `hair_long`.
     { name: 'face_f', parts: [
@@ -293,6 +312,31 @@ function character() {
               ...[-1, 1].map(x => ({ g: place(box(0.075, 0.03, 0.226, 0.01), { t: [x * 0.124, 0.262, 0] }), m: 'skin' })),
               { g: place(box(0.13, 0.06, 0.014, 0.006), { t: [0, 0.24, 0.111] }), m: 'skin' },
               { g: place(box(0.13, 0.04, 0.014, 0.006), { t: [0, 0.25, -0.111] }), m: 'skin' },
+            ] },
+            // `dress_shirt`: a white business shirt over the outfit torso (the scene colours the outfit white), worn with the long `sleeve_<k>`:
+            // a turned-down collar, a button placket and a breast pocket.
+            { name: 'dress_shirt', parts: [
+              ...[-1, 1].map(x => ({ g: place(box(0.075, 0.04, 0.016, 0.006), { t: [x * 0.045, 0.262, 0.114], r: [0, 0, x * -28] }), m: 'shirt' })),
+              { g: place(box(0.06, 0.04, 0.014, 0.005), { t: [0, 0.245, 0.111] }), m: 'skin' },
+              { g: place(box(0.022, 0.2, 0.012, 0.004), { t: [0, 0.13, 0.112] }), m: 'shirt' },
+              ...[0.2, 0.15, 0.1, 0.05].map(y => ({ g: place(ball(0.008, 0.008, 0.005, 6, 4), { t: [0, y, 0.12] }), m: 'lapel' })),
+              { g: place(box(0.06, 0.05, 0.01, 0.004), { t: [0.08, 0.17, 0.113] }), m: 'shirt' },
+              { g: place(box(0.3, 0.06, 0.2, 0.025), { t: [0, 0.272, -0.02] }), m: 'shirt' },
+            ] },
+            // `vest`: a black waistcoat over the `dress_shirt`, open in a V at the neck so the collar and placket show, with a row of buttons.
+            { name: 'vest', parts: [
+              { g: place(box(0.3, 0.17, 0.016, 0.006), { t: [0, 0.095, 0.121] }), m: 'vest' },
+              ...[-1, 1].map(x => ({ g: place(box(0.1, 0.1, 0.016, 0.006), { t: [x * 0.1, 0.215, 0.121], r: [0, 0, x * 12] }), m: 'vest' })),
+              { g: place(box(0.3, 0.25, 0.016, 0.006), { t: [0, 0.13, -0.121] }), m: 'vest' },
+              ...[-1, 1].map(x => ({ g: place(box(0.016, 0.25, 0.23, 0.006), { t: [x * 0.163, 0.13, 0] }), m: 'vest' })),
+              ...[0.16, 0.115, 0.07, 0.025].map(y => ({ g: place(ball(0.009, 0.009, 0.005, 6, 4), { t: [0, y, 0.131] }), m: 'logo' })),
+            ] },
+            // `tshirt`: a crew neck and a small logo on the left chest over the outfit torso, worn with the bare arms and `tsleeve_<k>`.
+            { name: 'tshirt', parts: [
+              { g: place(box(0.12, 0.03, 0.014, 0.006), { t: [0, 0.258, 0.111] }), m: 'skin' },
+              { g: place(box(0.15, 0.016, 0.016, 0.006), { t: [0, 0.24, 0.112] }), m: 'outfit' },
+              { g: place(box(0.03, 0.022, 0.01, 0.003), { t: [0.072, 0.2, 0.114] }), m: 'logo' }, { g: place(box(0.022, 0.03, 0.01, 0.003), { t: [0.088, 0.172, 0.114] }), m: 'logo' },
+              { g: place(box(0.02, 0.02, 0.01, 0.003), { t: [0.058, 0.176, 0.114] }), m: 'tag' },
             ] },
             { name: 'suit', parts: [
               { g: place(box(0.11, 0.17, 0.012, 0.004), { t: [0, 0.19, 0.112] }), m: 'shirt' },
@@ -361,6 +405,21 @@ function character() {
   });
   clip('walk', 0.8, (s, k) => stride(s, k, v => ({ arm_l: { r: [30 * v, 0, 4] }, arm_r: { r: [-30 * v, 0, -4] } })), 8);
   clip('carry', 0.8, (s, k) => stride(s, k, v => ({ arm_l: { r: [-78, 0, -4 + 2 * v] }, arm_r: { r: [-78, 0, 4 - 2 * v] } })), 8);
+  // Standing leisure clips of the Creative Space and the pool: a relaxed stand, leaning over a game (arcade buttons, a billiard shot)
+  // and treading water.
+  const standing = (extra = {}) => ({
+    hips: { t: [0, STAND_Y, 0], r: [0, 0, 0] }, thigh_l: { r: [0, 0, 0] }, thigh_r: { r: [0, 0, 0] }, shin_l: { r: [0, 0, 0] }, shin_r: { r: [0, 0, 0] },
+    arm_l: { r: [-4, 0, -6] }, arm_r: { r: [-4, 0, 6] }, head: { r: [0, 0, 0] }, torso: { r: [0, 0, 0] }, ...extra,
+  });
+  clip('stand', 3.0, (s, k) => merge(standing(), { hips: { t: [0, STAND_Y + 0.004 * s, 0], r: [0, 3 * s, 0] }, head: { r: [0, 18 * s, 0] }, arm_l: { r: [-4 + 3 * k, 0, -6] }, arm_r: { r: [-4 - 3 * k, 0, 6] } }));
+  clip('play', 0.6, (s, k) => merge(standing(), {
+    hips: { t: [0, STAND_Y - 0.012, 0] }, thigh_l: { r: [-8, 0, 0] }, thigh_r: { r: [-8, 0, 0] }, shin_l: { r: [14, 0, 0] }, shin_r: { r: [14, 0, 0] },
+    torso: { r: [16, 0, 0] }, head: { r: [-10, 4 * s, 0] }, arm_l: { r: [-74 + 8 * s, 0, 6] }, arm_r: { r: [-74 - 8 * s, 0, -6] },
+  }), 4);
+  clip('swim', 1.6, (s, k) => merge(standing(), {
+    hips: { t: [0, STAND_Y + 0.02 * s, 0] }, thigh_l: { r: [-20 * s, 0, 0] }, thigh_r: { r: [20 * s, 0, 0] }, shin_l: { r: [12, 0, 0] }, shin_r: { r: [12, 0, 0] },
+    head: { r: [-4, 10 * k, 0] }, arm_l: { r: [-30 + 12 * s, 0, -58 - 14 * k] }, arm_r: { r: [-30 + 12 * s, 0, 58 + 14 * k] },
+  }));
   return g.glb([root]);
 }
 
@@ -384,6 +443,16 @@ function furniture() {
   M('leather', '#4f2a1f', { rough: 0.45 }); M('leatherDark', '#2f1813', { rough: 0.5 }); M('cognac', '#9a5530', { rough: 0.5 }); M('cognacLight', '#b4703f', { rough: 0.55 });
   M('marble', '#f1ede6', { rough: 0.22 }); M('marbleVein', '#c8c1b4', { rough: 0.3 }); M('china', '#f8f6f1', { rough: 0.25 }); M('leatherGreen', '#2f5a45', { rough: 0.5 });
   M('lampGreen', '#2f7a52', { rough: 0.35, emissive: '#1d4d33' }); M('ocean', '#2f5f8f', { rough: 0.4 }); M('rugLux', '#7d2a33', { rough: 1 }); M('rugGold', '#c99a4e', { rough: 1 }); M('rugCream', '#ecdfc4', { rough: 1 }); M('bronze', '#8a6a3a', { rough: 0.4, metal: 0.5 });
+  // Director Team black leather and chrome; Developer red plastic stools; the Creative Space games and bar; the pool.
+  M('blackLeather', '#232428', { rough: 0.38 }); M('blackLeatherDark', '#111215', { rough: 0.45 }); M('chrome', '#c9ced6', { rough: 0.22, metal: 0.8 });
+  M('plasticRed', '#d8322a', { rough: 0.42 }); M('plasticRedDark', '#9e1f1a', { rough: 0.5 });
+  M('felt', '#1f7a4d', { rough: 0.95 }); M('feltDark', '#165c39', { rough: 0.95 }); M('ttBlue', '#2b5fa8', { rough: 0.6 }); M('net', '#f2f2ee', { rough: 0.8 });
+  M('glassTint', '#bfe0e6', { rough: 0.15, emissive: '#2a4a52' }); M('bottleGreen', '#2f6b3a', { rough: 0.2, emissive: '#10301a' }); M('bottleAmber', '#9a5a1c', { rough: 0.2, emissive: '#3a1e06' });
+  M('bottleClear', '#d7ecef', { rough: 0.15, emissive: '#3c5a60' }); M('wineRed', '#6a1c2a', { rough: 0.2, emissive: '#2a0810' });
+  M('neonPink', '#c43a8a', { rough: 0.45, emissive: '#4a0f32' }); M('neonTeal', '#1f8f9a', { rough: 0.45, emissive: '#0b3a40' });
+  M('arcadeScreen', '#7fe0ff', { rough: 0.2, emissive: '#3fa8d8' }); M('marqueeA', '#ffd34d', { rough: 0.3, emissive: '#c98f12' }); M('marqueeB', '#ff7ab8', { rough: 0.3, emissive: '#c2397a' });
+  M('poolTile', '#eef4f5', { rough: 0.5 }); M('poolCap', '#d9e3e6', { rough: 0.45 }); M('water', '#39b6e0', { rough: 0.1, emissive: '#1a6f96' }); M('laneBlue', '#1d5f9a', { rough: 0.3, emissive: '#0d3456' });
+  M('laneRope', '#f2d479', { rough: 0.5, emissive: '#5c4d1c' }); M('boardBlue', '#3a7fd0', { rough: 0.5 });
   M('bookNavy', '#2a3d66'); M('bookBurgundy', '#7a2333'); M('bookForest', '#2e5a3e'); M('bookTan', '#b08a5a'); M('bookBlack', '#2a2522');
   const b = (w, h, d, t, m, r) => ({ g: place(box(w, h, d, r ?? 0.02), { t }), m });
   const c = (rt, rb, h, t, m, seg = 10) => ({ g: place(cyl(rt, rb, h, seg), { t }), m });
@@ -488,19 +557,37 @@ function furniture() {
   ] });
   // Executive chair for the counter seat (origin at the desk centre like `chair`): tall tufted leather back, brass crown, armrests and a five-star base.
   // The back stands 0.44 further back than the plain chair so the large head clears it.
-  const ZC = -0.62, BACK_R = [-7, 0, 0], BACK_C = [0, 1.02, ZC - 0.44], qBack = euler(BACK_R);
-  const onBack = (w, h, d, l, m, r = 0.02) => { const o = rotate(qBack, l); return { g: place(box(w, h, d, r), { t: [BACK_C[0] + o[0], BACK_C[1] + o[1], BACK_C[2] + o[2]], r: BACK_R }), m }; };
-  add({ name: 'exec_chair', parts: [
-    onBack(0.7, 1.36, 0.16, [0, 0, 0], 'leather', 0.07), onBack(0.76, 0.05, 0.19, [0, 0.69, 0], 'gold', 0.012),
-    ...[-1, 1].map(s => onBack(0.03, 1.3, 0.17, [s * 0.355, 0, 0], 'leatherDark', 0.01)),
-    ...[-0.38, -0.12, 0.14, 0.4].flatMap((y, row) => [-0.22, 0, 0.22].map(x => onBack(0.028, 0.028, 0.014, [x + (row % 2 ? 0.11 : 0) * (x > 0 ? -1 : x < 0 ? 1 : 0), y, 0.083], 'leatherDark', 0))),
-    b(0.68, 0.13, 0.68, [0, 0.28, ZC - 0.1], 'leather', 0.05), { g: place(cyl(0.065, 0.065, 0.68, 10), { t: [0, 0.28, ZC + 0.24], r: [0, 0, 90] }), m: 'leather' },
-    ...[-1, 1].flatMap(s => [b(0.05, 0.24, 0.05, [s * 0.43, 0.45, ZC - 0.05], 'gold', 0.01), b(0.1, 0.06, 0.5, [s * 0.43, 0.6, ZC - 0.1], 'leatherDark', 0.025)]),
-    c(0.035, 0.035, 0.16, [0, 0.135, ZC - 0.1], 'gold', 8),
-    ...[0, 1, 2, 3, 4].flatMap(k => {
-      const a = k * 72 + 18, rad = (a * Math.PI) / 180, cx = Math.cos(rad), cz = Math.sin(rad);
-      return [{ g: place(box(0.34, 0.035, 0.05, 0.01), { t: [0.17 * cx, 0.055, ZC - 0.1 + 0.17 * cz], r: [0, -a, 0] }), m: 'gold' }, bl(0.03, 0.03, 0.03, [0.33 * cx, 0.03, ZC - 0.1 + 0.33 * cz], 'ink', 8, 6)];
-    }),
+  const ZC = -0.62, BACK_R = [-7, 0, 0], qBack = euler(BACK_R);
+  /**
+   * The executive chair in a leather, its darker piping and tufts, and a trim metal (crown, arm posts, column and five-star base). `backH` is the
+   * height of the back; its bottom stays on the seat.
+   */
+  const execChair = (leather, dark, trim, backH = 1.36) => {
+    const k = backH / 1.36, centre = [0, 0.34 + backH / 2, ZC - 0.44];
+    const onBack = (w, h, d, l, m, r = 0.02) => { const o = rotate(qBack, l); return { g: place(box(w, h, d, r), { t: [centre[0] + o[0], centre[1] + o[1], centre[2] + o[2]], r: BACK_R }), m }; };
+    return [
+      onBack(0.7, backH, 0.16, [0, 0, 0], leather, 0.07), onBack(0.76, 0.05, 0.19, [0, backH / 2 + 0.01, 0], trim, 0.012),
+      ...[-1, 1].map(s => onBack(0.03, backH - 0.06, 0.17, [s * 0.355, 0, 0], k < 1 ? trim : dark, 0.01)),
+      ...[-0.38, -0.12, 0.14, 0.4].flatMap((y, row) => [-0.22, 0, 0.22].map(x => onBack(0.028, 0.028, 0.014, [x + (row % 2 ? 0.11 : 0) * (x > 0 ? -1 : x < 0 ? 1 : 0), y * k, 0.083], dark, 0))),
+      b(0.68, 0.13, 0.68, [0, 0.28, ZC - 0.1], leather, 0.05), { g: place(cyl(0.065, 0.065, 0.68, 10), { t: [0, 0.28, ZC + 0.24], r: [0, 0, 90] }), m: leather },
+      ...[-1, 1].flatMap(s => [b(0.05, 0.24, 0.05, [s * 0.43, 0.45, ZC - 0.05], trim, 0.01), b(0.1, 0.06, 0.5, [s * 0.43, 0.6, ZC - 0.1], dark, 0.025)]),
+      c(0.035, 0.035, 0.16, [0, 0.135, ZC - 0.1], trim, 8),
+      ...[0, 1, 2, 3, 4].flatMap(n => {
+        const a = n * 72 + 18, rad = (a * Math.PI) / 180, cx = Math.cos(rad), cz = Math.sin(rad);
+        return [{ g: place(box(0.34, 0.035, 0.05, 0.01), { t: [0.17 * cx, 0.055, ZC - 0.1 + 0.17 * cz], r: [0, -a, 0] }), m: trim }, bl(0.03, 0.03, 0.03, [0.33 * cx, 0.03, ZC - 0.1 + 0.33 * cz], 'ink', 8, 6)];
+      }),
+    ];
+  };
+  add({ name: 'exec_chair', parts: execChair('leather', 'leatherDark', 'gold') });
+  // Director Team desk chair: the executive chair in black leather on chrome, with a lower back (top at 1.3) that frames the seated head without hiding the room.
+  add({ name: 'chair_black', parts: execChair('blackLeather', 'blackLeatherDark', 'chrome', 0.96) });
+  // Developer seat: a backless red plastic stool (origin at the desk centre like `chair`), seat top at the chair's height, four splayed legs with
+  // cross bars and the hand slot in the seat.
+  const SZ = -0.62, ST = 0.33;
+  add({ name: 'stool_red', parts: [
+    b(0.4, 0.045, 0.4, [0, ST, SZ], 'plasticRed', 0.06), b(0.42, 0.05, 0.42, [0, ST - 0.04, SZ], 'plasticRed', 0.03), b(0.14, 0.012, 0.04, [0, ST + 0.018, SZ], 'plasticRedDark', 0.01),
+    ...[-1, 1].flatMap(sx => [-1, 1].map(sz => ({ g: place(box(0.06, 0.32, 0.06, 0.015), { t: [sx * 0.15, 0.15, SZ + sz * 0.15], r: [-sz * 7, 0, sx * 7] }), m: 'plasticRed' }))),
+    ...[-1, 1].flatMap(s => [b(0.34, 0.03, 0.03, [0, 0.08, SZ + s * 0.165], 'plasticRed', 0.01), b(0.03, 0.03, 0.34, [s * 0.165, 0.08, SZ], 'plasticRed', 0.01)]),
   ] });
   // Task Board: the hero wall screen, 8.4 wide, with a kanban of cards and a console below so nothing floats.
   const cards = [];
@@ -715,6 +802,94 @@ function furniture() {
   add({ name: 'painting', parts: [
     b(1.0, 0.75, 0.04, [0, 1.75, 0.02], 'gold', 0.01), b(0.86, 0.6, 0.012, [0, 1.75, 0.045], 'bookNavy', 0.003), b(0.86, 0.2, 0.014, [0, 1.55, 0.047], 'bookForest', 0.003),
     b(0.5, 0.08, 0.016, [0.12, 1.66, 0.048], 'bookTan', 0.003), { g: place(cyl(0.07, 0.07, 0.014, 14), { t: [-0.2, 1.9, 0.048], r: [90, 0, 0] }), m: 'gold' },
+  ] });
+  // ---------- the Creative Space (bar, billiards, arcades) ----------
+  // Rounded bar counter, 8.0 x 1.4 overall, top at 1.05, the patrons' side facing +z: a straight front run 5.8 long whose ends curve back (radius 0.8)
+  // into two short legs that meet the wine wall behind, so the bartender works inside the curve. Panelled front with an amber strip and a brass
+  // foot rail; beer taps, shakers and glasses on the marble top.
+  const BT = 1.05, BA = 2.9, BR = 0.8, BF = 0.4, BW = 0.6;
+  const run = (x0, z0, x1, z1, extra = 0) => {
+    const len = Math.hypot(x1 - x0, z1 - z0) + extra, ry = (Math.atan2(-(z1 - z0), x1 - x0) * 180) / Math.PI, t = [(x0 + x1) / 2, 0, (z0 + z1) / 2];
+    return [
+      { g: place(box(len, BT - 0.06, BW, 0.02), { t: [t[0], (BT - 0.06) / 2, t[2]], r: [0, ry, 0] }), m: 'walnut' },
+      { g: place(box(len, 0.06, BW + 0.1, 0.02), { t: [t[0], BT - 0.03, t[2]], r: [0, ry, 0] }), m: 'marble' },
+    ];
+  };
+  const arc = [];
+  for (const sx of [-1, 1]) {
+    const pts = Array.from({ length: 7 }, (_, i) => { const f = (i / 6) * (Math.PI / 2); return [sx * (BA + BR * Math.sin(f)), BF - BR + BR * Math.cos(f)]; });
+    for (let i = 0; i < 6; i++) arc.push(...run(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], 0.06));
+    arc.push(...run(sx * (BA + BR), BF - BR, sx * (BA + BR), -0.7));
+  }
+  add({ name: 'bar_counter', parts: [
+    ...run(-BA, BF, BA, BF), ...arc,
+    b(2 * BA, 0.8, 0.02, [0, 0.52, BF + 0.305], 'walnutDark', 0.008), ...[-2, -1, 0, 1, 2].map(k => b(0.04, 0.72, 0.02, [k * 1.16, 0.52, BF + 0.318], 'walnut', 0.006)),
+    b(2 * BA, 0.02, 0.02, [0, 0.13, BF + 0.322], 'amber', 0.005), b(2 * BA, 0.012, 0.012, [0, BT - 0.065, BF + 0.352], 'gold', 0.004),
+    { g: place(cyl(0.025, 0.025, 2 * BA, 8), { t: [0, 0.2, BF + 0.43], r: [0, 0, 90] }), m: 'gold' }, ...[-2.4, 0, 2.4].map(x => b(0.03, 0.2, 0.14, [x, 0.1, BF + 0.37], 'gold', 0.006)),
+    b(0.5, 0.06, 0.1, [0, BT + 0.03, BF - 0.12], 'chrome', 0.01), b(0.08, 0.32, 0.08, [0, BT + 0.16, BF - 0.12], 'chrome', 0.01), b(0.5, 0.05, 0.08, [0, BT + 0.31, BF - 0.12], 'chrome', 0.01),
+    ...[-0.18, 0, 0.18].map(x => c(0.016, 0.02, 0.14, [x, BT + 0.4, BF - 0.12], 'walnutDark', 6)),
+    ...[-2.4, -1.7, -1.0, 1.0, 1.7, 2.4].map((x, i) => c(0.04, 0.034, 0.13, [x, BT + 0.065, BF + 0.12], i % 2 ? 'glassTint' : 'bottleAmber', 10)),
+    ...[-1, 1].map(s => c(0.04, 0.045, 0.18, [s * 0.7, BT + 0.09, BF - 0.15], 'chrome', 10)),
+  ] });
+  // Wine wall, 8.0 wide and kept low (1.3, bottles to about 1.6) so it does not hide the bar from the camera: a closed base cabinet with open
+  // shelving above it (bottles show from both sides), nine posts, two shelves lit by amber strips and a row of bottles on top; low-poly bottles
+  // keep the models small.
+  const bottleColors = ['bottleGreen', 'bottleAmber', 'bottleClear', 'wineRed'];
+  const wineBottles = [];
+  [0.47, 0.87, 1.29].forEach((y, row) => {
+    for (let i = 0; i < 24; i++) {
+      const bay = Math.floor(i / 3), x = -3.5 + bay - 0.28 + (i % 3) * 0.28, m = bottleColors[(i + row * 3) % 4], h = 0.22 + ((i * 7 + row) % 3) * 0.03;
+      wineBottles.push(c(0.036, 0.036, h, [x, y + h / 2, 0], m, 6), c(0.012, 0.022, 0.07, [x, y + h + 0.035, 0], m, 4));
+    }
+  });
+  add({ name: 'wine_wall', parts: [
+    b(8.0, 0.45, 0.4, [0, 0.225, 0], 'walnutDark', 0.02), ...[-3, -1, 1, 3].map(x => b(1.9, 0.34, 0.02, [x, 0.225, 0.205], 'walnut', 0.008)),
+    ...Array.from({ length: 9 }, (_, i) => b(0.05, 0.82, 0.38, [-4 + 0.025 + i * (7.95 / 8), 0.86, 0], 'walnut', 0.01)),
+    ...[0.46, 0.86].flatMap(y => [b(8.0, 0.03, 0.38, [0, y, 0], 'walnut', 0.006), b(7.9, 0.012, 0.012, [0, y - 0.022, 0.19], 'amber', 0.003)]),
+    b(8.04, 0.05, 0.42, [0, 1.26, 0], 'walnutDark', 0.01), b(7.9, 0.012, 0.012, [0, 1.23, 0.21], 'amber', 0.003), ...wineBottles,
+  ] });
+  add({ name: 'bar_stool', parts: [
+    c(0.19, 0.21, 0.03, [0, 0.015, 0], 'chrome', 14), c(0.028, 0.028, 0.68, [0, 0.36, 0], 'chrome', 8), c(0.16, 0.16, 0.018, [0, 0.3, 0], 'chrome', 14),
+    c(0.2, 0.19, 0.08, [0, 0.72, 0], 'blackLeather', 14), c(0.16, 0.18, 0.03, [0, 0.67, 0], 'chrome', 12),
+  ] });
+  // Billiard table, 2.2 x 1.2, felt at 0.8: walnut rails with brass corners, six pockets, a racked triangle and the cue ball, a cue lying on it.
+  const BH = 0.8;
+  add({ name: 'billiard_table', parts: [
+    b(2.2, 0.14, 1.2, [0, BH - 0.07, 0], 'walnut', 0.04), b(1.96, 0.02, 0.96, [0, BH + 0.005, 0], 'felt', 0.004),
+    ...[-1, 1].map(s => b(1.96, 0.045, 0.06, [0, BH + 0.025, s * 0.45], 'feltDark', 0.01)), ...[-1, 1].map(s => b(0.06, 0.045, 0.84, [s * 0.95, BH + 0.025, 0], 'feltDark', 0.01)),
+    b(2.0, 0.26, 1.0, [0, BH - 0.27, 0], 'walnutDark', 0.03), ...[-1, 1].flatMap(sx => [-1, 1].map(sz => b(0.15, BH - 0.3, 0.15, [sx * 0.9, (BH - 0.3) / 2, sz * 0.42], 'walnutDark', 0.03))),
+    ...[-1, 0, 1].flatMap(x => [-1, 1].map(z => c(0.05, 0.05, 0.03, [x * 0.99, BH + 0.012, z * 0.51], 'ink', 10))),
+    ...[-1, 1].flatMap(sx => [-1, 1].map(sz => b(0.09, 0.02, 0.09, [sx * 1.06, BH + 0.002, sz * 0.56], 'gold', 0.008))),
+    ...[[0, 0, 'lemon'], [1, -1, 'sky'], [1, 1, 'red'], [2, -2, 'lav'], [2, 0, 'ink'], [2, 2, 'mint'], [3, -1, 'coral'], [3, 1, 'bookGreen']].map(([r, k, m]) => bl(0.03, 0.03, 0.03, [0.45 + r * 0.052, BH + 0.045, k * 0.031], m, 8, 6)),
+    bl(0.03, 0.03, 0.03, [-0.5, BH + 0.045, 0], 'white', 8, 6), { g: place(cyl(0.008, 0.014, 1.3, 6), { t: [-0.1, BH + 0.06, 0.3], r: [0, 8, 90] }), m: 'wood' },
+  ] });
+  // Arcade cabinet, 0.75 x 0.7, the screen and controls facing +z: coloured sides, a lit marquee, a tilted screen, a joystick and buttons, a coin door.
+  const arcade = (side, marquee) => [
+    ...[-1, 1].map(s => b(0.06, 1.8, 0.7, [s * 0.345, 0.9, 0], side, 0.015)), b(0.63, 1.8, 0.6, [0, 0.9, -0.04], 'dark', 0.01), b(0.63, 0.85, 0.02, [0, 0.425, 0.31], side, 0.006),
+    { g: place(box(0.65, 0.06, 0.3, 0.012), { t: [0, 0.95, 0.3], r: [15, 0, 0] }), m: 'dark' },
+    c(0.012, 0.012, 0.08, [-0.15, 1.0, 0.31], 'metalDark', 6), bl(0.03, 0.03, 0.03, [-0.15, 1.05, 0.31], 'red', 8, 6),
+    ...[0.04, 0.12, 0.2].map((x, i) => c(0.022, 0.022, 0.02, [x, 0.99, 0.3], ['lemon', 'sky', 'coral'][i], 10)),
+    { g: place(box(0.58, 0.48, 0.03, 0.01), { t: [0, 1.32, 0.2], r: [-12, 0, 0] }), m: 'ink' }, { g: place(box(0.52, 0.42, 0.01, 0.003), { t: [0, 1.32, 0.217], r: [-12, 0, 0] }), m: 'arcadeScreen' },
+    b(0.63, 0.2, 0.08, [0, 1.7, 0.26], marquee, 0.01), b(0.16, 0.2, 0.01, [0, 0.45, 0.322], 'metal', 0.003), ...[-1, 1].map(s => b(0.03, 0.05, 0.006, [s * 0.04, 0.49, 0.329], 'ledAmber', 0.002)),
+  ];
+  add({ name: 'arcade_a', parts: arcade('neonPink', 'marqueeA') });
+  add({ name: 'arcade_b', parts: arcade('neonTeal', 'marqueeB') });
+  // ---------- the pool ----------
+  // Long raised pool, 7.0 x 2.6: tiled coping 0.4 high around an opaque water surface at 0.3 (it hides a swimmer below the waterline), three lane
+  // markings, two lane ropes and a chrome ladder in the middle of each long side.
+  add({ name: 'pool', parts: [
+    ...[-1, 1].map(s => b(7.0, 0.36, 0.25, [0, 0.18, s * 1.175], 'poolTile', 0.02)), ...[-1, 1].map(s => b(0.25, 0.36, 2.1, [s * 3.375, 0.18, 0], 'poolTile', 0.02)),
+    ...[-1, 1].map(s => b(7.06, 0.04, 0.29, [0, 0.38, s * 1.175], 'poolCap', 0.01)), ...[-1, 1].map(s => b(0.29, 0.04, 2.06, [s * 3.375, 0.38, 0], 'poolCap', 0.01)),
+    b(6.5, 0.02, 2.1, [0, 0.3, 0], 'water', 0.002), ...[-0.7, 0, 0.7].map(z => b(6.0, 0.004, 0.08, [0, 0.312, z], 'laneBlue', 0.001)),
+    ...[-0.35, 0.35].map(z => b(6.4, 0.025, 0.025, [0, 0.318, z], 'laneRope', 0.005)),
+    ...[-1, 1].flatMap(s => [-0.15, 0.15].flatMap(x => [c(0.016, 0.016, 0.55, [x, 0.6, s * 1.06], 'chrome', 6), b(0.03, 0.03, 0.18, [x, 0.87, s * 1.14], 'chrome', 0.008)])),
+  ] });
+  // Diving board: a tiled pedestal with steps at the back, chrome hand rails, and a 1.7 long plank reaching +z over the water.
+  add({ name: 'diving_board', parts: [
+    b(0.5, 0.5, 0.5, [0, 0.25, -0.05], 'poolTile', 0.02), b(0.54, 0.03, 0.54, [0, 0.51, -0.05], 'poolCap', 0.008),
+    ...[0.12, 0.27].map(y => b(0.4, 0.03, 0.1, [0, y, -0.34], 'poolCap', 0.008)), ...[-1, 1].map(s => b(0.06, 0.18, 0.36, [s * 0.18, 0.61, 0.02], 'chrome', 0.01)),
+    b(0.42, 0.06, 1.7, [0, 0.72, 0.65], 'boardBlue', 0.02), b(0.42, 0.01, 1.6, [0, 0.755, 0.7], 'net', 0.004), { g: place(cyl(0.04, 0.04, 0.4, 8), { t: [0, 0.66, 0.3], r: [0, 0, 90] }), m: 'chrome' },
+    ...[-1, 1].flatMap(s => [c(0.014, 0.014, 0.6, [s * 0.26, 0.82, -0.2], 'chrome', 6), { g: place(cyl(0.014, 0.014, 0.5, 6), { t: [s * 0.26, 1.1, 0.02], r: [90, 0, 0] }), m: 'chrome' }]),
   ] });
   return g.glb(nodes);
 }

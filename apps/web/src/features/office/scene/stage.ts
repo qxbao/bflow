@@ -9,9 +9,9 @@ import type { OfficeObjectId } from '../model/types';
 import { BOARD_X, DECOR, GRID_H, GRID_W, OBJECT_CELLS, PLANT_CELLS, ZONE_SIGNS, cellCentre, decorPlacement, deskCentre, deskPlan, partitionPieces, zoneAt, zones, type DeskPlan, type Vec2, type ZoneSign } from './world';
 
 export const BACKGROUND = '#dfe5e6';
-/** Light carpet with a distinct tint per room: warm oak, blue-grey, lavender, mint, pale stone and sand; the lobby is neutral. */
+/** Light carpet with a distinct tint per room: warm oak, blue-grey, lavender, mint, soft rose, sand and pool-deck tile; the lobby is neutral. */
 const FLOOR: Readonly<Record<string, string>> = {
-  lobby: '#d9d8d2', conversation: '#d9bc92', coordination: '#c9d6df', taskboard: '#d2d3e6', developer: '#cbe0d2', spare: '#e1ded7', verification: '#e6d6c2',
+  lobby: '#d9d8d2', conversation: '#d9bc92', coordination: '#c9d6df', taskboard: '#d2d3e6', developer: '#cbe0d2', creative: '#e8d3cc', verification: '#e6d6c2', pool: '#d3e6ea',
 };
 /** Sky fill of the full tier; the low tier (no spot pools, no shadows) lifts it a little. */
 export const HEMI_HIGH = 1.0, HEMI_LOW = 1.5;
@@ -132,6 +132,8 @@ export class Stage {
   private readonly dualDesks: Instances;
   private readonly pcDesks: Instances;
   private readonly chairs: Instances;
+  private readonly blackChairs: Instances;
+  private readonly stools: Instances;
   private readonly glowTex = glowTexture();
   private readonly glowMats: MeshBasicMaterial[] = [];
   private readonly glowGeo = new PlaneGeometry(1, 1);
@@ -163,6 +165,8 @@ export class Stage {
     this.pcDesks = make('desk_pc', CAP);
     this.dualDesks = make('desk_dual', CAP);
     this.chairs = make('chair', CAP);
+    this.blackChairs = make('chair_black', CAP);
+    this.stools = make('stool_red', CAP);
 
     // Walls: north (back), west and east. The south side stays open so the camera sees into the room.
     const wallOf = (name: string, list: Matrix4[]): void => { if (list.length) make(name, list.length).set(list); };
@@ -266,9 +270,11 @@ export class Stage {
     };
     glow('#6f9bd6', 0.14, 12.5, 5.2, new Vector3(BOARD_X, 2.05, 0.35), false);
     glow('#5d86c4', 0.08, 11, 5, new Vector3(BOARD_X, 0.02, 3.4), true);
-    for (const [zone, x, z, w, h] of [['conversation', 4.5, 4, 8, 7], ['coordination', 14, 4, 9, 7], ['verification', 23.5, 11.5, 10, 6]] as const) {
+    for (const [zone, x, z, w, h] of [['conversation', 4.5, 4, 8, 7], ['coordination', 14, 4, 9, 7], ['verification', 23.5, 11.5, 10, 6], ['creative', 14, 14, 9, 10]] as const) {
       this.pools.push({ zone, mesh: glow('#ff9d4d', 0.05, w, h, new Vector3(x, 0.02, z), true) });
     }
+    // The pool water throws a faint cyan light on its room.
+    this.pools.push({ zone: 'pool', mesh: glow('#5fd0f0', 0.09, 10, 5, new Vector3(23.5, 0.42, 17.2), true) });
     this.pools.push({ zone: 'developer', mesh: glow('#ff9d4d', 0.045, 9, 9, new Vector3(4.5, 0.02, 14), true) });
     this.deskGlowMat = new MeshBasicMaterial({ map: this.glowTex, color: '#6fb4e8', transparent: true, opacity: 0.1, blending: AdditiveBlending, depthWrite: false, fog: false });
     const dg = new InstancedMesh(this.glowGeo, this.deskGlowMat, CAP);
@@ -295,15 +301,16 @@ export class Stage {
       for (let y = y0; y < y1; y++) { bars.push(m4(x0, 0, y + 0.5, Math.PI / 2)); bars.push(m4(x1, 0, y + 0.5, Math.PI / 2)); }
     }
     this.trim.set(bars, bars.map(() => TRIM_TONE));
-    // The Conversation seat has its own executive chair (placed once in the constructor). Developers work at desktop PCs, QA / Reviewer at PCs
-    // with two monitors, everyone else at laptops.
-    const desks: Matrix4[] = [], pcDesks: Matrix4[] = [], dualDesks: Matrix4[] = [], chairs: Matrix4[] = [], glows: Matrix4[] = [];
+    // The Conversation seat has its own executive chair (placed once in the constructor). Developers work at desktop PCs on backless red plastic
+    // stools, QA / Reviewer at PCs with two monitors, everyone else at laptops; the Director Team sits in black leather executive chairs.
+    const desks: Matrix4[] = [], pcDesks: Matrix4[] = [], dualDesks: Matrix4[] = [], chairs: Matrix4[] = [], blackChairs: Matrix4[] = [], stools: Matrix4[] = [], glows: Matrix4[] = [];
     for (const cell of plan.desks) {
       const p = deskCentre(cell), zone = zoneAt(cell);
-      (zone === 'developer' ? pcDesks : zone === 'verification' ? dualDesks : desks).push(m4(p.x, 0, p.z)); chairs.push(m4(p.x, 0, p.z));
+      (zone === 'developer' ? pcDesks : zone === 'verification' ? dualDesks : desks).push(m4(p.x, 0, p.z));
+      (zone === 'developer' ? stools : zone === 'coordination' ? blackChairs : chairs).push(m4(p.x, 0, p.z));
       glows.push(new Matrix4().compose(new Vector3(p.x, 0.03, p.z + 0.1), new Quaternion().setFromEuler(new Euler(-Math.PI / 2, 0, 0)), new Vector3(1.9, 1.3, 1)));
     }
-    this.desks.set(desks); this.pcDesks.set(pcDesks); this.dualDesks.set(dualDesks); this.chairs.set(chairs);
+    this.desks.set(desks); this.pcDesks.set(pcDesks); this.dualDesks.set(dualDesks); this.chairs.set(chairs); this.blackChairs.set(blackChairs); this.stools.set(stools);
     this.deskGlow.count = Math.min(glows.length, this.deskGlow.instanceMatrix.count);
     glows.forEach((m, i) => { if (i < this.deskGlow.count) this.deskGlow.setMatrixAt(i, m); });
     this.deskGlow.instanceMatrix.needsUpdate = true;
