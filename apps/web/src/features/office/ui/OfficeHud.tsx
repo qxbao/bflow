@@ -220,7 +220,7 @@ export function OfficeHud(p: OfficeHudProps) {
       {(p.dockSummary.count > 0 || p.dockSummary.attention) && <button type="button" aria-expanded={operationsOpen} aria-controls={dockId} onClick={() => p.onDockOpen?p.onDockOpen():setDockOpen(open => !open)} className={`pointer-events-auto self-start rounded-lg px-3 py-1.5 text-xs ${panel} ${p.dockSummary.attention ? 'border-warning text-warning' : ''}`}>Thao tác đã gửi ({p.dockSummary.count})</button>}
       {/* Live region that exists before the state changes, so a screen reader hears the dock needing a look while it stays collapsed. */}
       <span role="status" className="sr-only" data-testid="dock-attention">{p.dockSummary.attention ? 'Có thao tác cần xem trong Thao tác đã gửi' : ''}</span>
-      <div id={dockId} hidden={Boolean(p.onDockOpen)||!dockOpen} data-hud-dock className="pointer-events-auto max-h-[40dvh] overflow-y-auto empty:hidden">{p.dock}</div>
+      {!p.onDockOpen&&<div id={dockId} hidden={!dockOpen} data-hud-dock className="pointer-events-auto max-h-[40dvh] overflow-y-auto empty:hidden">{p.dock}</div>}
       <div className={`flex flex-col items-stretch gap-2 ${p.panelOpen ? '' : 'md:flex-row md:items-end'} ${hideOnPhone}`}>
         <CameraBar>
           {cams.map(([zone, icon, label]) => <button type="button" key={zone} aria-label={label} title={label} className={camButton} onClick={() => { if (zone === 'overview') setDockOpen(false); p.onFocusZone(zone); }}><Icon name={icon}/><span className="max-sm:hidden">{label}</span></button>)}

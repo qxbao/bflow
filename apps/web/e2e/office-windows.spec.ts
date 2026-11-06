@@ -80,18 +80,16 @@ test('visual routes stay in the app window; tool windows restore and adapt at al
   const tileApp=await appWindow.boundingBox();
   expect(tileApp!.x).toBeGreaterThanOrEqual(300);
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveCSS('visibility','visible');
-  await page.getByRole('group',{name:'Góc nhìn camera'}).getByRole('button',{name:'Lập trình'}).click();
-  await page.waitForTimeout(500);
-  await shot(page,'900-tile-app-scene-after-camera-focus');
-  // A physical pointer click on the tile region's canvas is routed to the renderer while the app window remains open.
+  // Pan the camera with a physical pointer gesture in the scene strip beside the app window.
   const canvas=page.getByLabel('Cảnh văn phòng').locator('canvas');
-  await canvas.evaluate((node:HTMLCanvasElement)=>{node.dataset.tilePointerProbe='armed';});
-  const tilePoint={x:300,y:425};
-  const targetTag=await page.evaluate(({x,y})=>document.elementFromPoint(x,y)?.tagName,{...tilePoint});
-  expect(targetTag).toBe('CANVAS');
-  await page.mouse.click(tilePoint.x,tilePoint.y);
+  const pointerPoint={x:300,y:425};
+  expect(await page.evaluate(({x,y})=>document.elementFromPoint(x,y)?.tagName,pointerPoint)).toBe('CANVAS');
+  const beforePan=await canvas.screenshot();
+  await page.mouse.move(pointerPoint.x,pointerPoint.y);await page.mouse.down();await page.mouse.move(pointerPoint.x+32,pointerPoint.y+24,{steps:4});await page.mouse.up();
+  await page.waitForTimeout(200);
+  expect((await canvas.screenshot()).toString('base64')).not.toBe(beforePan.toString('base64'));
   await expect(appWindow).toBeVisible();
-  await expect(page.getByLabel('Cảnh văn phòng')).toHaveCSS('visibility','visible');
+  await shot(page,'900-tile-app-scene-after-canvas-pan');
   // The AccessibleOffice object button remains operable alongside the tiled route window.
   await mirror(page,/Bảng nhiệm vụ/);
   await expect(page).toHaveURL(/\/runs$/);

@@ -18,7 +18,6 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
   const csp: string[] = [];
   page.on('console', m => { if (/Content Security Policy/i.test(m.text())) csp.push(m.text()); });
   const effects = async (kind: string) => (await host.call('inspect')).effects.filter((k: string) => k === kind).length;
-  const settledApplied = page.getByText('Đã áp dụng thao tác. Trạng thái công việc được đọc riêng.').first();
 
   // Create: only the Overview panel from the rail; the double click reaches the host once.
   await rail(page, /^Tổng quan/).click();
@@ -40,9 +39,10 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
   await expect(page.getByLabel('Tên công việc')).toHaveValue('Tìm sách nhanh');
   // The recovered operation is tracked by its stored ID: wait until the host's ACK arrives (condition, not a sleep); the form then refuses a second create while it is tracked.
   await openDock(page);
-  await expect(settledApplied).toBeVisible({ timeout: 30000 });
+  await expect(page.getByRole('dialog',{name:'Thao tác đã gửi'}).getByText('Đã áp dụng thao tác. Trạng thái công việc được đọc riêng.').first()).toBeVisible({ timeout: 30000 });
   await expect(page.getByRole('button', { name: 'Tạo công việc', exact: true })).toBeDisabled();
   await stableCount(() => effects('create_request'), 1);
+  await page.getByRole('dialog',{name:'Thao tác đã gửi'}).getByRole('button',{name:'Thu nhỏ Thao tác đã gửi'}).click();
 
   // Intake clarification in the Overview panel, then the run clarification from the task board.
   await page.getByRole('button', { name: 'Tên và tác giả', exact: true }).click();
@@ -86,8 +86,9 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
   await page.getByRole('button', { name: 'Gửi yêu cầu hủy' }).click();
   await stableCount(() => effects('cancel'), 1);
   await openDock(page);
-  await expect(page.getByText('Yêu cầu hủy chưa xác nhận tiến trình đã dừng.')).toBeVisible();
+  await expect(page.getByRole('dialog',{name:'Thao tác đã gửi'}).getByText('Yêu cầu hủy chưa xác nhận tiến trình đã dừng.')).toBeVisible();
   expect((await host.call('inspect')).cancelled).toBe(false);
+  await page.getByRole('dialog',{name:'Thao tác đã gửi'}).getByRole('button',{name:'Thu nhỏ Thao tác đã gửi'}).click();
 
   // Restart the real HTTP server; re-pair and observe the same original operation ID from the 3D page.
   const before = await host.call('inspect');
@@ -98,9 +99,10 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
   await expect(page.getByRole('button', { name: '3D', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await sceneReady(page);
   await openDock(page);
-  await expect(page.getByText('Yêu cầu hủy chưa xác nhận tiến trình đã dừng.')).toBeVisible();
+  await expect(page.getByRole('dialog',{name:'Thao tác đã gửi'}).getByText('Yêu cầu hủy chưa xác nhận tiến trình đã dừng.')).toBeVisible();
   await host.call('configure', { cancelled: true });
-  await expect(page.getByText('Yêu cầu hủy đã áp dụng; chỉ trạng thái công việc mới xác nhận đã hủy.')).toBeVisible({ timeout: 10000 });
+  await expect(page.getByRole('dialog',{name:'Thao tác đã gửi'}).getByText('Yêu cầu hủy đã áp dụng; chỉ trạng thái công việc mới xác nhận đã hủy.')).toBeVisible({ timeout: 10000 });
+  await page.getByRole('dialog',{name:'Thao tác đã gửi'}).getByRole('button',{name:'Thu nhỏ Thao tác đã gửi'}).click();
   const after = await host.call('inspect');
   expect(after.operationCount).toBe(before.operationCount);
   expect(after.commands.map((c: any) => c.commandId)).toEqual(before.commands.map((c: any) => c.commandId));

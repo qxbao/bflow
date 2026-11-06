@@ -279,6 +279,8 @@
 .status-window-details dd { margin:0; overflow-wrap:anywhere; }
 @media (min-width:768px) and (max-width:1099px) {
   .office-3d .bwin-app:not(.hidden),.office-windows .bwin { left:38vw!important; top:0!important; width:62vw!important; height:calc(100dvh - 56px)!important; }
+  .office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .bwin-app:not(.hidden) { display:none!important; }
+  .office-3d .office-windows .bwin[data-active="true"] { left:38vw!important; top:0!important; width:62vw!important; height:calc(100dvh - 56px)!important; }
   .office-3d .office-windows .bwin:not([data-active="true"]):not([data-window-kind="repair"]) { display:none; }
   .office-3d .office-topbar > section[aria-label="Văn phòng Bflow"] { width:256px; }
 }
@@ -311,6 +313,7 @@
 .office-3d .office-rail button:hover { background:var(--win-panel); color:var(--win-ink); }
 @media (max-height:650px) and (min-width:768px) { .office-3d .office-rail { display:grid; grid-template-columns:repeat(2,72px); grid-auto-rows:72px; gap:8px; width:160px; } }
 .office-3d .office-cameras { border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); box-shadow:var(--win-shadow); }
+.office-3d .office-cameras { position:fixed; left:calc(var(--app-left,100vw) / 2 + 44px); bottom:64px; z-index:120; max-width:max(180px,calc(var(--app-left,100vw) - 96px)); margin:0; }
 .office-3d .office-cameras button { border:2px solid var(--win-ink); border-radius:0; background:#fff; color:var(--win-ink); box-shadow:var(--win-shadow-sm); }
 .office-3d .taskbar-quick-chat { flex:1; min-width:200px; max-width:380px; border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow-sm); }
 .office-3d .taskbar-quick-chat input { min-height:36px; border:0; border-radius:0; background:transparent; color:var(--win-ink); }
@@ -320,7 +323,7 @@
 .office-3d [data-component="FirstVisit"] { border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
 @media (max-height:650px) { .office-3d .office-rail { top:164px; bottom:72px; } }
 @media (max-height:840px) and (min-width:768px) { .office-3d .office-rail.office-rail-anchored { display:grid; grid-template-columns:repeat(2,72px); grid-auto-rows:72px; gap:8px; width:160px; } }
-@media (max-width:767px) { .office-3d [data-hud-bottom] { bottom:56px!important; } }
+@media (max-width:767px) { .office-3d [data-hud-bottom] { bottom:56px!important; } .office-3d .office-cameras { position:relative;left:auto;bottom:auto;max-width:100%; } }
 @media (max-width:767px) {
   .office-3d .bflow-taskbar { gap:3px; }
   .office-3d .taskbar-status { display:none; }

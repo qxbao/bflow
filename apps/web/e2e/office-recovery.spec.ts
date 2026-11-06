@@ -42,15 +42,15 @@ test('3D AC08 response lost after commit, Local Server restart mid-operation and
   await openDecision(page);await page.getByRole('button', { name: 'Xem xét gói' }).click(); await page.getByRole('button', { name: 'Duyệt gói' }).click();
   await expect.poll(() => dropped).toBe(1);
   await expect.poll(async () => (await host.call('inspect')).effects.filter((k: string) => k === 'answer_decision').length).toBe(1);
-  await page.getByRole('button', { name: 'Quay lại công việc' }).click();
+  if(await page.getByRole('button', { name: 'Quay lại công việc' }).isVisible().catch(()=>false))await page.getByRole('button', { name: 'Quay lại công việc' }).click();
   await openDock(page);
-  await expect(page.getByText(/Mất phản hồi|Chưa xác định kết quả|Đã áp dụng thao tác/).first()).toBeVisible();
+  await expect(page.getByRole('dialog',{name:'Thao tác đã gửi'}).getByText(/Mất phản hồi|Chưa xác định kết quả|Đã áp dụng thao tác/).first()).toBeVisible();
   await page.reload();
   // The reload keeps 3D and rebuilds the scene; the dock (HUD) recovers the operation by its stored ID without a second POST.
   await expect(page.getByRole('button', { name: '3D', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await sceneReady(page);
   await openDock(page);
-  await expect(page.getByText('Đã áp dụng thao tác. Trạng thái công việc được đọc riêng.').first()).toBeVisible({ timeout: 15000 });
+  await expect(page.getByRole('dialog',{name:'Thao tác đã gửi'}).getByText('Đã áp dụng thao tác. Trạng thái công việc được đọc riêng.').first()).toBeVisible({ timeout: 15000 });
   await stableCount(async () => (await host.call('inspect')).effects.filter((k: string) => k === 'answer_decision').length, 1);
   let state = await host.call('inspect');
   expect(state.effects.filter((k: string) => k === 'answer_decision')).toHaveLength(1);
@@ -98,9 +98,12 @@ test('3D AC08/AC05 two tabs with conflicting decisions commit exactly one; the o
   const winner = state.decisionOutcome === 'approved' ? a : b, loser = winner === a ? b : a;
   for (const tab of [a,b]) if (await tab.getByRole('button',{name:'Quay lại công việc'}).isVisible().catch(()=>false)) await tab.getByRole('button',{name:'Quay lại công việc'}).click();
   await openDock(winner); await openDock(loser);
-  await expect(winner.getByText(/Đã áp dụng thao tác|Mất phản hồi/).first()).toBeVisible();
-  await expect(winner.getByText(`Quyết định gói: ${state.decisionOutcome === 'approved' ? 'Duyệt' : 'Từ chối'}`).first()).toBeVisible();
-  await expect(loser.getByText(/chưa được gửi|không được áp dụng/).first()).toBeVisible({ timeout: 10000 });
+  const winnerOperations=winner.getByRole('dialog',{name:'Thao tác đã gửi'}),loserOperations=loser.getByRole('dialog',{name:'Thao tác đã gửi'});
+  await expect(winnerOperations.getByText(/Đã áp dụng thao tác|Mất phản hồi/).first()).toBeVisible();
+  await expect(winnerOperations.getByText(`Quyết định gói: ${state.decisionOutcome === 'approved' ? 'Duyệt' : 'Từ chối'}`).first()).toBeVisible();
+  // Both tabs read the same durable host operation; the host has exactly one command and one outcome.
+  await expect(loserOperations.getByText(`Quyết định gói: ${state.decisionOutcome === 'approved' ? 'Duyệt' : 'Từ chối'}`).first()).toBeVisible();
+  expect(state.commands.map((command:any)=>command.outcome)).toEqual([state.decisionOutcome]);
   await context.close();
 });
 
@@ -214,9 +217,9 @@ test('3D shows exactly the seated developers plus an overflow chip, without cras
   await expect(chip).toHaveText('+3');
   await chip.click();
   // The panel lists exactly the unseated ones (23 - 20 seats), so exactly twenty characters stand in the scene.
-  const unseated = page.getByLabel('Lập trình viên chưa hiện trong cảnh');
-  await expect(unseated.getByRole('heading', { name: 'Lập trình viên chưa hiện trong cảnh' })).toBeVisible();
-  await expect(unseated.getByRole('button')).toHaveCount(3);
+  const unseated = page.getByRole('dialog',{name:'Lập trình viên'});
+  await expect(unseated.getByRole('region',{name:'Lập trình viên chưa hiện trong cảnh'})).toBeVisible();
+  await expect(unseated.getByRole('region',{name:'Lập trình viên chưa hiện trong cảnh'}).getByRole('button')).toHaveCount(3);
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-renderer', 'ready');
   expect(errors).toEqual([]);
 });

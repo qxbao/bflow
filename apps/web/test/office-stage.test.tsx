@@ -43,14 +43,14 @@ afterEach(() => { cleanup(); document.querySelector('.director-dialogue.test-anc
 
 describe('OfficeStage lifecycle', () => {
   test('projects the Director anchor imperatively from the existing world label', async () => {
-    const panel=document.createElement('section');panel.className='director-dialogue test-anchor';document.body.appendChild(panel);
+    const panel=document.createElement('section');panel.dataset.windowKind='director-chat';panel.dataset.display='normal';panel.className='test-anchor';document.body.appendChild(panel);
     render(<OfficeStage model={model()} onSelect={noop} immersive createRenderer={factory}/>);
     await settle();
     const labels=fakes[0]!.setLabelSink.mock.calls[0]?.[0] as ((items:{id:string;kind:'agent';text:string;x:number;y:number}[])=>void)|undefined;
     expect(labels).toBeTypeOf('function');
     act(()=>labels!([{id:'director',kind:'agent',text:'Director',x:300,y:180}]));
     const connector=document.querySelector<SVGSVGElement>('body > svg');expect(connector).not.toBeNull();expect(connector!.style.display).toBe('');
-    panel.style.display='none';act(()=>window.dispatchEvent(new Event('bflow:director-dialogue-state')));
+    panel.dataset.display='minimized';act(()=>window.dispatchEvent(new Event('bflow:director-dialogue-state')));
     expect(connector!.style.display).toBe('none');
   });
   test('context loss falls back without unmounting drafts', async () => {
