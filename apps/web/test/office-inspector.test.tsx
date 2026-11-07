@@ -195,8 +195,12 @@ test('shows the agent terminal text and a link to all staff', async () => {
 
 test('ac-2: DirectorInspector.tsx và AgentInspector.tsx sử dụng câu chữ tiếng Việt tự nhiên, rõ nghĩa và vẫn giữ đầy đủ các nhãn chẩn đoán cần thiết.', async () => {
   render(<DirectorInspector onChat={() => {}} onQueue={() => {}} />);
+  expect(screen.queryByText(/Director chạy trực tiếp từ phiên làm việc của bạn/)).not.toBeNull();
   expect(screen.getByText(/Director chạy trực tiếp từ phiên làm việc của bạn/)).toBeTruthy();
   mount({ apiVersion: 1, items: [] });
+  await screen.findByText(/Chưa có hoạt động nào/);
+  expect(screen.queryByText(/Chưa có hoạt động nào được ghi nhận cho phiên này/)).not.toBeNull();
+  expect(screen.queryByText(/Nhật ký ghi theo từng vai trò trong toàn bộ công việc, không riêng nhân viên này/)).not.toBeNull();
   expect(await screen.findByText(/Chưa có hoạt động nào được ghi nhận cho phiên này/)).toBeTruthy();
   expect(screen.getByText(/Nhật ký ghi theo từng vai trò trong toàn bộ công việc, không riêng nhân viên này/)).toBeTruthy();
 });
