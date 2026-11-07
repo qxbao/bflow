@@ -2328,15 +2328,27 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         toolActions, toolActionsNote: "Host-resolved scoped tool actions for this role. Invoke only when the listed trigger applies; grants do not require every action to be used. No Gateway credential or executable identity is included.",
         ...(conflictResolution ? { kind: "conflict_resolution", conflictResolution } : {}),
         assignments: outbound.map(out => ({ ...out, envelopeDigest: digest(out.message) })), runs: assignedRuns };
+      const fitAgyAssignmentReply = (candidate: ReturnType<typeof json>): ReturnType<typeof json> => {
+        if (!exceedsAgyInlineReply(candidate)) return candidate;
+        const activeOnly = compactAssignmentContext(fullReply, { view: "active_only", surveyView: "omit", includeReleased: false });
+        if (!exceedsAgyInlineReply(activeOnly)) return activeOnly;
+        const withoutTools = json({ ...record(activeOnly), toolActions: undefined, toolActionsNote: undefined });
+        if (!exceedsAgyInlineReply(withoutTools)) return withoutTools;
+        const assignmentsOnly = json({
+          assignments: record(activeOnly).assignments,
+          ...(resumeContext !== undefined ? { resumeContext } : {})
+        });
+        if (!exceedsAgyInlineReply(assignmentsOnly)) return assignmentsOnly;
+        return resumeContext !== undefined ? json({ resumeContext }) : activeOnly;
+      };
       if (query.view !== undefined && query.view !== "full" || query.surveyView !== undefined && query.surveyView !== "full" || query.includeReleased !== undefined) {
         const compact = compactAssignmentContext(fullReply, query);
-        if (providerForRole(role) === "agy" && resumeContext !== undefined && exceedsAgyInlineReply(compact)) return json({ resumeContext });
+        if (providerForRole(role) === "agy") return fitAgyAssignmentReply(compact);
         return compact;
       }
       if (providerForRole(role) === "agy" && exceedsAgyInlineReply(fullReply)) {
         const compact = compactAssignmentContext(fullReply, { view: "compact", surveyView: "full", includeReleased: false });
-        if (resumeContext !== undefined && exceedsAgyInlineReply(compact)) return json({ resumeContext });
-        return compact;
+        return fitAgyAssignmentReply(compact);
       }
       return json(fullReply);
     }

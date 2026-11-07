@@ -25,12 +25,27 @@ export function taskHandoverView(value: unknown, input: unknown = {}, bounded = 
   if (offset > 0 && !query.cursor) throw new Error("handover_cursor_required");
   if (offset > bytes.length || offset < bytes.length && (bytes[offset]! & 0xc0) === 0x80) throw new Error("handover_offset_invalid");
   if (query.view !== "page" && offset === 0 && (!bounded || bytes.length <= AGY_INLINE_REPLY_BYTES)) return json(value);
-  // JSON escaping may double page bytes; 1600 leaves room for cursor, warning and instructions within 8500 bytes.
-  let end = Math.min(offset + 1600, bytes.length);
+  // Fit the largest valid UTF-8 slice within AGY_INLINE_REPLY_BYTES after JSON serialization.
+  let end = Math.min(offset + 5600, bytes.length);
   while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
-  return json({ code: "handover_context_paged", contextTrust: "untrusted_handover_with_host_authority", cursor, offset,
-    nextOffset: end < bytes.length ? end : null, totalBytes: bytes.length, page: bytes.subarray(offset, end).toString("utf8"),
-    instruction: pageInstruction, warning: HANDOVER_WARNING });
+  const makePage = (sliceEnd: number) => ({
+    code: "handover_context_paged",
+    contextTrust: "untrusted_handover_with_host_authority",
+    cursor,
+    offset,
+    nextOffset: sliceEnd < bytes.length ? sliceEnd : null,
+    totalBytes: bytes.length,
+    page: bytes.subarray(offset, sliceEnd).toString("utf8"),
+    instruction: pageInstruction,
+    warning: HANDOVER_WARNING
+  });
+  let pageObj = makePage(end);
+  while (end > offset + 256 && Buffer.byteLength(JSON.stringify(pageObj), "utf8") > AGY_INLINE_REPLY_BYTES) {
+    end = Math.max(offset + 256, end - 512);
+    while (end > offset && (bytes[end]! & 0xc0) === 0x80) end--;
+    pageObj = makePage(end);
+  }
+  return json(pageObj);
 }
 /** Automatic assignment/workspace context points at the complete paged reader for bounded providers. */
 export function deferredTaskHandover(value: unknown): JsonValue {

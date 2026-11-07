@@ -2,12 +2,12 @@ import { execFile, spawn } from "node:child_process";
 import { mkdir, mkdtemp, lstat, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { QualityGateDefinitionSchema, type ArtifactReference, type AgentRole, type JsonValue, type QualityGateDefinition } from "@bflow/contracts";
 import { createQualityCommandRunner, type QualityCommandOutcome } from "@bflow/quality-gates";
-import { json, record, textField } from "./journal.js";
+import { digest, json, record, textField } from "./journal.js";
 import { BehavioralIdentityMismatch, BehavioralIdentityRepair, buildRunnerNamePattern, NodeTapTestCodeFailure, parseNodeTap } from "./node-tap.js";
 import { parseVitestJson, VitestTestCodeFailure } from "./vitest-json.js";
 import { assertCheckoutDependencyRoot, sandboxBehavior } from "./behavioral-sandbox.js";
@@ -337,6 +337,49 @@ function outputTail(outcome: QualityCommandOutcome): string {
   const stderr = outcome.stderr.trim().slice(-1_000), stdout = outcome.stdout.trim().slice(-1_000);
   return [stderr ? `stderr: ${stderr}` : "", stdout ? `stdout: ${stdout}` : ""].filter(Boolean).map(part => ` ${part}`).join("");
 }
+
+const MAX_PREPARE_CACHE_ENTRIES = 4;
+const MAX_PREPARE_CACHE_BYTES = 64 * 1024 * 1024;
+const prepareArtifactCache = new Map<string, ReadonlyMap<string, Buffer>>();
+const latestPrepareByTree = new Map<string, ReadonlyMap<string, Buffer>>();
+const compilerOutcomeCache = new Map<string, QualityCommandOutcome>();
+
+async function savePrepareArtifacts(checkout: string, cacheKey: string, treeHash: string): Promise<void> {
+  try {
+    const raw = await verificationGit(checkout, ["ls-files", "--others", "-i", "--exclude-standard", "-z"]);
+    const paths = raw.split("\0").filter(p => p.length > 0 && !p.startsWith("/") && !p.split("/").includes("..") && !/(^|\/)node_modules(\/|$)/.test(p));
+    const files = new Map<string, Buffer>();
+    let totalBytes = 0;
+    for (const rel of paths) {
+      const full = join(checkout, rel);
+      const st = await lstat(full).catch(() => undefined);
+      if (!st?.isFile() || st.size > 8 * 1024 * 1024) continue;
+      if (totalBytes + st.size > MAX_PREPARE_CACHE_BYTES) return;
+      const content = await readFile(full);
+      files.set(rel, content);
+      totalBytes += content.length;
+    }
+    if (prepareArtifactCache.size >= MAX_PREPARE_CACHE_ENTRIES) {
+      const oldest = prepareArtifactCache.keys().next().value;
+      if (oldest !== undefined) prepareArtifactCache.delete(oldest);
+    }
+    prepareArtifactCache.set(cacheKey, files);
+    if (latestPrepareByTree.size >= MAX_PREPARE_CACHE_ENTRIES) {
+      const oldestTree = latestPrepareByTree.keys().next().value;
+      if (oldestTree !== undefined) latestPrepareByTree.delete(oldestTree);
+    }
+    latestPrepareByTree.set(treeHash, files);
+  } catch {
+    // Best-effort cache; never fail verification if caching fails.
+  }
+}
+
+async function restorePrepareArtifacts(checkout: string, files: ReadonlyMap<string, Buffer>): Promise<void> {
+  const dirs = new Set<string>();
+  for (const rel of files.keys()) dirs.add(dirname(join(checkout, rel)));
+  for (const dir of dirs) await mkdir(dir, { recursive: true });
+  await Promise.all([...files.entries()].map(([rel, content]) => writeFile(join(checkout, rel), content)));
+}
 export interface RegressionMeasurement {
   sourceRevision: string; commandId: string; testBlobs: Record<string, string>;
   observation: RegressionObservation; outcome: QualityCommandOutcome;
@@ -400,20 +443,29 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
     // Seatbelt cannot mount a tmpfs, so the sandboxed process writes only to a dedicated scratch sibling of the checkout.
     if (process.platform === "darwin") { const scratch = join(temporary, "tmp"); await mkdir(scratch, { mode: 0o700 }); env["TMPDIR"] = scratch; env["HOME"] = scratch; }
     const maxOutputBytes = command.maxOutputBytes ?? 1_048_576;
+    const treeHash = (await verificationGit(checkout, ["rev-parse", "HEAD^{tree}"])).trim();
     // A Runtime-detected profile may run a sandboxed build first (e.g. `tsc -b`); it gets the same boundary, its own deadline, and may only leave git-ignored outputs.
     const preparation = invocation?.prepare ?? command.adapter?.prepare ?? (command.prepare ? { ...command.prepare, executable: command.executable } : undefined);
     if (preparation) {
-      const prepareSandbox = await sandboxBehavior({ ...command, executable: preparation.executable }, checkout, preparation.args).catch(error => {
-        throw new Error(`Behavioral runner infrastructure failure (prepare): ${String(error)}`, { cause: error });
-      });
-      const prepared = await runner.run({ ...prepareSandbox, cwd: projectCwd, env, timeoutMs: preparation.timeoutMs, maxOutputBytes });
-      if (!prepared.ok) throw new Error(`Behavioral runner infrastructure failure (prepare): ${prepared.error.message}`);
-      const prepareOutcome = prepared.value as QualityCommandOutcome;
-      const failure = prepareOutcome.spawnError ?? (SANDBOX_ERROR.test(prepareOutcome.stderr) ? prepareOutcome.stderr.trim()
-        : prepareOutcome.outputTruncated ? "truncated prepare output" : prepareOutcome.timedOut ? "deadline exceeded" : prepareOutcome.aborted ? "aborted" : prepareOutcome.signal ? `signal ${prepareOutcome.signal}`
-        : prepareOutcome.exitCode !== 0 ? `exit ${prepareOutcome.exitCode}` : undefined);
-      if (failure !== undefined) throw new Error(`Behavioral runner infrastructure failure (prepare): ${failure}${outputTail(prepareOutcome)}`);
-      await assertPinnedRevision(checkout, revision);
+      const prepKey = digest([treeHash, testBlobs, command.dependencySource ?? "", preparation.executable, preparation.args, command.adapter?.projectDirectory ?? "."]);
+      const cachedPrepare = prepareArtifactCache.get(prepKey);
+      if (cachedPrepare) {
+        await restorePrepareArtifacts(checkout, cachedPrepare);
+        await assertPinnedRevision(checkout, revision);
+      } else {
+        const prepareSandbox = await sandboxBehavior({ ...command, executable: preparation.executable }, checkout, preparation.args).catch(error => {
+          throw new Error(`Behavioral runner infrastructure failure (prepare): ${String(error)}`, { cause: error });
+        });
+        const prepared = await runner.run({ ...prepareSandbox, cwd: projectCwd, env, timeoutMs: preparation.timeoutMs, maxOutputBytes });
+        if (!prepared.ok) throw new Error(`Behavioral runner infrastructure failure (prepare): ${prepared.error.message}`);
+        const prepareOutcome = prepared.value as QualityCommandOutcome;
+        const failure = prepareOutcome.spawnError ?? (SANDBOX_ERROR.test(prepareOutcome.stderr) ? prepareOutcome.stderr.trim()
+          : prepareOutcome.outputTruncated ? "truncated prepare output" : prepareOutcome.timedOut ? "deadline exceeded" : prepareOutcome.aborted ? "aborted" : prepareOutcome.signal ? `signal ${prepareOutcome.signal}`
+          : prepareOutcome.exitCode !== 0 ? `exit ${prepareOutcome.exitCode}` : undefined);
+        if (failure !== undefined) throw new Error(`Behavioral runner infrastructure failure (prepare): ${failure}${outputTail(prepareOutcome)}`);
+        await assertPinnedRevision(checkout, revision);
+        await savePrepareArtifacts(checkout, prepKey, treeHash);
+      }
     }
     // The official JSON reporter omits runtime errors. A fixed host companion attests its onFinished errors argument.
     const reporter = (command.reporter === "vitest_json" || command.adapter?.format === "vitest_json") ? join(temporary, "vitest-runtime-reporter.mjs") : undefined;
@@ -426,12 +478,31 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
     if (invocation?.reportPaths?.length && (await collectRunnerReports(invocation.reportPaths, checkout, reportDirectory)).length) throw new Error("Behavioral report must not exist before the test command");
     const baseArgs = invocation?.args ?? command.args;
     const args = reporter ? [...baseArgs, `--reporter=${reporter}`] : baseArgs;
-    const sandbox = await sandboxBehavior(command, checkout, args, reporter).catch(error => {
-      throw new Error(`Behavioral runner infrastructure failure (sandbox preparation): ${String(error)}`, { cause: error });
-    });
-    const result = await runner.run({ ...sandbox, cwd: projectCwd, env, timeoutMs: command.timeoutMs, maxOutputBytes });
-    if (!result.ok) throw new Error(`Behavioral command invocation failed: ${result.error.message}`);
-    const outcome = result.value as QualityCommandOutcome;
+    const isAutoTypecheck = command.id === "auto-typecheck" && command.command === "auto:typecheck" && !options.rtk && !command.adapter;
+    const compilerKey = isAutoTypecheck ? digest([treeHash, testBlobs, command.dependencySource ?? "", command.executable, args]) : undefined;
+    let outcome: QualityCommandOutcome;
+    const cachedCompilerOutcome = compilerKey ? compilerOutcomeCache.get(compilerKey) : undefined;
+    if (cachedCompilerOutcome) {
+      outcome = { ...cachedCompilerOutcome, cwd: projectCwd };
+    } else {
+      if (isAutoTypecheck) {
+        const warmTreeFiles = latestPrepareByTree.get(treeHash);
+        if (warmTreeFiles) await restorePrepareArtifacts(checkout, warmTreeFiles);
+      }
+      const sandbox = await sandboxBehavior(command, checkout, args, reporter).catch(error => {
+        throw new Error(`Behavioral runner infrastructure failure (sandbox preparation): ${String(error)}`, { cause: error });
+      });
+      const result = await runner.run({ ...sandbox, cwd: projectCwd, env, timeoutMs: command.timeoutMs, maxOutputBytes });
+      if (!result.ok) throw new Error(`Behavioral command invocation failed: ${result.error.message}`);
+      outcome = result.value as QualityCommandOutcome;
+      if (compilerKey && outcome.exitCode === 0 && !outcome.spawnError && !outcome.signal && !outcome.timedOut && !outcome.aborted && !outcome.outputTruncated && !SANDBOX_ERROR.test(outcome.stderr)) {
+        if (compilerOutcomeCache.size >= MAX_PREPARE_CACHE_ENTRIES) {
+          const oldest = compilerOutcomeCache.keys().next().value;
+          if (oldest !== undefined) compilerOutcomeCache.delete(oldest);
+        }
+        compilerOutcomeCache.set(compilerKey, outcome);
+      }
+    }
     if (SANDBOX_ERROR.test(outcome.stderr)) throw new Error(`Behavioral sandbox failed: ${outcome.stderr.trim()}`);
     if (options.rtk && rtkContext) {
       const raw = outcome.stdout + (outcome.stderr ? `\n[stderr]\n${outcome.stderr}` : "");

@@ -748,7 +748,10 @@ export class AgenticJournal {
   }
   /** Select under the same lock; clone only the selected value. No write callback or mutable cached state escapes. */
   async project<T>(select: (state: Readonly<JournalState>) => T): Promise<T> {
-    return this.access(async state => structuredClone(select(state)), true);
+    return this.access(async state => {
+      const selected = select(state);
+      return selected === undefined || selected === null || typeof selected !== "object" ? selected : json(selected) as T;
+    }, true);
   }
   private async access<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>, readOnly = false): Promise<T> {
     const active = AgenticJournal.heldDirectories.getStore();
@@ -796,10 +799,10 @@ export class AgenticJournal {
       const statePath = join(this.directory, "state.json");
       try {
         const bytes = await readRegularJournalFile(statePath);
-        if (this.validatedSnapshot?.bytes.equals(bytes)) state = readOnly ? this.validatedSnapshot.value : structuredClone(this.validatedSnapshot.value);
+        if (this.validatedSnapshot?.bytes.equals(bytes)) state = readOnly ? this.validatedSnapshot.value : json(this.validatedSnapshot.value) as unknown as JournalState;
         else {
           state = parseAgenticJournalState(JSON.parse(bytes.toString("utf8")), this.repository, this.validatedSnapshot?.value);
-          this.validatedSnapshot = { bytes: Buffer.from(bytes), value: readOnly ? state : structuredClone(state) };
+          this.validatedSnapshot = { bytes: Buffer.from(bytes), value: readOnly ? state : json(state) as unknown as JournalState };
         }
         baseline = this.validatedSnapshot.value; durableBytes = bytes;
       } catch (e) {
@@ -827,7 +830,7 @@ export class AgenticJournal {
           catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         }
         parseAgenticJournalState(state, this.repository, baseline);
-        const serialized = JSON.stringify(state), normalized = parseAgenticJournalState(JSON.parse(serialized), this.repository, state);
+        const serialized = JSON.stringify(state), normalized = JSON.parse(serialized) as JournalState;
         const path = join(this.directory, `state-${randomUUID()}.tmp`);
         try {
           const file = await open(path, "wx", 0o600);

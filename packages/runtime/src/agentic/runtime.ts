@@ -1781,11 +1781,27 @@ export class AgenticWorkflowRuntime {
       if (current && typeof payload.implementationAttemptId === "string") return payload.implementationAttemptId === current.attemptId;
       return true;
     };
+    const cycleTimes = [
+      ...run.tasks.flatMap(task => [
+        task.cycle?.updatedAt,
+        ...(task.cycle?.history ?? []).map(entry => entry.completedAt)
+      ]),
+      run.workflowCycle?.updatedAt,
+      ...(run.workflowCycle?.history ?? []).map(entry => entry.completedAt),
+      run.workflowChange?.createdAt
+    ].filter((value): value is string => typeof value === "string").map(value => Date.parse(value));
     const times = [
       Date.parse(run.delegation.requestedAt),
       ...(run.lastWorkflowRejection?.rejectedAt ? [Date.parse(run.lastWorkflowRejection.rejectedAt)] : []),
+      ...cycleTimes,
       ...messages.filter(countsAsBusinessActivity).map(message => Date.parse(message.occurred_at ?? ""))
     ].filter(Number.isFinite);
+    const awaitingIntegration =
+      run.status === "implementing" &&
+      !run.workflowCycle &&
+      run.tasks.length > 0 &&
+      run.tasks.every(task => task.cycle?.status === "passed") &&
+      (currentSnapshot === undefined || currentSnapshot.tasks.every(task => task.status === "succeeded"));
     const pendingDecisionRequests = Object.values(run.userDecisions ?? {}).filter(entry => entry.status === "pending")
       .map(entry => ({ request: ApprovalRequestSchema.parse(entry.request), correlationId: run.delegation.correlationId }));
     const parentRunId = typeof run.delegation.metadata?.parentRunId === "string" ? run.delegation.metadata.parentRunId : undefined;
@@ -1814,7 +1830,7 @@ export class AgenticWorkflowRuntime {
         `${out.message.recipient.role}:${out.handle!.target.paneId}`, { role: out.message.recipient.role, paneId: out.handle!.target.paneId! }])).values()],
       // Deterministic checks/test suites may legitimately run longer than the stall window without any message.
       runtimeWork: run.tasks.some(task => task.verificationPending) || run.workflowVerificationPending === true ||
-        state.pendingVerifications.some(item => pendingRunId(item) === run.runId && !item.stuck),
+        awaitingIntegration || state.pendingVerifications.some(item => pendingRunId(item) === run.runId && !item.stuck),
       reportedBlocker: run.pendingAction?.state === "pending",
       pendingDecisions: pendingDecisionRequests.map(item => ({ approvalId: item.request.approvalId, requestedAt: item.request.requestedAt })),
       pendingDecisionRequests
