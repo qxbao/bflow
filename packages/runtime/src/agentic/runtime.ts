@@ -1793,6 +1793,9 @@ export class AgenticWorkflowRuntime {
     const times = [
       Date.parse(run.delegation.requestedAt),
       ...(run.lastWorkflowRejection?.rejectedAt ? [Date.parse(run.lastWorkflowRejection.rejectedAt)] : []),
+      ...state.outbound
+        .filter(out => out.message.run_id === run.runId && out.message.type === "delegation.accepted")
+        .map(out => Date.parse(out.message.occurred_at ?? "")),
       ...cycleTimes,
       ...messages.filter(countsAsBusinessActivity).map(message => Date.parse(message.occurred_at ?? ""))
     ].filter(Number.isFinite);
