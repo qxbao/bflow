@@ -2321,8 +2321,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (["coordinator", "specifier", "architect", "planner"].includes(role) && outbound.some(out => out.status === "accepted"))
         await preflightRoleCapabilities(binding, ["repository.read"]);
       const repositorySurvey = await assignmentSurvey.prepare(binding, outbound, assignedRuns, toolActions);
-      const rawResumeContext = role === "developer" && !conflictResolution ? await host.runtime.taskHandover(binding, {}) : undefined;
-      const resumeContext = rawResumeContext === undefined ? undefined : providerForRole(role) === "agy" ? deferredTaskHandover(rawResumeContext) : rawResumeContext;
+      const isAgyDeveloper = role === "developer" && providerForRole(role) === "agy";
+      const resumeContext = role !== "developer" || conflictResolution
+        ? undefined
+        : isAgyDeveloper && currentDeveloperAssignment && typeof currentDeveloperAssignment.taskId === "string" && currentDeveloperMessage?.run_id && binding.worktreePath
+          ? deferredTaskHandover({ binding: { runId: currentDeveloperMessage.run_id, taskId: currentDeveloperAssignment.taskId } })
+          : await host.runtime.taskHandover(binding, {}).then(raw => isAgyDeveloper ? deferredTaskHandover(raw) : raw);
       const extensionIntakes: unknown[] = [];
       if (role === "coordinator") for (const run of assignedRuns) {
         if (typeof run.runId !== "string" || !await host.extensions.owns(run.runId)) continue;

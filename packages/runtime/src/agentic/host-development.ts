@@ -413,9 +413,10 @@ export class HostDevelopment {
     const context = await this.identity(binding, input);
     if (context.resolver) return (await this.conflictResolutionContext(binding))!;
     const rawRework = record(context.message.payload).reworkContext;
-    const rawResumeContext = await this.runtime().taskHandover(binding, { runId: context.runId, taskId: context.taskId });
     const isAgy = context.binding.agentKind === "agy" || context.binding.provider === "agy";
-    const resumeContext = isAgy ? deferredTaskHandover(rawResumeContext) : rawResumeContext;
+    const resumeContext = isAgy
+      ? deferredTaskHandover({ binding: { runId: context.runId, taskId: context.taskId } })
+      : await this.runtime().taskHandover(binding, { runId: context.runId, taskId: context.taskId });
     const policyFailureContext = await this.runtime().readPolicyFailureContext(context.binding, context.runId, context.taskId, context.attemptId);
     const reply = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async task => {
       const fullEvidence = task.spec.strategy.metadata?.tddEvidence ?? [];
@@ -500,9 +501,54 @@ export class HostDevelopment {
     const evidence = ArtifactReferenceSchema.parse(stored.value);
     for (const item of measurements) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId)
       await this.rtk?.consume(item.rtk.invocationId, evidence);
-    return json({ independentAcceptanceEvidence: false, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
+    const fullReply = { independentAcceptanceEvidence: false, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
       sourceRevision: selected.head, worktreePath: context.cwd, ...(reworkGeneration !== undefined ? { reworkGeneration } : {}),
-      ...(selected.environmentReadiness ? { environmentReadiness: selected.environmentReadiness } : {}), evidence, measurements });
+      ...(selected.environmentReadiness ? { environmentReadiness: selected.environmentReadiness } : {}), evidence, measurements };
+    const isAgy = context.binding.agentKind === "agy" || context.binding.provider === "agy";
+    if (isAgy && exceedsAgyInlineReply(fullReply)) {
+      const compactMeasurements = measurements.map(item => ({
+        sourceRevision: item.sourceRevision,
+        command: item.command,
+        commandId: item.commandId,
+        method: item.method,
+        tests: item.tests,
+        passed: item.passed,
+        failed: item.failed,
+        targetFailure: item.targetFailure,
+        testNames: item.testNames,
+        testResults: item.testResults,
+        outcome: {
+          exitCode: item.outcome.exitCode,
+          signal: item.outcome.signal,
+          timedOut: item.outcome.timedOut,
+          durationMs: item.outcome.durationMs,
+          stdout: item.outcome.stdout.slice(-1200),
+          stderr: item.outcome.stderr.slice(-1200)
+        }
+      }));
+      const compactReply = { ...fullReply, measurements: compactMeasurements };
+      if (!exceedsAgyInlineReply(compactReply)) return json(compactReply);
+      return json({
+        ...fullReply,
+        measurements: compactMeasurements.map(item => ({
+          sourceRevision: item.sourceRevision,
+          commandId: item.commandId,
+          method: item.method,
+          tests: item.tests,
+          passed: item.passed,
+          failed: item.failed,
+          targetFailure: item.targetFailure,
+          outcome: {
+            exitCode: item.outcome.exitCode,
+            timedOut: item.outcome.timedOut,
+            durationMs: item.outcome.durationMs,
+            stdout: item.outcome.stdout.slice(-400),
+            stderr: item.outcome.stderr.slice(-400)
+          }
+        }))
+      });
+    }
+    return json(fullReply);
   }
   /**
    * Concludes the preserved P18 merge with the resolver's edits. Only the conflicted files may differ from what the merge staged,

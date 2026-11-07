@@ -4993,7 +4993,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           entry.sourceBinding.worktreePath === currentBinding.worktreePath).map(entry => entry.sourceMessageId) : [];
       const selected = selectHandover(await store.read(run.runId, task.taskId), currentBinding, sources, continued);
       return json({ binding: currentBinding, authority, handover: selected });
-    });
+    }, args.proposal !== undefined);
   }
   /** Trusted local tool guard. Keep current ownership and lease checks adjacent
    * to file/commit operations; model arguments never supply the authority. */
@@ -5029,7 +5029,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       }
       await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       return use(task, definition);
-    });
+    }, options?.readOnly !== true);
   }
   /** Revalidates and renews the authenticated pane's live task lease immediately around a mediated tool side effect. */
   async withAssignedToolAction<T>(bindingInput: PaneBinding,
@@ -5287,7 +5287,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       return json({ runId, taskId, attemptId, actionable,
         ...(!actionable ? { reason: "No verified mapped criterion findings are available for this writer; reconcile the exact outcome with the Coordinator." } : {}),
         failures: retainedFailures });
-    });
+    }, false);
   }
   private phaseFailureReply(run: RunRecord, request: Outbound, replay = false): JsonValue {
     const payload = record(request.message.payload), failure = request.phaseFailure!;
