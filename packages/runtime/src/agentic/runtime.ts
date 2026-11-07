@@ -2809,8 +2809,14 @@ export class AgenticWorkflowRuntime {
           `Runtime resumed this same assignment after a verified Red receipt (${red.verificationId}). Inspect workspace status and continue the accepted TDD sequence; do not modify frozen tests. No new approval or measurement is granted.`, outcomeId);
         continue;
       }
-      // Incomplete policy phases keep their existing recovery/notice path; do not create a second continuation.
-      try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); } catch { continue; }
+      // Incomplete policy phases with an existing verification request keep their phase recovery/notice path; do not create a second continuation.
+      const hasPhaseRequest = state.outbound.some(item => item.message.run_id === run.runId &&
+        item.message.type === "verification.requested" &&
+        record(item.message.payload).taskId === task.taskId &&
+        record(item.message.payload).implementationAttemptId === current.attemptId);
+      if (hasPhaseRequest) {
+        try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); } catch { continue; }
+      }
       // Only the holder of this blocker is resumed; unrelated accepted Developers may still be doing useful work.
       const sourceIds = [run.pendingAction?.sourceMessageId, ...(run.pendingAction?.relatedMessageIds ?? [])];
       const related = sourceIds.includes(parent.message.message_id) || state.outbound.some(item => sourceIds.includes(item.message.message_id) &&
