@@ -62,3 +62,20 @@ it('does not admit a raw role envelope or a reserved runtime nudge as a web huma
  }
  expect(f.sent).toHaveLength(0);
 });
+it('unblocks subsequent queued chat messages when an earlier dispatch never echoed after 30s and the pane is idle',async()=>{
+ const {vi}=await import('vitest');vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(new Date('2026-10-29T00:00:00Z'));
+ try{
+  const f=await fixture();
+  const chat=new HostChat({...f.options,observeAdmission:async()=>undefined});
+  await chat.send({...input,messageId:'11111111-1111-4111-8111-111111111111',content:'stuck first'},'user');
+  expect(f.sent).toHaveLength(1);
+  await chat.send({...input,messageId:'22222222-2222-4222-8222-222222222222',content:'second queued'},'user');
+  expect(f.sent).toHaveLength(1);
+  vi.setSystemTime(new Date('2026-10-29T00:00:31Z'));
+  await chat.pump();
+  expect(f.sent).toHaveLength(2);
+  expect(f.sent[1]).toContain('second queued');
+  const items=(await chat.list('conversation')).items;
+  expect(items.find(m=>m.messageId==='11111111-1111-4111-8111-111111111111')?.delivery).toBe('failed');
+ }finally{vi.useRealTimers();}
+});

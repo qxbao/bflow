@@ -11,6 +11,7 @@ export interface StartMenuProps {
   projectId:string;
   onProject:(projectId:string)=>void;
   onNavigate:(path:'runs'|'review'|'chat'|'agents'|'settings')=>void;
+  onQueue?:()=>void;
   onDocuments:()=>void;
   onGuide:()=>void;
 }
@@ -23,6 +24,7 @@ export function StartMenu(props:StartMenuProps){
   const mobile:[StickerIconName,string,()=>void][]=[
     ['overview','Tổng quan',props.onOverview],['tasks','Công việc',()=>props.onNavigate('runs')],
     ['decision','Quyết định',()=>props.onNavigate('review')],['chat','Trò chuyện',()=>props.onNavigate('chat')],
+    ...(props.onQueue?[['issues','Sự cố',props.onQueue] as [StickerIconName,string,()=>void]]:[]),
     ['agents','Nhân viên',()=>props.onNavigate('agents')],['settings','Cài đặt',()=>props.onNavigate('settings')],
     ['docs','Tài liệu',props.onDocuments],
   ];

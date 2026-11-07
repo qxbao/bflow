@@ -47,6 +47,7 @@ export function GameWindow(props: GameWindowProps) {
   const generatedId = useId();
   const headingId = titleId ?? `window-title-${generatedId}`;
   const pointer = useRef<PointerStart | undefined>(undefined);
+  const ref = useRef<HTMLElement>(null);
   const titlebar = useRef<HTMLElement>(null);
   const style: CSSProperties = {
     left: display==='maximized'?0:rect.x,
@@ -58,10 +59,17 @@ export function GameWindow(props: GameWindowProps) {
     '--win-title-ink': titleText ?? (color.includes('decide') || kind === 'queue' || kind === 'status' ? 'var(--win-ink)' : '#fff'),
   } as CSSProperties;
   const visible = !hidden && display !== 'minimized';
-  useEffect(()=>{if(embedded||!visible||!active)return;const frame=requestAnimationFrame(()=>titlebar.current?.focus());return()=>cancelAnimationFrame(frame);},[embedded,visible,active]);
+  useEffect(() => {
+    if (embedded || !visible || !active) return;
+    const frame = requestAnimationFrame(() => {
+      if (ref.current && ref.current.contains(document.activeElement) && document.activeElement !== document.body) return;
+      titlebar.current?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [embedded, visible, active]);
 
   function windowElement(): HTMLElement | null {
-    return embedded ? document.getElementById('main') : titlebar.current?.closest<HTMLElement>('.bwin') ?? null;
+    return embedded ? document.getElementById('main') : ref.current ?? titlebar.current?.closest<HTMLElement>('.bwin') ?? null;
   }
 
   function startPointer(event: PointerEvent<HTMLElement>, resize: boolean): void {
@@ -85,6 +93,7 @@ export function GameWindow(props: GameWindowProps) {
     } else {
       element.style.transform = `translate3d(${start.dx}px, ${start.dy}px, 0)`;
     }
+    if (kind === 'director-chat') window.dispatchEvent(new CustomEvent('bflow:director-dialogue-state', { detail: { open: true } }));
   }
 
   function endPointer(event: PointerEvent<HTMLElement>, commit: boolean): void {
@@ -170,6 +179,7 @@ export function GameWindow(props: GameWindowProps) {
   return <>
     {modal && visible && <div className="bwin-backdrop" style={{zIndex:kind==='repair'?1999:(props.z??1)+39}} aria-hidden="true"/>}
     <section
+      ref={ref}
       className={`bwin ${active ? 'is-active' : ''} ${display === 'maximized' ? 'is-maximized' : ''}`}
       style={style}
       role="dialog"

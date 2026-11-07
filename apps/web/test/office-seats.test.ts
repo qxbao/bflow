@@ -73,7 +73,7 @@ describe('assignSeats', () => {
     expect(seatOf(after, 'dev-21')).toBeDefined();
   });
 
-  test('fixed roles take numbered seats in their zone and do not count as overflow', () => {
+  test('fixed roles take numbered seats in their zone and do not count as overflow until spare seats are exhausted', () => {
     const map = assignSeats({ entries: [], overflow: 0 }, [
       agent('coord', 'coordinator'),
       agent('rev-1', 'reviewer'),
@@ -86,6 +86,42 @@ describe('assignSeats', () => {
     expect(seatOf(map, 'rev-2')).toBe('verification:reviewer:2');
     expect(seatOf(map, 'conv')).toBe('conversation:conversation');
     expect(map.overflow).toBe(1);
+
+    // Fixed roles beyond their available 3D seats leave seat undefined and count in overflow instead of getting phantom seats.
+    const specialists = assignSeats({ entries: [], overflow: 0 }, [
+      agent('arch-1', 'architect'),
+      agent('arch-2', 'architect'),
+      agent('rev-1', 'reviewer'),
+      agent('rev-2', 'reviewer'),
+      agent('rev-3', 'reviewer'),
+    ]);
+    expect(seatOf(specialists, 'arch-1')).toBe('coordination:architect');
+    expect(seatOf(specialists, 'arch-2')).toBeUndefined();
+    expect(seatOf(specialists, 'rev-1')).toBe('verification:reviewer');
+    expect(seatOf(specialists, 'rev-2')).toBe('verification:reviewer:2');
+    expect(seatOf(specialists, 'rev-3')).toBeUndefined();
+    expect(specialists.overflow).toBe(2);
+  });
+
+  test('active allocations take primary seats before stopped_retained or released allocations', () => {
+    const initial = assignSeats({ entries: [], overflow: 0 }, [
+      { ...agent('arch-old', 'architect'), allocation: 'stopped_retained' },
+      { ...agent('arch-active', 'architect'), allocation: 'active' },
+    ]);
+    expect(seatOf(initial, 'arch-active')).toBe('coordination:architect');
+    expect(seatOf(initial, 'arch-old')).toBeUndefined();
+    expect(initial.overflow).toBe(1);
+
+    // When a previously active occupant transitions to stopped_retained and a failover active instance arrives,
+    // the active replacement gets the primary seat and the retained instance moves to the spare seat (or overflows if none exists).
+    const before = assignSeats({ entries: [], overflow: 0 }, [{ ...agent('qa-1', 'qa'), allocation: 'active' }]);
+    expect(seatOf(before, 'qa-1')).toBe('verification:qa');
+    const after = assignSeats(before, [
+      { ...agent('qa-1', 'qa'), allocation: 'stopped_retained' },
+      { ...agent('qa-2', 'qa'), allocation: 'active' },
+    ]);
+    expect(seatOf(after, 'qa-2')).toBe('verification:qa');
+    expect(seatOf(after, 'qa-1')).toBe('verification:qa:2');
   });
 
   test('custom profile keeps base role sprite and own label', () => {

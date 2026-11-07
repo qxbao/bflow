@@ -367,7 +367,10 @@ export class ConversationGateway {
     }
     // Native turn arbitration remains the existing Gateway boundary. Ordinary native
     // arrivals queue while this deterministic admission is active; model busy alone
-    // does not block forms. An already active native mutation wins this race.
+    // does not block forms. Wait briefly if a background queue flush or turn is just finishing.
+    for (let attempt = 0; (this.isProcessingTurn || this.isFlushingQueue) && attempt < 10; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
     if (this.isProcessingTurn || this.isFlushingQueue) return fail("conflict", "Conversation admission is already processing another turn");
     this.isProcessingTurn = true;
     try {

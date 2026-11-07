@@ -440,15 +440,17 @@ export async function hostInteractionQuery(
     } catch { diagnostic("extension_routes_unavailable"); }
   }
   const core = new Map<string, WorkflowRunSnapshot>();
-  // The workforce projection needs only the manifest and journal; skipping Core reads keeps its 1 s polling cheap.
-  for (const r of query.kind === "workforce" || query.kind === "activity" || query.kind === "workforce_excerpts" || query.kind === "agent_transcript" ? [] : state.runs.filter(
-    (r) => r.delegation.sessionId === sessionId && r.coreCreated,
-  )) {
-    const value = await options.readCore?.(r.runId);
-    if (value) {
-      const parsed = WorkflowRunSnapshotSchema.parse(value);
-      if (parsed.runId !== r.runId) throw new Error("Core scope mismatch");
-      core.set(r.runId, parsed);
+  // Only run/runs/decisions projections need Core snapshots; skipping Core reads for session/workforce/activity/transcript keeps polling cheap.
+  if (query.kind === "run" || query.kind === "runs" || query.kind === "decisions") {
+    for (const r of state.runs.filter(
+      (r) => r.delegation.sessionId === sessionId && r.coreCreated && (query.kind !== "run" || r.runId === query.runId),
+    )) {
+      const value = await options.readCore?.(r.runId);
+      if (value) {
+        const parsed = WorkflowRunSnapshotSchema.parse(value);
+        if (parsed.runId !== r.runId) throw new Error("Core scope mismatch");
+        core.set(r.runId, parsed);
+      }
     }
   }
   // Conservative textual redaction supplements structural allowlisting. Private raw errors never leave the host.

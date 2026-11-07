@@ -158,11 +158,13 @@ describe('full staff and the Creative Space', () => {
     expect(seatRole('developer:7')).toBe('developer');
     expect(seatRole('coordination:planner:2')).toBe('planner');
   });
-  test('without a running session there is no staff and no bartender', () => {
+  test('without a running session there is no staff and no bartender; degraded tier spawns no ambient staff', () => {
     const c = new Choreographer();
     c.apply({ ...model, tier: 'closed', agents: [] }, []);
     expect(c.ambientViews()).toHaveLength(0);
     expect(c.bartenderView()).toBeUndefined();
+    c.apply({ ...model, tier: 'degraded', agents: [] }, []);
+    expect(c.ambientViews()).toHaveLength(0);
   });
   test('a bartender always works behind the bar, facing the patrons, and walks between its service points', () => {
     const c = new Choreographer(true, seeded(5));
@@ -257,7 +259,7 @@ describe('full staff and the Creative Space', () => {
     expect(c.cellFor({ kind: 'role', role: 'developer' })).toEqual(OBJECT_CELLS.server);
     expect(c.cellFor({ kind: 'role', role: 'qa' })).toEqual(OBJECT_CELLS.server);
     const lazy = new Choreographer(false);
-    lazy.apply(idle(model, 'a'), [walk('h1')]);
+    expect(lazy.apply(idle(model, 'a'), [walk('h1')])).toEqual([]);
     expect(lazy.busy()).toBe(false);
   });
   test('with every desk drawn and every agent idle, everyone gets a leisure spot', () => {

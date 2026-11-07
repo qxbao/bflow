@@ -56,3 +56,14 @@ test.each(['abort', 'context-loss', 'timeout'] as const)('releases a renderer wh
   expect(el.querySelector('canvas')).toBeNull(); expect(el.dataset.officeRenderer).toBeUndefined();
   expect(vi.getTimerCount()).toBe(0);
 });
+
+test('highlight and setInset refocus selectedTarget even when non-immersive', async () => {
+  const el = host(), renderer = await (async () => { const p = createOfficeRenderer(el, vi.fn()); await settleBuild(); return p; })();
+  renderer.apply(model, []);
+  await vi.advanceTimersByTimeAsync(50);
+  renderer.highlight?.({ kind: 'object', object: 'board' });
+  expect(el.dataset.officeSelected).toBe('true');
+  renderer.setInset?.({ left: 0, right: 480, bottom: 112 });
+  expect(el.dataset.officeState).toBe('moving');
+  renderer.destroy();
+});

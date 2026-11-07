@@ -23,8 +23,12 @@ export function cascade(rect: WindowRect, index: number, viewport: Viewport): Wi
 }
 
 export function sceneInset(windows: SceneWindow[], viewport: Viewport, chrome = { left: 88, bottom: 112 }): { left: number; right: number; bottom: number } {
+  if (viewport.width < 768) return { left: 0, right: 0, bottom: chrome.bottom };
   const visible = windows.filter(window => window.display !== 'minimized');
+  if (visible.some(window => window.display === 'maximized')) return { left: chrome.left, right: 0, bottom: chrome.bottom };
   const rightSide = visible.filter(window => window.rect.x + window.rect.w / 2 > viewport.width / 2);
+  const leftSide = visible.filter(window => window.rect.x + window.rect.w / 2 <= viewport.width / 2);
   const right = rightSide.length ? Math.min(viewport.width * .6, viewport.width - Math.min(...rightSide.map(window => window.rect.x))) : 0;
-  return { left: viewport.width < 768 ? 0 : chrome.left, right: viewport.width < 768 ? 0 : Math.max(0, right), bottom: chrome.bottom };
+  const left = leftSide.length ? Math.min(viewport.width * .6, Math.max(chrome.left, Math.max(...leftSide.map(window => window.rect.x + window.rect.w)))) : chrome.left;
+  return { left: Math.max(0, left), right: Math.max(0, right), bottom: chrome.bottom };
 }

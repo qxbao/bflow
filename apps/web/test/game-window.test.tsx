@@ -97,3 +97,68 @@ test('Escape in a non-active window leaves arbitration to the window manager',()
   fireEvent.keyDown(screen.getByLabelText('Thanh tiêu đề Developer 1'),{key:'Escape'});
   expect(props.onClose).not.toHaveBeenCalled();
 });
+
+test('activating a window while focus is already on an inner input preserves input focus, and director-chat drag emits live dialogue-state events', async () => {
+  const events: Event[] = [];
+  const onEvent = (e: Event) => events.push(e);
+  window.addEventListener('bflow:director-dialogue-state', onEvent);
+  const { rerender } = render(
+    <GameWindow
+      id="director-chat"
+      kind="director-chat"
+      title="Trò chuyện với Director"
+      icon="chat"
+      color="var(--win-c-chat)"
+      rect={{ x: 300, y: 160, w: 400, h: 520 }}
+      display="normal"
+      active={false}
+      closable
+      minimizable
+      maximizable
+      resizable
+      onFocus={() => {}}
+      onClose={() => {}}
+      onMinimize={() => {}}
+      onToggleMaximize={() => {}}
+      onMove={() => {}}
+      onResize={() => {}}
+    >
+      <input aria-label="Chat input" />
+    </GameWindow>
+  );
+  const input = screen.getByLabelText('Chat input');
+  input.focus();
+  expect(document.activeElement).toBe(input);
+  rerender(
+    <GameWindow
+      id="director-chat"
+      kind="director-chat"
+      title="Trò chuyện với Director"
+      icon="chat"
+      color="var(--win-c-chat)"
+      rect={{ x: 300, y: 160, w: 400, h: 520 }}
+      display="normal"
+      active={true}
+      closable
+      minimizable
+      maximizable
+      resizable
+      onFocus={() => {}}
+      onClose={() => {}}
+      onMinimize={() => {}}
+      onToggleMaximize={() => {}}
+      onMove={() => {}}
+      onResize={() => {}}
+    >
+      <input aria-label="Chat input" />
+    </GameWindow>
+  );
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  expect(document.activeElement).toBe(input);
+
+  const titlebar = screen.getByLabelText('Thanh tiêu đề Trò chuyện với Director');
+  fireEvent.pointerDown(titlebar, { pointerId: 7, button: 0, clientX: 10, clientY: 20 });
+  fireEvent.pointerMove(titlebar, { pointerId: 7, buttons: 1, clientX: 40, clientY: 50 });
+  expect(events.length).toBeGreaterThanOrEqual(1);
+  window.removeEventListener('bflow:director-dialogue-state', onEvent);
+});

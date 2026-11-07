@@ -226,3 +226,26 @@ it("an explicit agent identity cannot resolve across roles", () => {
   expect(view.agents.flatMap(agent => agent.work)).toEqual([]);
   expect(view.handoffs[0]!.to).toEqual({ role: "developer" });
 });
+it("maps Coordinator-targeted task.status and approval.decision deliveries to active delegation work", () => {
+  const statusWake: Outbound = {
+    ...out("task.status", "agent-id-coord", "accepted"),
+    message: {
+      ...out("task.status", "agent-id-coord", "accepted").message,
+      message_id: "msg-coord-status",
+      recipient: { role: "coordinator", agent_id: "agent-id-coord" },
+    },
+  };
+  const decisionWake: Outbound = {
+    ...out("approval.decision", "agent-id-coord", "sending"),
+    message: {
+      ...out("approval.decision", "agent-id-coord", "sending").message,
+      message_id: "msg-coord-decision",
+      recipient: { role: "coordinator", agent_id: "agent-id-coord" },
+    },
+  };
+  const view = projectWorkforce(base([coordinator()], { outbound: [handled(statusWake, "agent-id-coord"), decisionWake] }));
+  expect(view.agents[0]!.work.map(w => [w.messageId, w.kind, w.delivery])).toEqual([
+    ["msg-coord-status", "delegation", "accepted"],
+    ["msg-coord-decision", "delegation", "sending"],
+  ]);
+});

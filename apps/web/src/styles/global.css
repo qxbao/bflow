@@ -25,38 +25,18 @@
   --font-mono: 'JetBrains Mono', monospace;
 }
 
-/* 3D office scope (visual mode). The same tokens re-valued after the reference: charcoal translucent panels, thin olive border, cream text,
-   pale-lime accent. Classic components inside the overlay panel inherit them; outside this scope nothing changes. Text pairs are >= 4.5:1. */
-.office-3d {
-  color-scheme: dark;
-  color: var(--color-ink);
-  --color-canvas: #101210;
-  --color-ink: #f1ead8;
-  --color-muted: #c4c0ae;
-  --color-faint: #2a2d23;
-  --color-line: #4d5238;
-  --color-accent: #d6e58a;
-  --color-steel: #a9c2e0;
-  --color-brand: #ffc400;
-  --color-on-brand: #1a1a1a;
-  --color-focus: #e6f08c;
-  --color-surface: #191b16;
-  --color-input: #8d9279;
-  --color-success: #92d3a0;
-  --color-danger: #ff9d9d;
-  --color-warning: #ecd48a;
-  --color-code: #20231a;
-  --color-code-line: #3b402d;
-}
+/* 3D office scope (visual mode). Classic components inside the overlay and game windows inherit these tokens; outside this scope nothing changes. Text pairs are >= 4.5:1. */
 .office-3d {
   color-scheme: light;
+  color: var(--color-ink);
   --win-ink: #1b1033; --win-shadow: 4px 4px 0 var(--win-ink); --win-shadow-sm: 2px 2px 0 var(--win-ink);
   --win-border: 2px solid var(--win-ink); --win-radius: 6px; --win-body: #f6f2ff; --win-panel: #e9e0ff;
   --win-title-inactive: #786f94; --win-c-system: #5b4fc4; --win-c-work: #a71970; --win-c-decide: #f29d12;
   --win-c-chat: #6c2fc9; --win-c-people: #12615f; --win-c-docs: #2f5fb3; --win-c-alert: #a3202a;
   --color-canvas: #f6f2ff; --color-ink: #1b1033; --color-muted: #4b3f6b; --color-faint: #efe8ff;
-  --color-line: #cfc4ee; --color-accent: #6a2fd0; --color-focus: #a71970; --color-surface: #fff;
-  --color-input: #cfc4ee; --color-success: #1e6b3a; --color-danger: #a3202a; --color-warning: #7a5600; --color-code: #efe8ff; --color-code-line: #cfc4ee;
+  --color-line: #cfc4ee; --color-accent: #6a2fd0; --color-steel: #2f4b7c; --color-brand: #ffc400;
+  --color-on-brand: #1a1a1a; --color-focus: #a71970; --color-surface: #ffffff; --color-input: #786f94;
+  --color-success: #1e6b3a; --color-danger: #a3202a; --color-warning: #7a5600; --color-code: #efe8ff; --color-code-line: #cfc4ee;
 }
 .bwin { position: fixed; display:flex; flex-direction:column; min-width:320px; min-height:240px; border:var(--win-border); border-radius:var(--win-radius); background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); overflow:hidden; }
 .bwin[hidden] { display:none!important; }
@@ -93,6 +73,9 @@
 .bwin-resize { position:absolute; right:0; bottom:0; width:20px; min-height:20px; padding:0; border:0; background:transparent; cursor:nwse-resize; }
 .bwin-backdrop { position:fixed; inset:0; z-index:90; background:rgb(27 16 51 / .35); backdrop-filter:blur(2px); pointer-events:auto; }
 .office-3d .bwin-body button { border-radius:0; border:2px solid var(--win-ink); box-shadow:var(--win-shadow-sm); background:#fff; color:var(--win-ink); }
+.office-3d .bwin-body button.bg-brand { background:var(--color-brand); color:var(--win-ink); font-weight:700; }
+.office-3d .bwin-body button.bg-steel { background:var(--color-steel); color:#fff; font-weight:600; }
+.office-3d .bwin-body button.bg-danger, .office-3d .bwin-body button.border-danger { border-color:var(--color-danger); }
 .office-3d .bwin-body input, .office-3d .bwin-body select, .office-3d .bwin-body textarea { border-radius:0; border:2px solid var(--win-ink); background:#fff; color:var(--win-ink); }
 .office-3d .bwin-body :focus-visible { outline-color:var(--win-c-work); }
 .office-3d .bwin { animation:bwin-open 120ms ease-out; }
@@ -399,7 +382,6 @@
 .office-3d .chat-thread > form [data-field-help] { width:17px; height:17px; }
 .office-3d .chat-thread > form #director-chat-blocked { display:block; width:100%; max-width:none; margin:0 0 6px; padding:3px 8px; border:0; border-left:3px solid var(--win-c-decide); background:var(--win-panel); box-shadow:none; font-size:12px; line-height:1.4; }
 .office-3d .director-chat-approval-note { margin-top:4px; }
-.office-3d .director-chat-approval-note { display:none; }
 .office-3d .bwin-body .director-read-alert { display:block; width:100%; max-width:none; margin:4px 0; padding:4px 8px; border:0; border-left:3px solid var(--win-c-decide); background:var(--win-panel); box-shadow:none; font:500 12px/1.4 var(--font-data); }
 .office-3d .director-chat-approval-note > summary,
 .office-3d .chat-capture-note > summary { font-size:11px; cursor:pointer; }

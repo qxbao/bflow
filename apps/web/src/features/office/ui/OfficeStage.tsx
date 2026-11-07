@@ -54,8 +54,8 @@ export function OfficeStage({ model, onSelect, links, control, excerpts: excerpt
       const svg = connector.current, line = connectorLine.current, dot = connectorDot.current, point = directorPoint.current;
       const panel = document.querySelector<HTMLElement>('[data-window-kind="director-chat"]:not([data-display="minimized"])');
       if (!svg || !line || !dot || !point || !panel || window.innerWidth < 768 || getComputedStyle(panel).display === 'none') { if (svg) svg.style.display = 'none'; return; }
-      const rect = el.getBoundingClientRect(), box = panel.getBoundingClientRect(), x1 = point.x + rect.left, y1 = point.y + rect.top, x2 = box.left, y2 = Math.max(box.top + 44, Math.min(box.bottom - 44, y1));
-      line.setAttribute('x1', String(x1)); line.setAttribute('y1', String(y1)); line.setAttribute('x2', String(x2)); line.setAttribute('y2', String(y2));
+      const rect = el.getBoundingClientRect(), box = panel.getBoundingClientRect(), x1 = point.x + rect.left, y1 = point.y + rect.top, targetX = x1 > box.right ? box.right : box.left, y2 = Math.max(box.top + 44, Math.min(box.bottom - 44, y1));
+      line.setAttribute('x1', String(x1)); line.setAttribute('y1', String(y1)); line.setAttribute('x2', String(targetX)); line.setAttribute('y2', String(y2));
       dot.setAttribute('cx', String(x1)); dot.setAttribute('cy', String(y1)); svg.style.display = '';
     };
     drawConnector.current = updateConnector;

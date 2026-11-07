@@ -76,4 +76,37 @@ describe('game window state and geometry', () => {
     fireEvent.click(screen.getByRole('button',{name:'Mở trạng thái: Đã kết nối'}));
     expect(onStatusOpen).toHaveBeenCalledTimes(1);
   });
+  test('taskbar renders human-readable agent labels and Start menu exposes queue in Director layout', async () => {
+    const onQueue = vi.fn();
+    function Harness() {
+      const wm = useWindows();
+      return <>
+        <button onClick={() => wm.open('agent', { instanceId: 'dev-1' })}>Open agent</button>
+        <Taskbar
+          quickChat={<form aria-label="quick chat" />}
+          agentLabels={new Map([['dev-1', 'Developer #1']])}
+          mode="visual"
+          onMode={() => {}}
+          onOverview={() => {}}
+          onRefresh={() => {}}
+          onCloseAll={() => {}}
+          projects={[{ projectId: 'p', displayName: 'Project' }]}
+          projectId="p"
+          onProject={() => {}}
+          onNavigate={() => {}}
+          onQueue={onQueue}
+          onDocuments={() => {}}
+          onGuide={() => {}}
+          onStatusOpen={() => {}}
+          statusText="Đã kết nối"
+        />
+      </>;
+    }
+    render(<MemoryRouter><WindowManagerProvider projectId="test-taskbar-labels"><Harness /></WindowManagerProvider></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: 'Open agent' }));
+    expect(await screen.findByRole('button', { name: 'Nhân viên · Developer #1' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '◆ Bflow' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Menu Bflow' })).getByRole('button', { name: 'Sự cố' }));
+    expect(onQueue).toHaveBeenCalledTimes(1);
+  });
 });

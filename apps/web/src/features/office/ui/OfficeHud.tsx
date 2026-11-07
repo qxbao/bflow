@@ -130,11 +130,14 @@ export function OfficeHud(p: OfficeHudProps) {
   useEffect(() => { p.onDockHeight?.(0); }, [p.onDockHeight]);
   const run = currentRun(p.runs), counts = agentCounts(p.model), chat = p.director ? p.director.canSend : chatAvailable(p.session);
   const desk = p.model?.director !== undefined, queue = p.model?.queue;
+  const directorMode = Boolean(p.director || desk);
+  const sessionInactive = p.session?.state === 'stopped' || p.session?.state === 'unavailable';
   const pending = p.model?.pendingDecisions ?? 0;
   // Questions waiting in the Overview panel (intakes), and notes the owner should see (session and current run blockers).
   const clarifications = (p.session?.pendingIntakes ?? []).reduce((n, i) => n + i.clarifications.length, 0);
-  const blockers = (p.session?.blockers.length ?? 0) + (run?.blockers.length ?? 0);
-  const link = connectionText(p.connection, p.session?.state === 'stopped' || p.session?.state === 'unavailable');
+  const visibleSessionBlockers = (p.session?.blockers ?? []).filter(b => (!directorMode || b.code !== 'chat_adapter_unavailable') && (!sessionInactive || !['host_unavailable', 'host_inactive', 'session_unavailable'].includes(b.code)));
+  const blockers = visibleSessionBlockers.length + (run?.blockers.length ?? 0);
+  const link = connectionText(p.connection, sessionInactive);
   const warn = p.stale || p.authRequired || link.degraded || blockers > 0;
   const done = run ? run.tasks.filter(t => t.status === 'succeeded').length : 0;
   const hideOnPhone = p.panelOpen||p.windowOpen ? 'max-md:hidden' : '';
@@ -173,7 +176,7 @@ export function OfficeHud(p: OfficeHudProps) {
             <p className="m-0 mt-0.5 font-data text-xs text-muted">{phases[run.sdlcStatus] ?? 'Chưa xác định'}{run.tasks.length > 0 ? ` · ${done}/${run.tasks.length} việc đã xong` : ''}</p>
           </> : <p className="m-0 mt-0.5 font-data text-xs text-muted">Chưa có công việc đang chạy</p>}
         </div>
-        <StatusTray><summary onClick={p.onStatusOpen} className="flex min-h-8 cursor-pointer list-none items-center gap-2 text-xs"><span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${warn ? 'bg-warning' : 'bg-success'}`}/><span className="min-w-0 flex-1 truncate">Kết nối{p.stale?' · Dữ liệu cũ':p.authRequired?' · Cần ghép nối lại':link.degraded?' · Cần kiểm tra':''}</span><span aria-hidden="true" className="office-status-chevron text-muted">▾</span></summary><div className="flex flex-wrap items-center gap-x-2 gap-y-1 pb-1">
+        <StatusTray><summary onClick={p.onStatusOpen ? event => { event.preventDefault(); p.onStatusOpen?.(); } : undefined} className="flex min-h-8 cursor-pointer list-none items-center gap-2 text-xs"><span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${warn ? 'bg-warning' : 'bg-success'}`}/><span className="min-w-0 flex-1 truncate">Kết nối{p.stale?' · Dữ liệu cũ':p.authRequired?' · Cần ghép nối lại':link.degraded?' · Cần kiểm tra':''}</span><span aria-hidden="true" className="office-status-chevron text-muted">▾</span></summary><div className="flex flex-wrap items-center gap-x-2 gap-y-1 pb-1">
           <span>{p.session ? SESSION[p.session.state] ?? 'Phiên chưa rõ' : 'Đang đọc phiên'}</span>
           <span aria-hidden="true" className="text-line">|</span>
           <span role="status" className={link.degraded ? 'text-warning' : ''}>{link.label}</span>
@@ -204,10 +207,10 @@ export function OfficeHud(p: OfficeHudProps) {
       {/* Live region that exists before the state changes, so a screen reader hears the dock needing a look while it stays collapsed. */}
       <span role="status" className="sr-only" data-testid="dock-attention">{p.dockSummary.attention ? 'Có thao tác cần xem trong Thao tác đã gửi' : ''}</span>
       {!p.onDockOpen&&<div id={dockId} hidden={!dockOpen} data-hud-dock className="pointer-events-auto max-h-[40dvh] overflow-y-auto empty:hidden">{p.dock}</div>}
-      {!p.taskbar&&<div className={hideOnPhone}><CameraBar>
+      <div className={hideOnPhone}><CameraBar>
         {cams.map(([zone, icon, label]) => <button type="button" key={zone} aria-label={label} className={camButton} onClick={() => { if (zone === 'overview') setDockOpen(false); p.onFocusZone(zone); }}><Icon name={icon}/><span>{label}</span></button>)}
         {p.overflow > 0 && <button type="button" className={camButton} aria-label={`Còn ${p.overflow} lập trình viên chưa hiện trong cảnh. Mở danh sách nhân viên`} onClick={p.onAgentList}>+{p.overflow}</button>}
-      </CameraBar>{quickChat}</div>}
+      </CameraBar>{!p.taskbar&&quickChat}</div>
     </div>
     {p.taskbar?.(quickChat)}
   </>;

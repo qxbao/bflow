@@ -85,4 +85,34 @@ describe('long-running local-server route and command deadlines', () => {
       await env.close();
     }
   }, 15000);
+
+  it('allows workforce excerpts and agent transcript reads taking longer than 5s within the 12s deadline', async () => {
+    const env = await fixture({}, async (projectId) => ({
+      ...client,
+      readWorkforceExcerpts: async () => {
+        await new Promise((r) => setTimeout(r, 5400));
+        return {
+          ok: true as const,
+          value: {
+            apiVersion: 1 as const,
+            projectId,
+            sessionId: 'conv-1',
+            items: [{ instanceId: 'agent-1', text: 'working', observedAt: '2026-10-31T06:00:06.000Z' }],
+            observedAt: '2026-10-31T06:00:06.000Z',
+          },
+        };
+      },
+    }));
+    try {
+      const { headers } = await env.login();
+      const repoPath = await env.repo();
+      const reg = await env.send('/api/v1/projects', 'POST', { apiVersion: 1, path: repoPath }, headers);
+      const id = reg.json.projectId;
+      const res = await env.send(`/api/v1/projects/${encodeURIComponent(id)}/workforce/excerpts`, 'GET', undefined, headers);
+      expect(res.status).toBe(200);
+      expect(res.json.items).toHaveLength(1);
+    } finally {
+      await env.close();
+    }
+  }, 15000);
 });

@@ -28,10 +28,10 @@ export class LabelPlacer {
     return true;
   }
 
-  /** A message box centred on `x` with its bottom at `y`; call after every tag. Far out, one overlapping any tag or earlier box is hidden. */
-  bubble(x: number, y: number, width: number, height: number, far: boolean): boolean {
+  /** A message box centred on `x` with its bottom at `y`; call after every tag. One overlapping any tag or earlier box is hidden. */
+  bubble(x: number, y: number, width: number, height: number, _far = true): boolean {
     const x0 = x - width / 2, x1 = x + width / 2, y0 = y - height;
-    if (far && LabelPlacer.hits(this.allRects, this.allCount, x0, x1, y0, y)) return false;
+    if (LabelPlacer.hits(this.allRects, this.allCount, x0, x1, y0, y)) return false;
     this.allCount = LabelPlacer.add(this.allRects, this.allCount, x0, x1, y0, y);
     return true;
   }

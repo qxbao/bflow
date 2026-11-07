@@ -24,12 +24,12 @@ test('tags only compete with tags, so an earlier box cannot hide a tag', () => {
   expect(placer.bubble(600, 278, BOX_W, BOX_H, true)).toBe(true);
 });
 
-test('far out two boxes may not overlap, close in everything shows, begin() clears the frame', () => {
+test('two boxes never overlap even close in, close in tags show, begin() clears the frame', () => {
   const placer = new LabelPlacer();
   placer.begin();
   expect(placer.bubble(100, 200, BOX_W, BOX_H, true)).toBe(true);
   expect(placer.bubble(120, 200, BOX_W, BOX_H, true)).toBe(false);
-  expect(placer.bubble(120, 200, BOX_W, BOX_H, false)).toBe(true);
+  expect(placer.bubble(120, 200, BOX_W, BOX_H, false)).toBe(false);
   expect(placer.tag(100, 200, TAG_W, TAG_H, false)).toBe(true);
   placer.begin();
   expect(placer.bubble(100, 200, BOX_W, BOX_H, true)).toBe(true);

@@ -6,6 +6,7 @@ import { MemoryRouter, useLocation } from 'react-router';
 import { App } from '../src/app';
 import { ApiClient } from '../src/api/client';
 import { writeMode } from '../src/features/office/mode';
+import { sceneInset } from '../src/features/office/ui/windows/geometry';
 import { installApi, run, session } from './fixtures';
 
 configure({ asyncUtilTimeout: 5000 });
@@ -69,4 +70,10 @@ test('the compact Start menu does not repeat the camera controls', async () => {
   expect(menu.textContent).not.toContain('Góc nhìn văn phòng');
   expect(menu.textContent).not.toContain('Toàn cảnh');
   expect(screen.getByRole('button',{name:'Đóng mọi cửa sổ'})).toBeTruthy();
+});
+
+test('sceneInset computes left inset for left-side windows and neutral horizontal inset for maximized windows', () => {
+  const viewport = { width: 1440, height: 900 };
+  expect(sceneInset([{ rect: { x: 40, y: 20, w: 400, h: 600 }, display: 'normal' }], viewport)).toEqual({ left: 440, right: 0, bottom: 112 });
+  expect(sceneInset([{ rect: { x: 900, y: 20, w: 480, h: 600 }, display: 'maximized' }], viewport)).toEqual({ left: 88, right: 0, bottom: 112 });
 });

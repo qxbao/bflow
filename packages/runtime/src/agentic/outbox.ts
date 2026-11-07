@@ -368,6 +368,17 @@ export class HerdrOutbox {
           await this.release(out);
           return;
         }
+        if (out.turnObservedWorkingAt === undefined && this.ports.panes.inspectRoleHealth) {
+          const health = await this.ports.panes.inspectRoleHealth(out.selector);
+          const liveOccupant = health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId;
+          if (liveOccupant && (!health.value.readyForPrompt || (health.value as { transportState?: unknown }).transportState === "working")) {
+            const observedAt = this.now();
+            if (Date.parse(observedAt) >= Date.parse(out.handle.acceptedAt)) {
+              out.turnObservedWorkingAt = observedAt;
+              await this.save();
+            }
+          }
+        }
         if (run && !run.cancelled && !["completed", "completed_with_parked", "failed", "escalated"].includes(run.status) &&
             (out.leaseRenewal !== undefined || !out.lease || Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000)) {
           try { await this.renew(out); } catch (error) { out.error = String(error); await this.save(); }
@@ -377,7 +388,7 @@ export class HerdrOutbox {
       const isPolicyPhase = out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence";
       const health = await this.ports.panes.inspectRoleHealth(out.selector);
       const liveOccupant = health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId;
-      if (liveOccupant && !health.value.readyForPrompt && out.turnObservedWorkingAt === undefined) {
+      if (liveOccupant && (!health.value.readyForPrompt || (health.value as { transportState?: unknown }).transportState === "working") && out.turnObservedWorkingAt === undefined) {
         const observedAt = this.now();
         if (Date.parse(observedAt) >= Date.parse(out.handle.acceptedAt)) {
           out.turnObservedWorkingAt = observedAt;

@@ -7,6 +7,7 @@ import { ApiClient, ApiError, consumeBootstrap } from './api/client';
 import { subscribeEvents, type Connection } from './api/events';
 import { AppShell } from './components/AppShell';
 import { ConnectionBanner, connectionText } from './components/ConnectionBanner';
+import { Blockers } from './components/Blockers';
 import { ErrorState } from './components/ErrorState';
 import { EmptyState } from './components/EmptyState';
 import { Projects } from './features/projects';
@@ -22,7 +23,8 @@ import { Operations, OperationsDock, useOperationsDockSummary } from './features
 import type { OfficeFocusZone } from './features/office/model/types';
 import { Overview } from './features/overview';
 import { DirectorProvider, presenceLabels, useDirector } from './features/director/status';
-import { DirectorChat, DirectorChatControllerProvider } from './features/director/chat';
+import { DirectorChatControllerProvider, useDirectorChatController } from './features/director/chat-controller';
+import { DirectorChat } from './features/director/chat';
 import { immersiveOfficeEnabled } from './features/office/immersive';
 import { DirectorInspector } from './features/office/ui/DirectorInspector';
 import { useUiMode, type UiMode } from './features/office/mode';
@@ -159,6 +161,7 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
   const wm=useWindows();
   // The Director desk and queue board read the shared Director state (Task 5) as a projection; the scene and model never call the API.
   const d=useDirector();
+  const chatController=useDirectorChatController();
   const directorInput=useMemo<OfficeDirectorInput>(()=>({layout:d.layout,directorLayout:d.directorLayout,presence:d.presence,provider:d.provider,heartbeatAt:d.heartbeatAt,waitingSince:d.waitingSince,issues:d.presence!=='unknown'?d.view?.snapshot.issues:undefined}),
     [d.directorLayout,d.layout,d.presence,d.provider,d.heartbeatAt,d.waitingSince,d.view]);
   const state=useOfficeModel({api,id,session,connection,revision,director:directorInput});
@@ -168,7 +171,7 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
   const inspectorWindows=wm.windows.filter(item=>!['app','director-chat','operations','status'].includes(item.kind));
   const openInspector=useCallback((next:Inspector|undefined)=>{
     if(next){frame.openInspector(next);wm.open(next.kind,next.kind==='agent'?{instanceId:next.instanceId}:undefined);}
-    else {for(const item of inspectorWindows){if(item.kind==='repair')continue;wm.close(item.id);frame.closeInspector(item.id);}}
+    else {for(const item of inspectorWindows){if(item.kind==='repair')continue;wm.close(item.id);frame.closeInspector(item.id);}control.current?.highlight?.(undefined);control.current?.preview?.(undefined);}
   },[wm.open,wm.close,frame.openInspector,frame.closeInspector,inspectorWindows]);
   // A refused session is never shown as stale data: the panel offers re-pairing, the same ErrorState Classic uses.
   useEffect(()=>{
@@ -194,7 +197,7 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
       const active=[...wm.windows].filter(item=>item.display!=='minimized').sort((a,b)=>b.z-a.z)[0];
       if(active?.kind==='repair')return;
       if(active?.kind==='director-chat'){event.preventDefault();onLeaveDialogue();return;}
-      if(active&&active.kind!=='app'){event.preventDefault();wm.close(active.id);frame.closeInspector(active.id);return;}
+      if(active&&active.kind!=='app'){event.preventDefault();wm.close(active.id);frame.closeInspector(active.id);control.current?.highlight?.(undefined);control.current?.preview?.(undefined);return;}
       if(frame.panelOpen){event.preventDefault();frame.closePanels();}
     };
     window.addEventListener('keydown',keydown);return()=>window.removeEventListener('keydown',keydown);
@@ -211,7 +214,7 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
     frame.closePanels();
     if(waits)pendingOverview.current=true;else settleOverview();
   };
-  const closeToolsForOverview=()=>{for(const item of wm.windows){if(item.kind==='repair'||item.kind==='app')continue;if(item.kind==='director-chat'){onLeaveDialogue(false);continue;}wm.close(item.id);if(!['operations','status'].includes(item.kind))frame.closeInspector(item.id);}};
+  const closeToolsForOverview=()=>{for(const item of wm.windows){if(item.kind==='repair'||item.kind==='app')continue;if(item.kind==='director-chat'){onLeaveDialogue(false);continue;}wm.close(item.id);if(!['operations','status'].includes(item.kind))frame.closeInspector(item.id);}control.current?.highlight?.(undefined);control.current?.preview?.(undefined);};
   const overview=()=>{closeToolsForOverview();frame.openOverview();};
   const closeAllWindows=()=>{closeToolsForOverview();frame.closePanels();};
   const topWindowId=wm.windows.filter(item=>item.display!=='minimized').sort((a,b)=>b.z-a.z)[0]?.id;
@@ -257,20 +260,26 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
     case 'repair': content=<ErrorState error={error} retry={refresh} onPair={onPair}/>;break;
     case 'agent': content=!agent?<EmptyState title="Nhân viên này không còn trong danh sách"><p>Có thể phiên đã thay đổi. Tải lại dữ liệu để xem danh sách hiện tại.</p></EmptyState>:immersive?<AgentDialogue key={inspector.instanceId} api={api} projectId={id} agent={agent} view={workforce?.agents.find(a=>a.instanceId===inspector.instanceId)} handoffs={workforce?.handoffs??[]} revision={revision} titleOf={titleOf}/>:<AgentInspector api={api} projectId={id} agent={agent} view={workforce?.agents.find(a=>a.instanceId===inspector.instanceId)} handoffs={workforce?.handoffs??[]} revision={revision} titleOf={titleOf}/>;break;
     case 'unseated': content=<AgentList title="Lập trình viên chưa hiện trong cảnh" note="Cảnh có tối đa 20 chỗ ngồi. Những nhân viên dưới đây vẫn đang được theo dõi." agents={(model?.agents??[]).filter(a=>!a.seat)} onPick={instanceId=>openInspector({kind:'agent',instanceId})}/>;break;
-    case 'director': content=<DirectorInspector onChat={()=>go(`${base}/chat`)} onQueue={()=>openInspector({kind:'queue'})}/>;break;
+    case 'director': content=<DirectorInspector onChat={()=>{wm.close('director');frame.closeInspector('director');go(`${base}/chat`);}} onQueue={()=>{wm.close('director');frame.closeInspector('director');openInspector({kind:'queue'});}}/>;break;
     case 'queue': content=<IssueQueuePanel/>;break;
     case 'cabinet': content=<CabinetInspector api={api} projectId={id} run={run} evidence={runEvidence(run?.runId,decisions,handoffEvidence(workforce?.handoffs??[],undefined,run?.runId))}/>;break;
     case 'server': content=<ServerInspector api={api} projectId={id} session={session} fresh={!stale&&!authRequired} refresh={refresh}/>;break;
   }
   return frame.windowHost?createPortal(
-    <GameWindow id={toolId!} kind={inspector.kind} title={inspector.kind==='agent'?(agent?.label??'Nhân viên'):inspector.kind==='unseated'?'Lập trình viên chưa hiện trong cảnh':inspector.kind==='director'?'Director':inspector.kind==='queue'?'Sự cố':inspector.kind==='cabinet'?'Tài liệu':inspector.kind==='server'?'Máy chủ':'Cần ghép nối lại'} icon={inspector.kind==='agent'||inspector.kind==='unseated'?'agents':inspector.kind==='director'?'chat':inspector.kind==='queue'?'issues':inspector.kind==='cabinet'?'docs':inspector.kind==='server'?'server':'hourglass'} color={inspector.kind==='repair'?'var(--win-c-alert)':inspector.kind==='agent'||inspector.kind==='unseated'?'var(--win-c-people)':inspector.kind==='queue'?'var(--win-c-decide)':inspector.kind==='cabinet'?'var(--win-c-docs)':inspector.kind==='director'?'var(--win-c-chat)':'var(--win-c-system)'} rect={toolWindow?.rect??defaultRect(inspector.kind,{width:window.innerWidth,height:window.innerHeight})} display={toolWindow?.display??'normal'} z={toolWindow?.z??1} active={toolId===topWindowId} closable={inspector.kind!=='repair'} minimizable={inspector.kind!=='repair'} maximizable={inspector.kind!=='repair'} movable={window.innerWidth>=1100&&inspector.kind!=='repair'} resizable={window.innerWidth>=1100&&inspector.kind!=='repair'} onFocus={()=>wm.focus(toolId!)} onClose={()=>{wm.close(toolId!);frame.closeInspector(toolId!);}} onMinimize={()=>wm.minimize(toolId!)} onToggleMaximize={()=>wm.toggleMaximize(toolId!)} onMove={(dx,dy)=>wm.move(toolId!,dx,dy)} onResize={(dx,dy)=>wm.resize(toolId!,dx,dy)}>
+    <GameWindow id={toolId!} kind={inspector.kind} title={inspector.kind==='agent'?(agent?.label??'Nhân viên'):inspector.kind==='unseated'?'Lập trình viên chưa hiện trong cảnh':inspector.kind==='director'?'Director':inspector.kind==='queue'?'Sự cố':inspector.kind==='cabinet'?'Tài liệu':inspector.kind==='server'?'Máy chủ':'Cần ghép nối lại'} icon={inspector.kind==='agent'||inspector.kind==='unseated'?'agents':inspector.kind==='director'?'chat':inspector.kind==='queue'?'issues':inspector.kind==='cabinet'?'docs':inspector.kind==='server'?'server':'hourglass'} color={inspector.kind==='repair'?'var(--win-c-alert)':inspector.kind==='agent'||inspector.kind==='unseated'?'var(--win-c-people)':inspector.kind==='queue'?'var(--win-c-decide)':inspector.kind==='cabinet'?'var(--win-c-docs)':inspector.kind==='director'?'var(--win-c-chat)':'var(--win-c-system)'} rect={toolWindow?.rect??defaultRect(inspector.kind,{width:window.innerWidth,height:window.innerHeight})} display={toolWindow?.display??'normal'} z={toolWindow?.z??1} active={toolId===topWindowId} closable={inspector.kind!=='repair'} minimizable={inspector.kind!=='repair'} maximizable={inspector.kind!=='repair'} movable={window.innerWidth>=1100&&inspector.kind!=='repair'} resizable={window.innerWidth>=1100&&inspector.kind!=='repair'} onFocus={()=>wm.focus(toolId!)} onClose={()=>{wm.close(toolId!);frame.closeInspector(toolId!);control.current?.highlight?.(undefined);control.current?.preview?.(undefined);}} onMinimize={()=>wm.minimize(toolId!)} onToggleMaximize={()=>wm.toggleMaximize(toolId!)} onMove={(dx,dy)=>wm.move(toolId!,dx,dy)} onResize={(dx,dy)=>wm.resize(toolId!,dx,dy)}>
     {content}</GameWindow>,frame.windowHost):null;
   });
   const operationsWindow=wm.windows.find(item=>item.id==='operations');
   const statusWindow=wm.windows.find(item=>item.id==='status');
-  const statusLink=connectionText(connection,session?.state==='stopped'||session?.state==='unavailable');
+  const sessionInactive=Boolean(session&&['stopped','unavailable'].includes(session.state));
+  const statusLink=connectionText(connection,sessionInactive);
   const statusText=authRequired?'Cần ghép nối lại':stale?'Dữ liệu cũ':error!==undefined&&!model?'Lỗi đọc dữ liệu':statusLink.label;
-  const statusBlockers=(session?.blockers.length??0)+(currentRun(runs)?.blockers.length??0);
+  const visibleSessionBlockers=(session?.blockers??[]).filter(blocker=>(!d.directorLayout||blocker.code!=='chat_adapter_unavailable')&&(!sessionInactive||!['host_unavailable','host_inactive','session_unavailable'].includes(blocker.code)));
+  const visibleBlockers=[...visibleSessionBlockers,...(currentRun(runs)?.blockers??[])];
+  const statusBlockers=visibleBlockers.length;
+  const sessionStateText=session?({ready:'Đang hoạt động',starting:'Đang khởi động',stopping:'Đang dừng',stopped:'Đã dừng',unavailable:'Chưa kết nối'}[session.state]??session.state):'Đang đọc phiên';
+  const modelTierText=model?({full:'Đầy đủ',degraded:'Rút gọn',closed:'Phiên đang dừng'}[model.tier]??model.tier):(error?'Không đọc được dữ liệu':'Đang tải');
+  const agentLabels=useMemo(()=>new Map((model?.agents??[]).map(a=>[a.instanceId,a.label])),[model?.agents]);
   return <>
     {frame.host && createPortal(<section aria-label="Danh sách công việc" className="m-0 h-full">{model?<OfficeStage model={model} onSelect={select} links={list} control={control} excerpts={excerpts} immersive={immersiveOfficeEnabled()}/>:<>{list}</>}</section>,frame.host)}
     {inspected}
@@ -278,10 +287,10 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
       onOverview={overview} onNavigate={path=>{if(path==='')overview();else go(`${base}/${path}`);}} onDocuments={()=>openInspector({kind:'cabinet'})} onRefresh={refresh} onHistory={delta=>navigate(delta)} onPageReload={()=>navigate(0)}
       onFocusZone={focusZone} onAgentList={()=>openInspector({kind:'unseated'})}
       director={d.directorLayout?{canSend:d.chat.canSend,presenceLabel:presenceLabels[d.presence]}:undefined} onQueue={()=>openInspector({kind:'queue'})}
-      windowOpen={wm.windows.some(item=>item.display!=='minimized')} notifications={immersive?<OfficeNotifications connection={connection} session={session} stale={stale} authRequired={authRequired} model={model} onInbox={()=>go(`${base}/review`)} onClarifications={overview}/>:undefined}
+      windowOpen={wm.windows.some(item=>item.display!=='minimized')} notifications={immersive?<OfficeNotifications connection={connection} session={session} stale={stale} authRequired={authRequired} model={model} onInbox={()=>go(`${base}/review`)} onClarifications={overview} onServer={()=>openInspector({kind:'server'})} onDirector={()=>model?.director?select({kind:'director'}):go(`${base}/chat`)} onQueue={()=>openInspector({kind:'queue'})}/>:undefined}
       firstVisit={immersive?<FirstVisit projectId={id} active={!frame.panelOpen&&!dialogueOpen} onDirector={()=>model?.director?select({kind:'director'}):go(`${base}/chat`)} onTasks={()=>go(`${base}/runs`)} onInbox={()=>go(`${base}/review`)}/>:undefined}
-      onChatDraft={draft=>{navigate(`${base}/chat`,{state:{draft}});}} dock={<OperationsDock/>} dockSummary={dockSummary} onDockHeight={frame.setDockPx} onDockOpen={()=>wm.open('operations')} operationsOpen={Boolean(operationsWindow&&operationsWindow.display!=='minimized')} onStatusOpen={()=>wm.open('status')} onRun={runId=>go(`${base}/runs/${encodeURIComponent(runId)}`)} taskbar={quickChat => (<Taskbar quickChat={quickChat} mode={frame.mode} onMode={frame.setMode} onOverview={overview} onHistory={delta=>navigate(delta)} onPageReload={()=>navigate(0)} onRefresh={refresh} onCloseAll={closeAllWindows} projects={projects} projectId={id} onProject={next=>navigate(next?`/projects/${encodeURIComponent(next)}`:'/')} onNavigate={path=>go(`${base}/${path}`)} onDocuments={()=>openInspector({kind:'cabinet'})} onGuide={()=>replayFirstVisit(id)} onStatusOpen={()=>wm.open('status')} statusText={statusText}/>)} /> </>,frame.hud)}
+      onChatDraft={draft=>{if(d.directorLayout&&immersive){chatController.initialDraft(draft,crypto.randomUUID());onDirectorDialogue();return;}navigate(`${base}/chat`,{state:{draft}});}} dock={<OperationsDock/>} dockSummary={dockSummary} onDockHeight={frame.setDockPx} onDockOpen={()=>wm.open('operations')} operationsOpen={Boolean(operationsWindow&&operationsWindow.display!=='minimized')} onStatusOpen={()=>wm.open('status')} onRun={runId=>go(`${base}/runs/${encodeURIComponent(runId)}`)} taskbar={quickChat => (<Taskbar quickChat={quickChat} agentLabels={agentLabels} mode={frame.mode} onMode={frame.setMode} onOverview={overview} onHistory={delta=>navigate(delta)} onPageReload={()=>navigate(0)} onRefresh={refresh} onCloseAll={closeAllWindows} projects={projects} projectId={id} onProject={next=>navigate(next?`/projects/${encodeURIComponent(next)}`:'/')} onNavigate={path=>go(`${base}/${path}`)} {...(d.directorLayout?{onQueue:()=>openInspector({kind:'queue'})}:{})} onDocuments={()=>openInspector({kind:'cabinet'})} onGuide={()=>replayFirstVisit(id)} onStatusOpen={()=>wm.open('status')} statusText={statusText}/>)} /> </>,frame.hud)}
     {frame.windowHost&&operationsWindow&&createPortal(<GameWindow id="operations" kind="operations" title="Thao tác đã gửi" icon="tasks" color="var(--win-c-work)" rect={operationsWindow.rect} display={operationsWindow.display} z={operationsWindow.z} active={topWindowId==='operations'} closable minimizable maximizable movable={window.innerWidth>=1100} resizable={window.innerWidth>=1100} onFocus={()=>wm.focus('operations')} onClose={()=>wm.close('operations')} onMinimize={()=>wm.minimize('operations')} onToggleMaximize={()=>wm.toggleMaximize('operations')} onMove={(dx,dy)=>wm.move('operations',dx,dy)} onResize={(dx,dy)=>wm.resize('operations',dx,dy)}><OperationsDock/></GameWindow>,frame.windowHost)}
-    {frame.windowHost&&statusWindow&&createPortal(<GameWindow id="status" kind="status" title="Trạng thái văn phòng" icon="settings" color="var(--win-c-system)" rect={statusWindow.rect} display={statusWindow.display} z={statusWindow.z} active={topWindowId==='status'} closable minimizable maximizable movable={window.innerWidth>=1100} resizable={window.innerWidth>=1100} onFocus={()=>wm.focus('status')} onClose={()=>wm.close('status')} onMinimize={()=>wm.minimize('status')} onToggleMaximize={()=>wm.toggleMaximize('status')} onMove={(dx,dy)=>wm.move('status',dx,dy)} onResize={(dx,dy)=>wm.resize('status',dx,dy)}><dl className="status-window-details"><dt>Phiên</dt><dd>{session?.state??'Đang đọc phiên'}</dd><dt>Kết nối</dt><dd role="status">{statusLink.label}</dd><dt>Director</dt><dd>{d.directorLayout?presenceLabels[d.presence]:'Chưa có bàn Director'}</dd><dt>Nhân viên</dt><dd>{agentCounts(model).join(' · ')||'Chưa có dữ liệu nhân viên'}</dd><dt>Chất lượng dữ liệu</dt><dd>{model?.tier??(error?'Không đọc được dữ liệu':'Đang tải')}</dd><dt>Điểm cần lưu ý</dt><dd>{statusBlockers}</dd><dt>Ghép nối lại</dt><dd>{authRequired?'Cần ghép nối lại':'Không cần'}</dd><dt>Dữ liệu cũ</dt><dd>{stale?'Có':'Không'}</dd></dl></GameWindow>,frame.windowHost)}
+    {frame.windowHost&&statusWindow&&createPortal(<GameWindow id="status" kind="status" title="Trạng thái văn phòng" icon="settings" color="var(--win-c-system)" rect={statusWindow.rect} display={statusWindow.display} z={statusWindow.z} active={topWindowId==='status'} closable minimizable maximizable movable={window.innerWidth>=1100} resizable={window.innerWidth>=1100} onFocus={()=>wm.focus('status')} onClose={()=>wm.close('status')} onMinimize={()=>wm.minimize('status')} onToggleMaximize={()=>wm.toggleMaximize('status')} onMove={(dx,dy)=>wm.move('status',dx,dy)} onResize={(dx,dy)=>wm.resize('status',dx,dy)}><dl className="status-window-details"><dt>Phiên</dt><dd>{sessionStateText}</dd><dt>Kết nối</dt><dd role="status">{statusLink.label}</dd><dt>Director</dt><dd>{d.directorLayout?presenceLabels[d.presence]:'Chưa có bàn Director'}</dd><dt>Nhân viên</dt><dd>{agentCounts(model).join(' · ')||'Chưa có dữ liệu nhân viên'}</dd><dt>Chất lượng dữ liệu</dt><dd>{modelTierText}</dd><dt>Điểm cần lưu ý</dt><dd>{statusBlockers}</dd><dt>Ghép nối lại</dt><dd>{authRequired?'Cần ghép nối lại':'Không cần'}</dd><dt>Dữ liệu cũ</dt><dd>{stale?'Có':'Không'}</dd></dl>{visibleBlockers.length>0&&<Blockers items={visibleBlockers}/>}</GameWindow>,frame.windowHost)}
   </>;
 }
