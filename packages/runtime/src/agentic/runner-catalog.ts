@@ -8,13 +8,15 @@ import { javascriptAdapter } from "./javascript-adapter.js";
 import { nativeAdapters } from "./runner-adapters/native.js";
 import { managedAdapters } from "./runner-adapters/managed.js";
 import { pinRunnerDefinitions } from "./runner-provenance.js";
-const ignored = new Set([".git", ".bflow", "node_modules", ".venv", "venv", "dist", "coverage", "target", "build", "vendor", ".gradle", ".idea", ".next", "__pycache__"]);
+const ignored = new Set([".git", ".bflow", ".worktrees", "worktrees", ".gitnexus", ".superpowers", ".agents", "node_modules", ".venv", "venv", "dist", "coverage", "target", "build", "vendor", ".gradle", ".idea", ".next", "__pycache__"]);
 /** Deterministic bounded inventory, never follows directory or manifest symlinks. */
 export async function runnerInventory(root: string): Promise<string[]> {
   const files: string[] = [], pending = [root]; let visits = 0;
   while (pending.length) {
     const directory = pending.pop()!;
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const entries = await readdir(directory, { withFileTypes: true });
+    if (directory !== root && entries.some(entry => entry.name === ".git")) continue;
+    for (const entry of entries) {
       if (++visits > 30_000) throw new Error("Runner inventory exceeds bounds");
       if (entry.isSymbolicLink()) continue;
       const path = join(directory, entry.name);

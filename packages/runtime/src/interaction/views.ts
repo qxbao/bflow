@@ -91,6 +91,7 @@ function pendingActionBlocker(action: NonNullable<RunRecord["pendingAction"]>): 
   if (action.recovery === "capability_repair") return "capability_repair_pending";
   return "manual_resume_required";
 }
+const runViewCache = new WeakMap<JournalState, Map<string, WebRunView>>();
 export function projectRun(s: ReadSources, runId: string): WebRunView {
   const runs = s.state.runs.filter(
     (r) => r.delegation.sessionId === s.sessionId,
@@ -98,6 +99,28 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
   const r = runs.find((r) => r.runId === runId);
   if (!r) throw new Error("not_found");
   const core = r.coreCreated ? s.core.get(runId) : undefined;
+  let cacheBucket: Map<string, WebRunView> | undefined;
+  let cacheKey: string | undefined;
+  if (Object.isFrozen(s.state)) {
+    cacheBucket = runViewCache.get(s.state);
+    if (!cacheBucket) {
+      cacheBucket = new Map();
+      runViewCache.set(s.state, cacheBucket);
+    }
+    cacheKey = JSON.stringify([
+      runId,
+      s.sessionId,
+      s.ready,
+      Boolean(s.commandsSupported),
+      s.transport ?? s.observedAt,
+      core ?? null,
+      s.pendingClarifications?.[r.delegation.correlationId] ?? null,
+      Boolean(s.redact),
+      Boolean(s.redactOption),
+    ]);
+    const cached = cacheBucket.get(cacheKey);
+    if (cached) return cached;
+  }
   const stale =
     r.coreCreated &&
     (!core || s.state.pendingCore.some((p) => p.runId === r.runId));
@@ -154,7 +177,7 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
     actions.length > 100 ||
     decisions.length > 100 ||
     (core?.tasks.length ?? 0) > 1000;
-  return WebRunViewSchema.parse({
+  const view = WebRunViewSchema.parse({
     apiVersion: 1,
     runId: r.runId,
     sessionId: s.sessionId,
@@ -251,6 +274,8 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
     availableActions: actions.slice(0, 100),
     updatedAt,
   });
+  if (cacheBucket && cacheKey) cacheBucket.set(cacheKey, view);
+  return view;
 }
 export function paginateRuns(s: ReadSources, input: WebRunQuery) {
   const query = WebRunQuerySchema.parse(input);
@@ -314,30 +339,47 @@ const WebWorkforceResultSchema = OperationResultSchema(WebWorkforceViewSchema);
 const WebExcerptsResultSchema = OperationResultSchema(WebWorkforceExcerptsSchema);
 const WebTranscriptResultSchema = OperationResultSchema(WebAgentTranscriptSchema);
 const WebActivityResultSchema = OperationResultSchema(WebPageSchema(WebActivityEntrySchema));
+const inflightSnapshotBytes = new Map<string, Promise<Buffer | undefined>>();
+async function readSnapshotBytes(path: string, maxBytes: number): Promise<Buffer | undefined> {
+  const key = `${path}:${maxBytes}`;
+  const existing = inflightSnapshotBytes.get(key);
+  if (existing) return existing;
+  const work = (async () => {
+    let file;
+    try {
+      file = await open(
+        path,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw e;
+    }
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.size > maxBytes)
+        throw new Error("Invalid read source");
+      const bytes = await file.readFile();
+      if (bytes.byteLength > maxBytes)
+        throw new Error("Read source too large");
+      return bytes;
+    } finally {
+      await file.close();
+    }
+  })();
+  inflightSnapshotBytes.set(key, work);
+  try {
+    return await work;
+  } finally {
+    if (inflightSnapshotBytes.get(key) === work) inflightSnapshotBytes.delete(key);
+  }
+}
 async function readSnapshot(path: string): Promise<unknown | undefined>;
 async function readSnapshot<T>(path: string, decode: (bytes: Buffer) => T, maxBytes?: number): Promise<T | undefined>;
 async function readSnapshot(path: string, decode?: (bytes: Buffer) => unknown, maxBytes = 16 * 1024 * 1024): Promise<unknown | undefined> {
-  let file;
-  try {
-    file = await open(
-      path,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw e;
-  }
-  try {
-    const stat = await file.stat();
-    if (!stat.isFile() || stat.size > maxBytes)
-      throw new Error("Invalid read source");
-    const bytes = await file.readFile();
-    if (bytes.byteLength > maxBytes)
-      throw new Error("Read source too large");
-    return decode ? decode(bytes) : JSON.parse(bytes.toString("utf8"));
-  } finally {
-    await file.close();
-  }
+  const bytes = await readSnapshotBytes(path, maxBytes);
+  if (bytes === undefined) return undefined;
+  return decode ? decode(bytes) : JSON.parse(bytes.toString("utf8"));
 }
 export async function hostInteractionQuery(
   configuration: HostConfiguration,

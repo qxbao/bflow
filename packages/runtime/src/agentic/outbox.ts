@@ -423,9 +423,11 @@ export class HerdrOutbox {
         Date.parse(this.now()) - Date.parse(out.handle.acceptedAt) >= 45_000;
       if (canReleaseOnPromptReady && liveOccupant && health.value.readyForPrompt)
         await this.release(out); // transport capacity only; never task-success evidence
-      else if (health.ok && health.value.occupantMatches && health.value.paneId !== out.handle.target.paneId &&
-          out.message.recipient.role === "coordinator")
-        await this.release(out); // singleton Coordinator moved to a new session pane; release transport capacity without claiming specialist/review outcomes
+      else if (out.message.recipient.role === "coordinator" && (
+          this.options.directorMailbox ||
+          (health.ok && health.value.occupantMatches && health.value.paneId !== out.handle.target.paneId) ||
+          (coordinatorRun !== undefined && (coordinatorRun.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(coordinatorRun.status)))))
+        await this.release(out); // singleton Coordinator moved to a new session pane, upgraded to Director layout, or run ended; release transport capacity without claiming specialist/review outcomes
       else if (liveOccupant && !out.parentAssignmentId &&
           (out.leaseRenewal !== undefined || !out.lease || Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000)) {
         try { await this.renew(out); } catch (error) { out.error = String(error); await this.save(); } // a bounded host measurement may outlive one lease period

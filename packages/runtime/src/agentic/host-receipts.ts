@@ -212,6 +212,8 @@ export class HostReceiptJournal {
   readonly repository: string;
   private readonly activityLog: { record(input: TaskActivityInput): Promise<boolean> };
   private readonly noticeCache = new Map<string, ConversationNotice>();
+  private readonly receiptCache = new Map<string, { mtimeMs: number; size: number; ino: number; id: string; payload: JsonValue }>();
+  private directoryPrepared = false;
   private noticeAppends: Promise<unknown> = Promise.resolve();
   constructor(
     directory: string,
@@ -227,10 +229,13 @@ export class HostReceiptJournal {
     );
   }
   private async prepare(): Promise<void> {
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    if (!this.directoryPrepared) {
+      await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    }
     const stat = await lstat(this.directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.())
       throw new Error("Unsafe host receipt directory");
+    this.directoryPrepared = true;
   }
   private filename(kind: Kind, id: string): string { return `${kind}-${digest(textField(id))}.json`; }
   private parsePayload(kind: Kind, input: unknown): JsonValue {
@@ -376,14 +381,21 @@ export class HostReceiptJournal {
       try { stat = await lstat(this.directory); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
       if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()) throw new Error("Unsafe host receipt directory");
     }
+    const name = this.filename(kind, id);
     let file;
-    try { file = await open(join(this.directory, this.filename(kind, id)), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    try { file = await open(join(this.directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { this.receiptCache.delete(name); return undefined; } throw error; }
     try {
       const stat = await file.stat();
       if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.() || stat.size > 16 * 1024 * 1024)
         throw new Error("Unsafe host receipt file");
-      return this.validate(JSON.parse(await file.readFile("utf8")), kind, id).payload;
+      const cached = this.receiptCache.get(name);
+      if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size && cached.ino === stat.ino && cached.id === id) {
+        return json(cached.payload);
+      }
+      const payload = this.validate(JSON.parse(await file.readFile("utf8")), kind, id).payload;
+      this.receiptCache.set(name, { mtimeMs: stat.mtimeMs, size: stat.size, ino: stat.ino, id, payload });
+      return json(payload);
     } finally { await file.close(); }
   }
   private async write(kind: Kind, id: string, input: unknown): Promise<boolean> {
@@ -479,10 +491,21 @@ export class HostReceiptJournal {
   private async receiptId(kind: Kind, name: string): Promise<string> {
     const file = await open(join(this.directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     let id: string;
-    try { const stat = await file.stat(); if (!stat.isFile() || stat.size > 16 * 1024 * 1024) throw new Error("Unsafe host receipt file");
-      id = textField(record(JSON.parse(await file.readFile("utf8"))).id); } finally { await file.close(); }
+    let stat;
+    let raw: unknown;
+    try {
+      stat = await file.stat();
+      if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.() || stat.size > 16 * 1024 * 1024) throw new Error("Unsafe host receipt file");
+      const cached = this.receiptCache.get(name);
+      if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size && cached.ino === stat.ino && name === this.filename(kind, cached.id)) {
+        return cached.id;
+      }
+      raw = JSON.parse(await file.readFile("utf8"));
+      id = textField(record(raw).id);
+    } finally { await file.close(); }
     if (name !== this.filename(kind, id)) throw new Error("Host receipt filename identity mismatch");
-    await this.read(kind, id);
+    const payload = this.validate(raw, kind, id).payload;
+    this.receiptCache.set(name, { mtimeMs: stat.mtimeMs, size: stat.size, ino: stat.ino, id, payload });
     return id;
   }
   private async coordinatorStarts(): Promise<CoordinatorTurnObservation[]> {

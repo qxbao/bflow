@@ -1012,6 +1012,9 @@ export class EnvironmentLifecycle {
         message: error.message + " Run bflow up to resume/reconcile the persisted workflows, or bflow down --force to stop now; durable state is preserved and the next bflow up reconciles it." });
       if (!force && unreachableOwner && error instanceof EnvironmentError) throw new EnvironmentError({ ...error.contractError,
         message: error.message + " Run bflow down --force to stop the unreachable host owner and session; durable state is preserved." });
+      if (!force && staleExecution && error instanceof Error) {
+        error.message = `${error.message} Run bflow down --force to stop the incompatible host and session; durable state is preserved.`;
+      }
       if (!force || !(unactivated || unreachableOwner || staleExecution || /Unknown host operation/.test(msg))) throw error;
     }
     this.progress("Tiến trình nền không thể chạy rào chắn dừng an toàn; đang buộc dừng. Trạng thái bền vững được giữ nguyên và sẽ được đối soát ở lần 'bflow up' tiếp theo.");

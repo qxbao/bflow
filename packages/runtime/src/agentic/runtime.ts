@@ -346,6 +346,10 @@ export class AgenticWorkflowRuntime {
   async continueProviderFailovers(): Promise<void> {
     await this.initialize();
     if (this.quiesced) return;
+    const hasPending = await this.journal.project(state =>
+      state.runs.some(run => run.tasks.some(task => (task.failovers ?? []).some(entry => !["dispatched", "cancelled"].includes(entry.phase))))
+    );
+    if (!hasPending) return;
     await this.transaction(async (state, save, core, outbox) => { await this.providerFailovers(state, save, core, outbox).continue(); });
   }
   /** Stop new scheduling before lifecycle checkpointing; retain in-flight receipts and worktrees. */
@@ -456,16 +460,36 @@ export class AgenticWorkflowRuntime {
       return request.success && request.data.runId === runId;
     }));
   }
+  private snapshotActivityState(state: Readonly<JournalState>) {
+    return {
+      events: new Set(state.pendingCore.flatMap(batch => batch.events.map(event => event.eventId))),
+      runs: new Map(state.runs.map(run => [run.runId, {
+        status: run.status,
+        error: run.error,
+        decisionJson: JSON.stringify(run.decision),
+        tasks: new Map(run.tasks.map(task => [task.taskId, {
+          failoverDigests: new Map((task.failovers ?? []).map(entry => [entry.switchId, digest(entry)])),
+          resultRequestId: task.result?.requestId,
+          resultStatus: task.result?.status,
+          cycleStatus: task.cycle?.status,
+          cycleHistoryLen: task.cycle?.history.length,
+          evidenceIds: new Set((Array.isArray(task.spec.strategy.metadata?.tddEvidence) ? task.spec.strategy.metadata.tddEvidence : [])
+            .flatMap(item => typeof item === "object" && item !== null && !Array.isArray(item) && typeof item.verificationId === "string" ? [item.verificationId] : []))
+        }]))
+      }])),
+      out: new Map(state.outbound.map(item => [item.message.message_id, { status: item.status, error: item.error }])),
+      inbox: new Set(state.inbox.map(item => item.message.message_id))
+    };
+  }
   private async transaction<T>(action: (state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox) => Promise<T>, recoverPhases = true): Promise<T> {
     const nativeCancellations = new Map<string, string>();
     let result: T;
     try { result = await this.journal.exclusive(async (state, save) => {
       this.nativeCancellationEffects.set(state, nativeCancellations);
       this.refreshTaskLogAssignmentSnapshot(state);
-      let previous = structuredClone(state);
+      let previous = this.snapshotActivityState(state);
       const logChanges = async () => {
-        const oldEvents = new Set(previous.pendingCore.flatMap(batch => batch.events.map(event => event.eventId)));
-        for (const batch of state.pendingCore) for (const event of batch.events) if (!oldEvents.has(event.eventId) && event.type !== "command.completed") {
+        for (const batch of state.pendingCore) for (const event of batch.events) if (!previous.events.has(event.eventId) && event.type !== "command.completed") {
           const payload = typeof event.payload === "object" && event.payload !== null && !Array.isArray(event.payload) ? event.payload as Record<string, unknown> : {};
           const kind = event.type.startsWith("approval.") ? "approval" : event.type.startsWith("quality_gate.") ? "verification" :
             event.type === "agent.delivery_uncertain" ? "error" : event.type === "agent.delivery_reconciled" ? "recovery" :
@@ -475,37 +499,35 @@ export class AgenticWorkflowRuntime {
             ...(event.taskId ? { taskId: event.taskId } : {}), ...(typeof payload.attemptId === "string" ? { attemptId: payload.attemptId } : {}),
             ...(outcome ? { outcome } : {}) });
         }
-        const oldRuns = new Map(previous.runs.map(run => [run.runId, run.status]));
         for (const run of state.runs) {
-          const before = oldRuns.get(run.runId);
+          const beforeRun = previous.runs.get(run.runId);
+          const before = beforeRun?.status;
           if (before === undefined) await this.activityLog.record({ kind: "admission", role: "runtime", action: "run_admitted", runId: run.runId, outcome: run.status });
           else if (before !== run.status) await this.activityLog.record({ kind: run.status === "cancelled" ? "cancellation" : run.status === "awaiting_approval" ? "approval" : ["completed", "completed_with_parked", "failed", "escalated"].includes(run.status) ? "result" : "progress",
             role: "runtime", action: "run_status_changed", runId: run.runId, outcome: `${before} -> ${run.status}` });
-          const beforeRun = previous.runs.find(item => item.runId === run.runId);
           if (run.error && beforeRun?.error !== run.error)
             await this.activityLog.record({ kind: "error", role: "runtime", action: "run_error_recorded", runId: run.runId, outcome: "A Runtime workflow error was recorded; inspect the authorized run diagnostics." });
           for (const task of run.tasks) {
-            const beforeTask = beforeRun?.tasks.find(item => item.taskId === task.taskId);
+            const beforeTask = beforeRun?.tasks.get(task.taskId);
             for (const entry of task.failovers ?? []) {
-              const prior = beforeTask?.failovers?.find(item => item.switchId === entry.switchId);
-              if (digest(prior) !== digest(entry)) await this.activityLog.record({ kind: "recovery", role: "runtime", action: "provider_failover",
+              const priorDigest = beforeTask?.failoverDigests.get(entry.switchId);
+              if (priorDigest !== digest(entry)) await this.activityLog.record({ kind: "recovery", role: "runtime", action: "provider_failover",
                 runId: run.runId, taskId: task.taskId, attemptId: entry.sourceHandle.attemptId,
                 outcome: `${entry.failure.kind}; ${entry.phase}; policy=${entry.policy.policyVersion}; ${entry.current.provider} -> ${entry.destination?.provider ?? "pending"}; usage=unknown`,
                 ...(entry.reason ? { reason: entry.reason } : {}) });
             }
             if (!beforeTask) await this.activityLog.record({ kind: "specification", role: "runtime", action: "task_specification_accepted",
               runId: run.runId, taskId: task.taskId, outcome: `${task.spec.specification.level}/${task.spec.strategy.tddDecision.mode}` });
-            if (!beforeTask || beforeTask.result?.requestId !== task.result?.requestId || beforeTask.result?.status !== task.result?.status) {
+            if (!beforeTask || beforeTask.resultRequestId !== task.result?.requestId || beforeTask.resultStatus !== task.result?.status) {
               if (task.result) await this.activityLog.record({ kind: task.result.status === "blocked" || task.result.status === "failed" || task.result.status === "timed_out" ? "error" : "transport",
                 role: "runtime", action: `agent_result:${task.result.status}`, runId: run.runId, taskId: task.taskId, attemptId: task.result.attemptId,
                 outcome: "Authenticated result received; independent acceptance may still be pending" });
             }
-            if (beforeTask?.cycle?.status !== task.cycle?.status || beforeTask?.cycle?.history.length !== task.cycle?.history.length)
+            if (beforeTask?.cycleStatus !== task.cycle?.status || beforeTask?.cycleHistoryLen !== task.cycle?.history.length)
               await this.activityLog.record({ kind: "verification", role: "runtime", action: "verification_cycle_changed", runId: run.runId, taskId: task.taskId,
                 outcome: task.cycle?.status ?? "started" });
-            const beforeEvidence = Array.isArray(beforeTask?.spec.strategy.metadata?.tddEvidence) ? beforeTask.spec.strategy.metadata.tddEvidence : [];
             const currentEvidence = Array.isArray(task.spec.strategy.metadata?.tddEvidence) ? task.spec.strategy.metadata.tddEvidence : [];
-            const priorEvidenceIds = new Set(beforeEvidence.flatMap(item => typeof item === "object" && item !== null && !Array.isArray(item) && typeof item.verificationId === "string" ? [item.verificationId] : []));
+            const priorEvidenceIds = beforeTask?.evidenceIds ?? new Set<string>();
             for (const evidence of currentEvidence) {
               if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) continue;
               const receipt = evidence as Record<string, unknown>, phase = typeof receipt.metadata === "object" && receipt.metadata !== null && !Array.isArray(receipt.metadata)
@@ -515,23 +537,21 @@ export class AgenticWorkflowRuntime {
                 await this.activityLog.record({ kind: "tdd", role: "runtime", action: `tdd_evidence_accepted:${phaseName}`, runId: run.runId, taskId: task.taskId });
             }
           }
-          if (beforeRun && JSON.stringify(beforeRun.decision) !== JSON.stringify(run.decision) && run.decision)
+          if (beforeRun && beforeRun.decisionJson !== JSON.stringify(run.decision) && run.decision)
             await this.activityLog.record({ kind: "approval", role: "runtime", action: "approval_decision_recorded", runId: run.runId, outcome: run.decision.decision });
         }
-        const oldOut = new Map(previous.outbound.map(item => [item.message.message_id, item]));
         for (const item of state.outbound) {
-          const before = oldOut.get(item.message.message_id);
+          const before = previous.out.get(item.message.message_id);
           if (before?.status === item.status && before?.error === item.error) continue;
           const type = item.message.type;
           await this.activityLog.record({ kind: type === "task.assignment" ? "assignment" : type === "verification.requested" ? "verification" : type === "approval.request" ? "approval" : "planning",
             role: "runtime", action: before ? `${type}:${before.status}->${item.status}` : type,
             ...(item.message.run_id ? { runId: item.message.run_id } : {}), taskId: taskLogBusinessTaskId(item) ?? item.taskId, attemptId: item.attemptId, outcome: item.status });
         }
-        const oldInbox = new Set(previous.inbox.map(item => item.message.message_id));
-        for (const item of state.inbox) if (!oldInbox.has(item.message.message_id)) await this.activityLog.record({
+        for (const item of state.inbox) if (!previous.inbox.has(item.message.message_id)) await this.activityLog.record({
           kind: item.message.type.includes("approval") ? "approval" : item.message.type.includes("verification") || item.message.type === "review.verdict" ? "verification" : item.message.type === "implementation.submitted" ? "transport" : "progress",
           role: item.message.sender.role, action: item.message.type, ...(item.message.run_id ? { runId: item.message.run_id } : {}), outcome: item.status });
-        previous = structuredClone(state);
+        previous = this.snapshotActivityState(state);
       };
       const saveAndLog = async () => { await save(); this.refreshTaskLogAssignmentSnapshot(state); await logChanges(); };
       const core = new CoreSession(this.ports, state, saveAndLog, this.coreRestoreCache);
@@ -677,7 +697,7 @@ export class AgenticWorkflowRuntime {
   async recoverMissingCoordinatorWakeups(): Promise<JsonValue> {
     // `received` is the durable inbox write-ahead before semantic application. The envelope was parsed and authenticated
     // before that write. Reapply all business validators, deferring blocked/terminal runs until an authorized resume.
-    const received = await this.transaction(async state => state.inbox.filter(item => item.status === "received" &&
+    const received = await this.journal.project(state => state.inbox.filter(item => item.status === "received" &&
         (isCancellationHandoff(item.message) || state.outbound.some(out => out.reviewReplacement && out.message.message_id === item.message.causation_id) || !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
           TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message) &&
           !this.acceptsPausedUserDecision(run, item.message) &&
@@ -697,20 +717,28 @@ export class AgenticWorkflowRuntime {
         await this.reportInboundFailure(message, String(error));
       }
     }
-    const deliveredApprovals = await this.transaction(async state => {
-      const result = await this.ports.panes?.getManifest?.();
-      const sender = result?.ok ? SessionManifestSchema.parse(result.value).panes.find(pane => pane.role === "conversation") : undefined;
-      return state.outbound.filter(out => out.message.sender.role === "conversation" && out.message.recipient.role === "coordinator" &&
+    const rawDeliveredApprovals = await this.journal.project(state =>
+      state.outbound.filter(out => out.message.sender.role === "conversation" && out.message.recipient.role === "coordinator" &&
         out.message.type === "approval.decision" && (out.handle !== undefined && ["accepted", "released"].includes(out.status) ||
           out.delivery === "director_mailbox" && out.status === "delivered") &&
         !state.inbox.some(item => item.message.message_id === out.message.message_id ||
           (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
         state.runs.some(run => run.runId === out.message.run_id && !run.cancelled &&
           (!TERMINAL_RUN_STATUSES.includes(run.status) || this.acceptsPausedUserDecision(run, out.message))))
-        .map(out => ({ mailbox: out.delivery === "director_mailbox", message: RoleMessageSchema.parse(sender && (!out.message.sender.pane_id || !out.message.sender.agent_id)
-          ? { ...out.message, sender: { ...out.message.sender, pane_id: out.message.sender.pane_id ?? sender.paneId, agent_id: out.message.sender.agent_id ?? sender.agentId } }
-          : out.message) }));
-    });
+        .map(out => ({ mailbox: out.delivery === "director_mailbox", message: out.message }))
+    );
+    const sender = rawDeliveredApprovals.length > 0
+      ? await (async () => {
+          const result = await this.ports.panes?.getManifest?.();
+          return result?.ok ? SessionManifestSchema.parse(result.value).panes.find(pane => pane.role === "conversation") : undefined;
+        })()
+      : undefined;
+    const deliveredApprovals = rawDeliveredApprovals.map(out => ({
+      mailbox: out.mailbox,
+      message: RoleMessageSchema.parse(sender && (!out.message.sender.pane_id || !out.message.sender.agent_id)
+        ? { ...out.message, sender: { ...out.message.sender, pane_id: out.message.sender.pane_id ?? sender.paneId, agent_id: out.message.sender.agent_id ?? sender.agentId } }
+        : out.message)
+    }));
     for (const { message, mailbox } of deliveredApprovals) {
       try {
         if (!await this.ports.authorizeHuman(ApprovalDecisionSchema.parse(message.payload))) {
@@ -724,6 +752,47 @@ export class AgenticWorkflowRuntime {
         await this.reportInboundFailure(message, String(error));
       }
     }
+    const needsWakeTransaction = await this.journal.project(state => {
+      if (state.runs.some(run =>
+        (run.nativeDeliveries ?? []).some(entry => this.durablySettledNative(state, entry.message)) ||
+        (run.pendingAction?.kind === "reconcile_delivery" && run.pendingAction.state === "pending" && !run.cancelled && (
+          (() => {
+            const action = run.pendingAction!;
+            const intent = (run.nativeDeliveries ?? []).find(entry => entry.message.message_id === action.sourceMessageId);
+            return intent ? this.durablySettledNative(state, intent.message) : state.inbox.some(item =>
+              item.message.message_id === action.sourceMessageId && item.message.run_id === run.runId &&
+              item.message.correlation_id === run.delegation.correlationId && item.message.idempotency_key !== undefined && ["received", "applied", "rejected"].includes(item.status));
+          })()
+        ))
+      )) return true;
+      for (const item of state.inbox) {
+        if (item.status !== "applied") continue;
+        const message = item.message;
+        if (isConversationContext(message)) {
+          if (!message.run_id) continue;
+          const run = state.runs.find(candidate => candidate.runId === message.run_id);
+          if (!run || run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status) ||
+              message.correlation_id !== run.delegation.correlationId) continue;
+          const wakeId = `p19-wake-${digest([run.runId, message.message_id])}`;
+          if (!state.outbound.some(out => out.message.message_id === wakeId)) return true;
+          continue;
+        }
+        if (message.recipient.role === "coordinator" && message.sender.role !== "coordinator" && message.sender.role !== "conversation") {
+          if (!message.run_id || !message.causation_id || !["spec.draft", "task.status", "verification.escalation"].includes(message.type)) continue;
+          const source = state.outbound.find(out => out.message.message_id === message.causation_id && out.message.run_id === message.run_id &&
+            out.message.recipient.role === message.sender.role && out.handle?.target.agentId === message.sender.agent_id &&
+            out.handle?.target.paneId === message.sender.pane_id && ["accepted", "released"].includes(out.status));
+          if (!source) continue;
+          const run = state.runs.find(candidate => candidate.runId === message.run_id);
+          if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || run.status === "awaiting_approval" ||
+              Object.values(run.userDecisions ?? {}).some(decision => decision.status === "pending")) continue;
+          const wakeId = `p19-wake-${digest([run.runId, message.message_id])}`;
+          if (!state.outbound.some(out => out.message.message_id === wakeId)) return true;
+        }
+      }
+      return false;
+    });
+    if (!needsWakeTransaction) return json({ recovered: replayed });
     return this.transaction(async (state, save, _core, outbox) => {
       let recovered = 0;
       for (const item of state.inbox.filter(entry => entry.status === "applied" && entry.message.recipient.role === "coordinator" &&
@@ -1288,7 +1357,7 @@ export class AgenticWorkflowRuntime {
     this.inProcessDelivery ??= (async () => {
       try {
         if (this.quiesced) return;
-        const pending = await this.journal.exclusive(async state =>
+        const pending = await this.journal.project(state =>
           state.outbound.filter(out => isInProcessDelivery(out) && out.status === "sending").map(out => ({ message: out.message, mailbox: out.delivery === "director_mailbox" })));
         for (const { message, mailbox } of pending) {
           let error: string | undefined, terminal = false;
@@ -1363,7 +1432,7 @@ export class AgenticWorkflowRuntime {
    * (Conversation cannot be reached through the failing inbox) and dedupes by message_id.
    */
   async failedConversationDeliveries(): Promise<{ message: RoleMessage; error: string; attempts: number }[]> {
-    return this.journal.exclusive(async state => state.outbound.filter(out => out.status === "failed" && isConversationDelivery(out) && out.delivery === undefined)
+    return this.journal.project(state => state.outbound.filter(out => out.status === "failed" && isConversationDelivery(out) && out.delivery === undefined)
       .map(out => ({ message: out.message, error: out.error ?? "Conversation delivery failed", attempts: out.deliveryAttempts ?? 0 })));
   }
   private readonly gateWaiters = new Map<string, { runId: string; accept(result: QualityGateResult): void; reject(error: Error): void }>();
@@ -1603,18 +1672,48 @@ export class AgenticWorkflowRuntime {
   }
   async inspect(runIdOrQuery?: string | InspectInput): Promise<JsonValue> {
     if (typeof runIdOrQuery === "string" || runIdOrQuery === undefined) {
-      return this.journal.exclusive(async state => json(runIdOrQuery ? publicExecutionRun(this.run(state, runIdOrQuery)) : {
+      return this.journal.project(state => json(runIdOrQuery ? publicExecutionRun(this.run(state, runIdOrQuery)) : {
         runs: state.runs.map(publicExecutionRun), outbound: state.outbound, inbox: state.inbox
       }));
     }
     const query = InspectInputSchema.parse(runIdOrQuery);
-    const raw = await this.journal.exclusive(async state => json(query.runId ? publicExecutionRun(this.run(state, query.runId)) : {
-      runs: state.runs.map(publicExecutionRun), outbound: state.outbound, inbox: state.inbox
+    return this.journal.project(state => {
+      const raw = query.runId ? publicExecutionRun(this.run(state, query.runId)) : {
+        runs: state.runs.map(publicExecutionRun), outbound: state.outbound, inbox: state.inbox
+      };
+      if (query.view === undefined && query.taskId === undefined && query.cursor === undefined) {
+        return json(raw);
+      }
+      return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
+    });
+  }
+  /** Read-only bounded projection for Director progress snapshots (`bflow progress` and `/api/v1/projects/:id/director`). */
+  async inspectDirectorProgressState(): Promise<unknown> {
+    return this.journal.project(state => ({
+      runs: state.runs.slice(-100).map(run => ({
+        runId: run.runId,
+        status: run.status,
+        cancelled: run.cancelled,
+        delegation: { title: run.delegation.title },
+        ...(run.workflowSpec ? { workflowSpec: { specification: { title: run.workflowSpec.specification.title } } } : {}),
+        ...(run.definition ? { definition: { id: run.definition.id, name: run.definition.name,
+          tasks: run.definition.tasks.map(t => ({ id: t.id, role: t.role })) } } : {}),
+        ...(run.approval ? { approval: { approvalId: run.approval.approvalId } } : {}),
+        ...(run.decision ? { decision: { approvalId: run.decision.approvalId } } : {}),
+        ...(run.userDecisions ? { userDecisions: Object.fromEntries(Object.entries(run.userDecisions).map(([k, v]) => [k, { status: v.status }])) } : {}),
+        tasks: run.tasks.map(task => ({
+          taskId: task.taskId,
+          ...(task.parked ? { parked: task.parked } : {}),
+          ...(task.result ? { result: { status: task.result.status } } : {}),
+          ...(task.cycle ? { cycle: { status: task.cycle.status } } : {}),
+          outboundIds: task.outboundIds,
+          spec: { specification: { title: task.spec.specification.title } }
+        }))
+      }))
     }));
-    if (query.view === undefined && query.taskId === undefined && query.cursor === undefined) {
-      return raw;
-    }
-    return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
+  }
+  async inspectRunSessionId(runId: string): Promise<string | undefined> {
+    return this.journal.project(state => state.runs.find(run => run.runId === runId)?.delegation.sessionId);
   }
   /** Owner startup only, before intake; use the full locked journal, never a compact diagnostic view. */
   async recoverUnqueuedWebCancellations(store: WebOperationStore): Promise<string[]> {
@@ -2016,7 +2115,7 @@ export class AgenticWorkflowRuntime {
 
   /** One recovery pass over durable, already-authorized park intents. Failed settlement keeps both task and outbound fenced. */
   private async recoverParkSettlements(): Promise<void> {
-    const pending = await this.journal.exclusive(async state => state.runs.filter(run => !run.cancelled && !ENDED_RUN_STATUSES.includes(run.status))
+    const pending = await this.journal.project(state => state.runs.filter(run => !run.cancelled && !ENDED_RUN_STATUSES.includes(run.status))
       .flatMap(run => run.tasks.flatMap(task => task.parkSettlement ? [{ runId: run.runId, taskId: task.taskId, ...task.parkSettlement.park }] : [])));
     for (const item of pending) {
       try { await this.parkTask({ runId: item.runId, taskId: item.taskId, reason: item.reason, kind: item.kind, source: item.source,
@@ -5681,24 +5780,61 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       }
     }
   }
-  async tick(): Promise<JsonValue> {
+  async tick(options?: { returnState?: boolean }): Promise<JsonValue> {
     await this.initialize();
-    if (this.quiesced) return this.inspect();
+    if (this.quiesced) return options?.returnState === false ? null : this.inspect();
     await this.recoverParkSettlements();
-    await this.transaction(async (state, save, core, outbox) => {
-      await this.drainCancellationControls(state, save, core, outbox);
-      await this.cleanupProfileSpecialists(state, save);
-    });
+    const needsCancelOrProfileCleanup = await this.journal.project(state =>
+      state.runs.some(item => item.cancelled && (
+        Boolean(item.pendingAction) ||
+        Object.values(item.userDecisions ?? {}).some(d => d.status === "pending") ||
+        Boolean(item.approval && item.approval.status !== "cancelled" && (!item.decision || item.decision.approvalId !== item.approval.approvalId)) ||
+        Boolean(item.prototype && item.prototype.status !== "cancelled" && item.prototype.status !== "superseded") ||
+        state.outbound.some(out => out.message.run_id === item.runId && !out.phaseRetirement &&
+          (out.status === "queued" || out.status === "cancelled" && out.lease !== undefined && !out.parentAssignmentId) &&
+          !isCancellationHandoff(out.message) && (out.message.recipient.role !== "conversation" || out.message.type === "approval.request"))
+      )) ||
+      state.outbound.some(item => (item.status === "queued" && !item.handle && isCancellationHandoff(item.message)) ||
+        Boolean(item.roleProfile && item.profileAllocationTaskId && !item.profileAllocationReleased))
+    );
+    if (needsCancelOrProfileCleanup) {
+      await this.transaction(async (state, save, core, outbox) => {
+        await this.drainCancellationControls(state, save, core, outbox);
+        await this.cleanupProfileSpecialists(state, save);
+      });
+    }
     try { await this.continueProviderFailovers(); } catch { /* isolate failover continuation errors so sibling runs still tick */ }
     await this.recoverMissingCoordinatorWakeups();
-    await this.transaction(async (state, save, _core, outbox) => { if (this.closeUserDecisionsOfEndedRuns(state, outbox)) await save(); });
-    const pending = await this.transaction(async state => structuredClone(state.pendingVerifications));
+    const prePending = await this.journal.project(state => ({
+      needsDecisionCleanup: state.runs.some(run => (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) && Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending")),
+      pending: state.pendingVerifications
+    }));
+    const pending = prePending.needsDecisionCleanup
+      ? await this.transaction(async (state, save, _core, outbox) => {
+          if (this.closeUserDecisionsOfEndedRuns(state, outbox)) await save();
+          return structuredClone(state.pendingVerifications);
+        })
+      : prePending.pending;
     for (const item of pending) {
       if (item.stuck) continue; // waits for an explicit retry_verification
       try { await this.finishVerification(this.parseJob(item.job), this.parseOutcome(item.outcome)); }
       catch (error) { await this.recordVerificationFailure(item, error); }
     }
-    const jobs = await this.transaction(async (state, save, core, outbox) => {
+    const needsMainTickWork = await this.journal.project(state =>
+      state.runs.some(run =>
+        (run.cancelled && !run.cancelReconciled) ||
+        (!run.cancelled && !(run.nativeDeliveries?.length) && !(run.pendingAction?.state === "pending" && run.pendingAction.recovery === "reconcile_delivery") &&
+          !["completed", "completed_with_parked", "failed", "cancelled", "escalated", "awaiting_approval", "intake", "clarifying", "specifying", "planning"].includes(run.status))
+      ) ||
+      state.outbound.some(out =>
+        !out.phaseRetirement && !out.reviewReplacement && (
+          Boolean(out.leaseRelease) ||
+          ["queued", "sending", "accepted", "unknown_delivery"].includes(out.status) ||
+          (out.status === "failed" && Boolean(out.error?.includes(RoleCapabilityPreflightError.name)))
+        )
+      )
+    );
+    const jobs = !needsMainTickWork ? [] : await this.transaction(async (state, save, core, outbox) => {
       const jobs: VerificationJob[] = [];
         for (const run of state.runs) {
           if (this.quiesced) break;
@@ -5867,7 +6003,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         });
       }
     }
-    return this.inspect();
+    return options?.returnState === false ? null : this.inspect();
   }
   /** Escalation whose only automatic recovery is an explicit, idempotent retry: the user gets concrete options. */
   private escalateForRetry(state: JournalState, outbox: HerdrOutbox, run: RunRecord, taskId: string, reason: string): void {

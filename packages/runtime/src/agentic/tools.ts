@@ -3,7 +3,7 @@ import { z } from "zod";
 import { record, strings, textField } from "./journal.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 import { AssessmentSpecificationSchema, assessmentErrorAt } from "./assessment-input.js";
-import { InspectInputSchema, summarizeInspectRun, summarizeInspectState } from "./mcp-output-views.js";
+import { InspectInputSchema } from "./mcp-output-views.js";
 
 // Keep tool-argument paths distinct from the nested public contract fields. The Runtime
 // also validates direct callers; provider discovery is guidance, never ingress proof.
@@ -50,7 +50,7 @@ export class CoordinatorTools {
     const alreadyRunning = this.pendingTick !== undefined;
     if (!this.pendingTick) {
       this.tickError = undefined;
-      const task = this.runtime.tick();
+      const task = this.runtime.tick({ returnState: false });
       this.pendingTick = task;
       void task.then(() => { if (this.pendingTick === task) this.pendingTick = undefined; }, error => {
         this.tickError = String(error); if (this.pendingTick === task) this.pendingTick = undefined;
@@ -82,11 +82,7 @@ export class CoordinatorTools {
           ...(typeof args.cursor === "string" && args.cursor.trim() === "" ? { cursor: undefined } : {})
         };
         const query = InspectInputSchema.parse(normalizedArgs);
-        const raw = await this.runtime.inspect(query.runId);
-        if (query.view === undefined && query.taskId === undefined && query.cursor === undefined) {
-          return raw;
-        }
-        return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
+        return this.runtime.inspect(query);
       }
       case "report_progress": return this.runtime.reportProgress(textField(args.runId ?? args.run_id), textField(args.headline), args.questions === undefined || args.questions === null ? [] : strings(args.questions));
       case "assess": {

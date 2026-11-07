@@ -910,9 +910,11 @@ export class RolePaneManager {
     if (!loadResult.ok) return loadResult;
     let savedManifest: SessionManifest | null = loadResult.value;
     let inheritedConversationSessionId: string | undefined;
+    let stoppedV2Manifest: SessionManifest | null = null;
     if (director && savedManifest !== null && !isDirectorSessionManifest(savedManifest)) {
       if (savedManifest.status !== "down") return conflictError(V2_SESSION_RUNNING_MESSAGE);
       inheritedConversationSessionId = savedManifest.conversationSessionId;
+      stoppedV2Manifest = savedManifest;
       savedManifest = null;
     }
     const savedDirector = savedManifest !== null && isDirectorSessionManifest(savedManifest) ? savedManifest : null;
@@ -944,6 +946,21 @@ export class RolePaneManager {
       return toCommandError(agentListOutcome, "Failed to list agents");
     }
     let liveAgents: readonly HerdrAgentInfo[] = parseAgentListResult(agentListOutcome);
+    const priorStoppedManifest = stoppedV2Manifest ??
+      (savedManifest?.status === "down" && savedManifest.metadata?.["shutdownMode"] === "force_incompatible_host" ? savedManifest : null);
+    if (priorStoppedManifest !== null && liveAgents.length > 0) {
+      const closedPaneIds = new Set<string>();
+      for (const pane of priorStoppedManifest.panes) {
+        const leftover = liveAgents.find(agent => agent.paneId === pane.paneId && agent.workspaceId === pane.workspaceId &&
+          agent.tabId === pane.tabId && agent.name === pane.agentId && agent.agent === pane.agentKind);
+        if (!leftover) continue;
+        const closed = await this.#runHerdr(["pane", "close", leftover.paneId], options);
+        if (closed.exitCode === 0 && !closed.failure) closedPaneIds.add(leftover.paneId);
+      }
+      if (closedPaneIds.size > 0) {
+        liveAgents = liveAgents.filter(agent => !closedPaneIds.has(agent.paneId));
+      }
+    }
     let preflightTabs: readonly HerdrTabInfo[] | undefined;
     const restoredTerminals = new Set<string>();
     for (const role of configuredRoles) {

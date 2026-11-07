@@ -34,8 +34,21 @@ export function automaticChecks(runners: readonly AutomaticRunner[] = AUTOMATIC_
 
 /** Static gate definitions for affected-scope regression checks on detected JS profiles (no adapter). */
 export function regressionChecks(profiles: readonly RunnerProfile[]): QualityGateDefinition[] {
+  const seen = new Set<string>();
   return profiles
-    .filter(profile => !profile.adapter)
+    .filter(profile => {
+      if (profile.adapter) return false;
+      const key = JSON.stringify([
+        profile.executable,
+        profile.args,
+        profile.reporter,
+        profile.dependencySource ?? "",
+        profile.prepare ?? null
+      ]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .map(profile => QualityGateDefinitionSchema.parse({
       id: `host-regression-${profile.id}`,
       name: `Independent regression ${profile.command}`,

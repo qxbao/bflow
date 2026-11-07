@@ -628,18 +628,22 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       // views on each event, so an unconditional publish is a self-sustaining refresh loop.
       if (Date.now() - webFeedObservedAt >= 1000) {
         webFeedObservedAt = Date.now();
-        const fingerprint = await webProjectionFingerprint();
-        if (fingerprint !== webFeedFingerprint) {
-          if (webFeedFingerprint !== undefined) webFeed.publish("invalidate", []);
-          webFeedFingerprint = fingerprint;
+        try {
+          const fingerprint = await webProjectionFingerprint();
+          if (fingerprint !== webFeedFingerprint) {
+            if (webFeedFingerprint !== undefined) webFeed.publish("invalidate", []);
+            webFeedFingerprint = fingerprint;
+          }
+          const notices = [...await receipts.unsurfacedConversationNotices(), ...await receipts.undisplayedUserFacingNotices()];
+          const pending = new Set(notices.map(n => n.messageId));
+          const fresh = [...pending].filter(id => !webFeedNotices.has(id));
+          // Forget settled notices so a later re-surface is announced again.
+          for (const id of webFeedNotices) if (!pending.has(id)) webFeedNotices.delete(id);
+          for (const id of fresh) webFeedNotices.add(id);
+          for (let offset = 0; offset < fresh.length; offset += 100) webFeed.publish("notice", fresh.slice(offset, offset + 100));
+        } finally {
+          webFeedObservedAt = Date.now();
         }
-        const notices = [...await receipts.unsurfacedConversationNotices(), ...await receipts.undisplayedUserFacingNotices()];
-        const pending = new Set(notices.map(n => n.messageId));
-        const fresh = [...pending].filter(id => !webFeedNotices.has(id));
-        // Forget settled notices so a later re-surface is announced again.
-        for (const id of webFeedNotices) if (!pending.has(id)) webFeedNotices.delete(id);
-        for (const id of fresh) webFeedNotices.add(id);
-        for (let offset = 0; offset < fresh.length; offset += 100) webFeed.publish("notice", fresh.slice(offset, offset + 100));
       }
   };
   const webAuthority = new WebInteractionAuthority(webProjectId, configuration.sessionId);
@@ -1951,7 +1955,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     directory: join(configuration.directory, "director"),
     repositoryRoot: configuration.repositoryPath,
     feed: webFeed,
-    inspect: () => requireWorkspace().runtime.inspect(),
+    inspect: () => requireWorkspace().runtime.inspectDirectorProgressState(),
     // Park-episode checks for issue retries (read-only Runtime run document).
     inspectRun: runId => requireWorkspace().runtime.inspect(runId),
     // read_coordinator_guide: the Director guide in the Director layout, the unchanged Coordinator guide for v2 sessions.
@@ -1998,12 +2002,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     layout: () => directorLayout ? "director" : "legacy_v2",
     ready: interactionReady,
     sessionId: () => manifest?.conversationSessionId,
-    inspect: () => requireWorkspace().runtime.inspect(),
+    inspect: () => requireWorkspace().runtime.inspectDirectorProgressState(),
     runSession: async runId => {
       if (!workspace) return undefined;
-      const run = record(await workspace.runtime.inspect(runId).catch(() => undefined));
-      const sessionId = record(run.delegation).sessionId;
-      return typeof sessionId === "string" ? sessionId : undefined;
+      return workspace.runtime.inspectRunSessionId(runId).catch(() => undefined);
     },
     feed: { publish: (type, resourceIds) => webFeed.publish(type, resourceIds) }
   });
@@ -3275,7 +3277,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const timer = setInterval(() => {
     if (!workspace || quiesced || closing || scheduler) return;
     if(!directorLayout&&!chatPump){chatPump=webChat.pump().catch(error=>{process.stderr.write(`Bflow chat: ${redactString(String(error)).slice(0,500)}\n`);}).finally(()=>{chatPump=undefined;});}
-    const task = (async () => { await pumpProviderFailures(); if (manifest && !activation) await extensionPump?.tick(); return workspace!.runtime.tick(); })(); scheduler = task;
+    const task = (async () => { await pumpProviderFailures(); if (manifest && !activation) await extensionPump?.tick(); return workspace!.runtime.tick({ returnState: false }); })(); scheduler = task;
     void task.then(() => { schedulerError = undefined; }, error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow scheduler: ${schedulerError}\n`); }).finally(() => { schedulerLastTickAt = new Date().toISOString(); if (scheduler === task) scheduler = undefined; });
   }, 500);
   schedulerTimerAlive = true;

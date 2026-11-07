@@ -27,7 +27,11 @@ import { CancellationStopProofSchema, NamespaceExitProofSchema, ownsCancelledAll
 import { PrototypeRecordSchema, type PrototypeRecord } from "./prototype-review.js";
 import { TaskFailoverSchema, type TaskFailover } from "./provider-failover-state.js";
 
-export function json(value: unknown): JsonValue { return JsonValueSchema.parse(JSON.parse(JSON.stringify(value))); }
+export function json(value: unknown): JsonValue {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) return JsonValueSchema.parse(value);
+  return JSON.parse(serialized) as JsonValue;
+}
 export function digest(value: unknown): string {
   const canonical = (v: unknown): string => Array.isArray(v) ? `[${v.map(canonical)}]` : v !== null && typeof v === "object"
     ? `{${Object.entries(v).filter(([, x]) => x !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => `${JSON.stringify(k)}:${canonical(x)}`)}}`
@@ -341,12 +345,20 @@ export function requiresDirectorJournal(state: Pick<JournalState, "runs" | "outb
       run.status === "completed_with_parked" || run.tasks.some(task => task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined || task.parkedVerifications !== undefined));
 }
 /** Private storage codec; exported schemas validate every persisted boundary value. */
-export function parseAgenticJournalState(input: unknown, repository: string): JournalState {
+export function parseAgenticJournalState(input: unknown, repository: string, baseline?: JournalState): JournalState {
   const root = record(input);
   if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7, 8].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
   const state = root as unknown as JournalState;
+  const trustedBaseline = baseline && baseline.repository === repository && baseline.version <= state.version ? baseline : undefined;
+  const baselineRuns = trustedBaseline ? new Map(trustedBaseline.runs.map(r => [r.runId, r])) : undefined;
+  const baselineOut = trustedBaseline ? new Map(trustedBaseline.outbound.map(o => [o.message.message_id, o])) : undefined;
+  const baselineInbox = trustedBaseline ? new Map(trustedBaseline.inbox.map(i => [i.message.message_id, i])) : undefined;
+  const seenRuns = new Set<string>(), seenOut = new Set<string>(), seenInbox = new Set<string>();
   for (const run of state.runs) {
+    const priorRun = typeof run?.runId === "string" && !seenRuns.has(run.runId) ? baselineRuns?.get(run.runId) : undefined;
+    if (priorRun && isDeepStrictEqual(run, priorRun)) { seenRuns.add(run.runId); continue; }
+    if (typeof run?.runId === "string") seenRuns.add(run.runId);
     textField(run.runId); run.delegation = DelegationRequestSchema.parse(run.delegation);
     if (run.delegation.runId !== run.runId) throw new Error("Journal run/delegation mismatch");
     if (state.version < 8 && run.delegation.requestedBy === "director") throw new Error("Director journal fields require private journal v8");
@@ -506,9 +518,12 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
             binding.agentId !== `dev-${digest([run.runId, task.parkSettlement.attemptId]).slice(0, 20)}`)
           throw new Error("Invalid unsent park allocation settlement ownership");
       }
-      if (task.changeSet) task.changeSet = GitChangeSetSchema.parse(task.changeSet);
-      if (task.cycle) task.cycle = VerificationCycleSchema.parse(task.cycle);
-      if (task.result) task.result = AgentResultSchema.parse(task.result);
+      if (task.changeSet && (!priorRun || !isDeepStrictEqual(task.changeSet, priorRun.tasks.find(t => t.taskId === task.taskId)?.changeSet)))
+        task.changeSet = GitChangeSetSchema.parse(task.changeSet);
+      if (task.cycle && (!priorRun || !isDeepStrictEqual(task.cycle, priorRun.tasks.find(t => t.taskId === task.taskId)?.cycle)))
+        task.cycle = VerificationCycleSchema.parse(task.cycle);
+      if (task.result && (!priorRun || !isDeepStrictEqual(task.result, priorRun.tasks.find(t => t.taskId === task.taskId)?.result)))
+        task.result = AgentResultSchema.parse(task.result);
       if (task.reworkResolutions !== undefined) {
         if (!Array.isArray(task.reworkResolutions)) throw new Error("Invalid rework resolution history");
         task.reworkResolutions = task.reworkResolutions.map(item => {
@@ -518,11 +533,17 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
         });
       }
     }
-    if (run.workflowCycle) run.workflowCycle = VerificationCycleSchema.parse(run.workflowCycle);
-    if (run.workflowChange) run.workflowChange = GitChangeSetSchema.parse(run.workflowChange);
+    if (run.workflowCycle && (!priorRun || !isDeepStrictEqual(run.workflowCycle, priorRun.workflowCycle)))
+      run.workflowCycle = VerificationCycleSchema.parse(run.workflowCycle);
+    if (run.workflowChange && (!priorRun || !isDeepStrictEqual(run.workflowChange, priorRun.workflowChange)))
+      run.workflowChange = GitChangeSetSchema.parse(run.workflowChange);
   }
   for (const out of state.outbound) {
-    out.message = RoleMessageSchema.parse(out.message); textField(out.selector); textField(out.taskId); textField(out.attemptId); strings(out.capabilities);
+    const outId = typeof out?.message?.message_id === "string" ? out.message.message_id : undefined;
+    const priorOut = outId !== undefined && !seenOut.has(outId) ? baselineOut?.get(outId) : undefined;
+    if (outId !== undefined) seenOut.add(outId);
+    const unchangedOut = priorOut !== undefined && isDeepStrictEqual(out, priorOut);
+    if (!unchangedOut) { out.message = RoleMessageSchema.parse(out.message); textField(out.selector); textField(out.taskId); textField(out.attemptId); strings(out.capabilities); }
     if (!["queued", "sending", "unknown_delivery", "accepted", "released", "cancelled", "delivered", "failed"].includes(out.status)) throw new Error("Invalid outbound status");
     if (out.notReadySince !== undefined) { textField(out.notReadySince); if (!Number.isFinite(Date.parse(out.notReadySince))) throw new Error("Invalid not-ready timestamp"); }
     if (out.nextAttemptAt !== undefined) { textField(out.nextAttemptAt); if (!Number.isFinite(Date.parse(out.nextAttemptAt))) throw new Error("Invalid retry timestamp"); }
@@ -530,12 +551,12 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (out.cancelObservations !== undefined && (!Number.isSafeInteger(out.cancelObservations) || out.cancelObservations < 0)) throw new Error("Invalid cancellation observations");
     if (out.coordinatorResponseBaseline !== undefined && (!Number.isSafeInteger(out.coordinatorResponseBaseline) || out.coordinatorResponseBaseline < 0 || out.coordinatorResponseBaseline > state.outbound.length))
       throw new Error("Invalid Coordinator response baseline");
-    if (out.assignment) out.assignment = AgentAssignmentSchema.parse(out.assignment);
-    if (out.roleProfile !== undefined) out.roleProfile = RoleProfilePinSchema.parse(out.roleProfile);
+    if (!unchangedOut && out.assignment) out.assignment = AgentAssignmentSchema.parse(out.assignment);
+    if (!unchangedOut && out.roleProfile !== undefined) out.roleProfile = RoleProfilePinSchema.parse(out.roleProfile);
     if (out.profileAllocationTaskId !== undefined) textField(out.profileAllocationTaskId);
     if (out.profileAllocationReleased !== undefined && (out.profileAllocationReleased !== true || !out.profileAllocationTaskId || !out.roleProfile))
       throw new Error("Invalid profile allocation cleanup receipt");
-    if (out.executorLineage !== undefined) out.executorLineage = ExecutorLineageSchema.parse(out.executorLineage);
+    if (!unchangedOut && out.executorLineage !== undefined) out.executorLineage = ExecutorLineageSchema.parse(out.executorLineage);
     if (state.version < 7 && (out.roleProfile || out.executorLineage || out.profileAllocationTaskId))
       throw new Error("Profile authority requires private journal v7");
     if (out.delivery !== undefined) {
@@ -545,8 +566,8 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
           ["accepted", "unknown_delivery"].includes(out.status))
         throw new Error("Invalid Director mailbox outbound");
     }
-    if (out.request) out.request = AgentRequestSchema.parse(out.request);
-    if (out.prelaunchFailure) {
+    if (!unchangedOut && out.request) out.request = AgentRequestSchema.parse(out.request);
+    if (!unchangedOut && out.prelaunchFailure) {
       out.prelaunchFailure = { request: AgentRequestSchema.parse(out.prelaunchFailure.request), reconciledAt: IsoDateTimeSchema.parse(out.prelaunchFailure.reconciledAt),
         ...(out.prelaunchFailure.executorLineage ? {executorLineage:ExecutorLineageSchema.parse(out.prelaunchFailure.executorLineage)} : {}),
         ...(out.prelaunchFailure.lease ? {lease:AgentLeaseSchema.parse(out.prelaunchFailure.lease)} : {}) };
@@ -554,8 +575,8 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
           out.prelaunchFailure.request.attemptId !== out.attemptId || out.prelaunchFailure.request.taskId !== out.taskId)
         throw new Error("Invalid prelaunch failure audit binding");
     }
-    if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
-    if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
+    if (!unchangedOut && out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
+    if (!unchangedOut && out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
     if (out.parkStop !== undefined) {
       out.parkStop = z.object({ requestedAt: IsoDateTimeSchema, observations: z.number().int().min(0).max(5),
         proof: CancellationStopProofSchema.optional() }).strict().parse(out.parkStop);
@@ -673,6 +694,10 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
         out.request && digest(out.request.target) !== digest(parent.handle.target)) throw new Error("Invalid task notice parent assignment");
   }
   for (const item of state.inbox) {
+    const inId = typeof item?.message?.message_id === "string" ? item.message.message_id : undefined;
+    const priorIn = inId !== undefined && !seenInbox.has(inId) ? baselineInbox?.get(inId) : undefined;
+    if (inId !== undefined) seenInbox.add(inId);
+    if (priorIn && isDeepStrictEqual(item, priorIn)) continue;
     item.message = RoleMessageSchema.parse(item.message);
     if (!["received", "applied", "rejected"].includes(item.status)) throw new Error("Invalid inbox status");
     if (item.reason !== undefined) textField(item.reason);
@@ -773,7 +798,7 @@ export class AgenticJournal {
         const bytes = await readRegularJournalFile(statePath);
         if (this.validatedSnapshot?.bytes.equals(bytes)) state = readOnly ? this.validatedSnapshot.value : structuredClone(this.validatedSnapshot.value);
         else {
-          state = parseAgenticJournalState(JSON.parse(bytes.toString("utf8")), this.repository);
+          state = parseAgenticJournalState(JSON.parse(bytes.toString("utf8")), this.repository, this.validatedSnapshot?.value);
           this.validatedSnapshot = { bytes: Buffer.from(bytes), value: readOnly ? state : structuredClone(state) };
         }
         baseline = this.validatedSnapshot.value; durableBytes = bytes;
@@ -801,8 +826,8 @@ export class AgenticJournal {
           try { if ((await readRegularJournalFile(statePath)).equals(durableBytes)) return; }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         }
-        parseAgenticJournalState(state, this.repository);
-        const serialized = JSON.stringify(state), normalized = parseAgenticJournalState(JSON.parse(serialized), this.repository);
+        parseAgenticJournalState(state, this.repository, baseline);
+        const serialized = JSON.stringify(state), normalized = parseAgenticJournalState(JSON.parse(serialized), this.repository, state);
         const path = join(this.directory, `state-${randomUUID()}.tmp`);
         try {
           const file = await open(path, "wx", 0o600);
