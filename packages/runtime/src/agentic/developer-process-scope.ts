@@ -240,10 +240,11 @@ export class DeveloperProcessScopes {
     if (!entry || !(await this.linkExecution(entry.root, handle))) throw new Error("Developer process scope lacks a started witness/pinned dispatch");
     this.linked.add(key);
   }
-  async stop(handleInput: AgentExecutionHandle, bindingInput: PaneBinding): Promise<CancellationStopProof | undefined> {
-    const handle = AgentExecutionHandleSchema.parse(handleInput), binding = PaneBindingSchema.parse(bindingInput);
-    if (!ownsCancellationPane(handle, binding)) return undefined;
-    const entry = await this.scope(binding);
+  async stop(handleInput: AgentExecutionHandle, bindingInput?: PaneBinding | null): Promise<CancellationStopProof | undefined> {
+    const handle = AgentExecutionHandleSchema.parse(handleInput);
+    const binding = bindingInput !== undefined && bindingInput !== null ? PaneBindingSchema.parse(bindingInput) : undefined;
+    if (binding && !ownsCancellationPane(handle, binding)) return undefined;
+    const entry = binding ? await this.scope(binding) : await this.scopeForHandle(handle);
     if (!entry) return undefined;
     const { root, config } = entry;
     const raw = await optionalPrivateJSON(join(root, "execution.json"));
@@ -265,6 +266,35 @@ export class DeveloperProcessScopes {
     }
     const proof = CancellationStopProofSchema.parse({ ...exit, handle, observedAt: new Date().toISOString() });
     await writeImmutable(join(root, "execution-stop-proof.json"), proof); return proof;
+  }
+  private async scopeForHandle(handle: AgentExecutionHandle): Promise<{ root: string; config: z.infer<typeof ConfigSchema> } | undefined> {
+    let entries: string[];
+    try { entries = await readdir(this.directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    const expectedTaskId = `${handle.runId}-${handle.taskId}`;
+    for (const id of entries) {
+      if (!z.string().uuid().safeParse(id).success) continue;
+      const root = join(this.directory, id);
+      const rawConfig = await optionalPrivateJSON(join(root, "config.json"));
+      if (rawConfig === undefined) continue;
+      const config = ConfigSchema.parse(rawConfig);
+      if (config.scopeId !== id || config.runId !== handle.runId || config.taskId !== expectedTaskId) continue;
+      if (hash(await readFile(join(root, "supervisor.py"))) !== config.supervisorDigest) throw new Error("Process-scope bootstrap integrity mismatch");
+      const rawExecution = await optionalPrivateJSON(join(root, "execution.json"));
+      if (rawExecution !== undefined) {
+        const execution = ExecutionSchema.parse(rawExecution);
+        if (canonicalReceiptJson(execution.handle) === canonicalReceiptJson(handle)) return { root, config };
+        continue;
+      }
+      const rawPin = await optionalPrivateJSON(join(root, "request.json"));
+      if (rawPin !== undefined) {
+        const pin = RequestPinSchema.parse(rawPin);
+        if (pin.requestId === handle.requestId && pin.runId === handle.runId && pin.taskId === handle.taskId &&
+            pin.attemptId === handle.attemptId && pin.idempotencyKey === handle.idempotencyKey &&
+            canonicalReceiptJson(pin.target) === canonicalReceiptJson(handle.target)) return { root, config };
+      }
+    }
+    return undefined;
   }
   /**
    * Seals admission, then stops the witnessed namespace. Undefined means no scope, a linked execution (use stop), or a sealed

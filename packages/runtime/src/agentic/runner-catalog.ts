@@ -47,10 +47,13 @@ export async function detectRunnerCatalog(root: string, javascript: RunnerDetect
           const rel = file === "package.json" ? "node_modules" : file.slice(0, -"package.json".length) + "node_modules";
           try { if ((await lstat(join(source, rel))).isDirectory() && await realpath(join(source, rel)) === join(source, rel)) roots.push(rel); } catch { /* no dependency tree */ }
         }
+        const jsPrepare = javascript.status === "detected" && !candidate.prepare && ["vitest", "node", "jest", "mocha"].includes(candidate.adapterId)
+          ? javascript.profiles[0]?.prepare : undefined;
         for (const [level, method] of [["unit", "unit_test"], ["integration", "integration_test"], ["e2e", "e2e_test"]] as const) profiles.push({
           id: `auto-${level}-${candidate.adapterId}${directorySuffix.replace(/:/g, "-")}`, command: `auto:${level}:${candidate.adapterId}${directorySuffix}`,
           executable: candidate.executable, args: [], method, levels: [level, "regression"], reporter: candidate.format === "vitest_json" ? "vitest_json" : "node_tap", timeoutMs: 180_000, maxOutputBytes: 4_194_304,
-          checkoutDependencyRoots: roots, dependencySource: source, source: "detected", adapter: candidate
+          checkoutDependencyRoots: roots, dependencySource: source, source: "detected", adapter: candidate,
+          ...(jsPrepare ? { prepare: jsPrepare } : {})
         });
       }
     } catch (error) { notes.push(`${adapter.id}: runner setup required: ${String(error)}`); }

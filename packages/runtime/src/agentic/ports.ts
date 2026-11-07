@@ -160,7 +160,7 @@ export interface AgenticRuntimePorts {
   panes: PanePolicy; policies: AgenticPolicies;
   pinDeveloperDispatch?: (request: AgentRequest, binding: PaneBinding) => Promise<void>;
   bindDeveloperExecutionScope?: (handle: AgentExecutionHandle, binding: PaneBinding) => Promise<void>;
-  stopDeveloperExecutionScope?: (handle: AgentExecutionHandle, binding: PaneBinding) => Promise<CancellationStopProof | undefined>;
+  stopDeveloperExecutionScope?: (handle: AgentExecutionHandle, binding?: PaneBinding | null) => Promise<CancellationStopProof | undefined>;
   stopUnboundDeveloperScope?: (binding: PaneBinding) => Promise<NamespaceExitProof | undefined>;
   /** Trusted host authentication of a Herdr-originated envelope, never an agent-supplied flag. */
   authenticateMessage(message: RoleMessage): Promise<boolean>;

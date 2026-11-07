@@ -445,18 +445,24 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
     const maxOutputBytes = command.maxOutputBytes ?? 1_048_576;
     const treeHash = (await verificationGit(checkout, ["rev-parse", "HEAD^{tree}"])).trim();
     // A Runtime-detected profile may run a sandboxed build first (e.g. `tsc -b`); it gets the same boundary, its own deadline, and may only leave git-ignored outputs.
-    const preparation = invocation?.prepare ?? command.adapter?.prepare ?? (command.prepare ? { ...command.prepare, executable: command.executable } : undefined);
+    const adapterPreparation = invocation?.prepare ?? command.adapter?.prepare;
+    const preparation = adapterPreparation ?? (command.prepare ? { ...command.prepare, executable: command.executable } : undefined);
     if (preparation) {
-      const prepKey = digest([treeHash, testBlobs, command.dependencySource ?? "", preparation.executable, preparation.args, command.adapter?.projectDirectory ?? "."]);
-      const cachedPrepare = prepareArtifactCache.get(prepKey);
+      const prepareProjectDir = adapterPreparation ? (command.adapter?.projectDirectory ?? ".") : ".";
+      const prepareCwd = prepareProjectDir !== "." ? join(checkout, prepareProjectDir) : checkout;
+      const prepKey = digest([treeHash, testBlobs, command.dependencySource ?? "", preparation.executable, preparation.args, prepareProjectDir]);
+      const cachedPrepare = prepareArtifactCache.get(prepKey) ?? (!adapterPreparation ? latestPrepareByTree.get(treeHash) : undefined);
       if (cachedPrepare) {
         await restorePrepareArtifacts(checkout, cachedPrepare);
         await assertPinnedRevision(checkout, revision);
       } else {
-        const prepareSandbox = await sandboxBehavior({ ...command, executable: preparation.executable }, checkout, preparation.args).catch(error => {
+        const prepareCommand = adapterPreparation
+          ? { ...command, executable: preparation.executable }
+          : { ...command, executable: preparation.executable, ...(command.adapter ? { adapter: { ...command.adapter, projectDirectory: "." } } : {}) };
+        const prepareSandbox = await sandboxBehavior(prepareCommand, checkout, preparation.args).catch(error => {
           throw new Error(`Behavioral runner infrastructure failure (prepare): ${String(error)}`, { cause: error });
         });
-        const prepared = await runner.run({ ...prepareSandbox, cwd: projectCwd, env, timeoutMs: preparation.timeoutMs, maxOutputBytes });
+        const prepared = await runner.run({ ...prepareSandbox, cwd: prepareCwd, env, timeoutMs: preparation.timeoutMs, maxOutputBytes });
         if (!prepared.ok) throw new Error(`Behavioral runner infrastructure failure (prepare): ${prepared.error.message}`);
         const prepareOutcome = prepared.value as QualityCommandOutcome;
         const failure = prepareOutcome.spawnError ?? (SANDBOX_ERROR.test(prepareOutcome.stderr) ? prepareOutcome.stderr.trim()

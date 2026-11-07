@@ -1945,7 +1945,11 @@ export class AgenticWorkflowRuntime {
             if (originalError === undefined) delete out.error; else out.error = originalError;
             if (out.parkStop && !out.parkStop.proof && out.parkStop.observations < CANCEL_STOP_OBSERVATION_LIMIT) {
               out.parkStop.observations++; await save();
-              const observed = await this.stopObserved({ ...out });
+              const binding = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope
+                ? await this.resolveDeveloperExecutionBinding(out) : undefined;
+              const scoped = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope && (!binding || ownsCancellationPane(out.handle!, binding))
+                ? await this.ports.stopDeveloperExecutionScope(out.handle!, binding).catch(() => undefined) : undefined;
+              const observed = scoped ? { proof: CancellationStopProofSchema.parse(scoped) } : await this.stopObserved({ ...out });
               if (observed.proof) out.parkStop.proof = observed.proof;
               await save();
             }
@@ -2016,8 +2020,12 @@ export class AgenticWorkflowRuntime {
         if (!out.parkStop.proof && out.parkStop.observations < CANCEL_STOP_OBSERVATION_LIMIT) {
           out.parkStop.observations++;
           await save();
+          const binding = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope
+            ? await this.resolveDeveloperExecutionBinding(out) : undefined;
+          const scoped = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope && (!binding || ownsCancellationPane(out.handle!, binding))
+            ? await this.ports.stopDeveloperExecutionScope(out.handle!, binding).catch(() => undefined) : undefined;
           // Observe a copy: an unconfirmed park does not overwrite the original assignment's diagnostic/error.
-          const observed = await this.stopObserved({ ...out });
+          const observed = scoped ? { proof: CancellationStopProofSchema.parse(scoped) } : await this.stopObserved({ ...out });
           // Journal validation reconstructs nested proof records on save; always update the currently owned record.
           if (observed.proof) out.parkStop.proof = observed.proof;
           await save();
@@ -5926,7 +5934,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
                   let stopped = false;
                   try {
                     const binding = await this.resolveDeveloperExecutionBinding(out);
-                    const observed = out.handle && binding && ownsCancellationPane(out.handle, binding)
+                    const observed = out.handle && (!binding || ownsCancellationPane(out.handle, binding))
                       ? await this.ports.stopDeveloperExecutionScope?.(out.handle, binding) : undefined;
                     if (observed) {
                       const proof = CancellationStopProofSchema.parse(observed);
@@ -6776,7 +6784,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     if (out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope) {
       try {
         const binding = await this.resolveDeveloperExecutionBinding(out);
-        const observed = binding ? await this.ports.stopDeveloperExecutionScope(out.handle, binding) : undefined;
+        const observed = (!binding || ownsCancellationPane(out.handle, binding))
+          ? await this.ports.stopDeveloperExecutionScope(out.handle, binding) : undefined;
         if (observed) {
           const proof = CancellationStopProofSchema.parse(observed);
           if (proof.source !== "linux_pid_namespace" || digest(proof.handle) !== digest(out.handle) ||
@@ -6918,7 +6927,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     if (!out.cancellationStopProof) {
       const binding = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope
         ? await this.resolveDeveloperExecutionBinding(out) : undefined;
-      const scoped = binding ? await this.ports.stopDeveloperExecutionScope?.(out.handle!, binding) : undefined;
+      const scoped = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope && (!binding || ownsCancellationPane(out.handle!, binding))
+        ? await this.ports.stopDeveloperExecutionScope(out.handle!, binding) : undefined;
       // Seal/stop the exact namespace even while a message is uncertain; retain allocation, lease and Core until that delivery settles.
       const waitOutcome = !scoped && !uncertain ? await this.stopObserved(out) : undefined;
       const proof = scoped ? CancellationStopProofSchema.parse(scoped) : waitOutcome?.proof ??

@@ -765,7 +765,7 @@ export class HostPlatformSession {
   async assertDeveloperProcessReady(binding: PaneBinding): Promise<void> { await this.options.processScopes?.assertBindingReady(binding); }
   async pinDeveloperDispatch(request: AgentRequest, binding: PaneBinding): Promise<void> { await this.options.processScopes?.pinDispatch(request, binding); }
   async bindDeveloperExecution(handle: AgentExecutionHandle, binding: PaneBinding): Promise<void> { await this.options.processScopes?.bindExecution(handle, binding); }
-  async stopDeveloperExecution(handle: AgentExecutionHandle, binding: PaneBinding) { return this.options.processScopes?.stop(handle, binding); }
+  async stopDeveloperExecution(handle: AgentExecutionHandle, binding?: PaneBinding | null) { return this.options.processScopes?.stop(handle, binding); }
   async stopUnboundDeveloper(binding: PaneBinding) { return this.options.processScopes?.stopUnbound(binding); }
   async authorizeStoppedRetainedRelease(binding: PaneBinding): Promise<boolean> { return await this.options.processScopes?.hasStoppedProof(binding) ?? false; }
 
