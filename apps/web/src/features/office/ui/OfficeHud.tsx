@@ -17,7 +17,13 @@ const SESSION: Record<string, string> = { ready: 'Phiên sẵn sàng', starting:
 
 /** The run the "Đang làm" block shows: the most recently updated run that has not reached a terminal state. */
 export function currentRun(runs: readonly WebRunView[]): WebRunView | undefined {
-  return runs.filter(r => !FINISHED.has(r.sdlcStatus)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+  const latest = [...runs].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+  const open = runs.filter(r => !FINISHED.has(r.sdlcStatus)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const active = open.find(r => r.sdlcStatus !== 'escalated');
+  if (active) return active;
+  const escalated = open[0];
+  if (escalated && (!latest || escalated.updatedAt >= latest.updatedAt)) return escalated;
+  return undefined;
 }
 /** Chat can take a draft only when the session is ready and its chat adapter is not reported unavailable. */
 export function chatAvailable(session: WebProjectSession | undefined): boolean {
@@ -207,10 +213,10 @@ export function OfficeHud(p: OfficeHudProps) {
       {/* Live region that exists before the state changes, so a screen reader hears the dock needing a look while it stays collapsed. */}
       <span role="status" className="sr-only" data-testid="dock-attention">{p.dockSummary.attention ? 'Có thao tác cần xem trong Thao tác đã gửi' : ''}</span>
       {!p.onDockOpen&&<div id={dockId} hidden={!dockOpen} data-hud-dock className="pointer-events-auto max-h-[40dvh] overflow-y-auto empty:hidden">{p.dock}</div>}
-      <div className={hideOnPhone}><CameraBar>
+      {!p.taskbar&&<div className={hideOnPhone}><CameraBar>
         {cams.map(([zone, icon, label]) => <button type="button" key={zone} aria-label={label} className={camButton} onClick={() => { if (zone === 'overview') setDockOpen(false); p.onFocusZone(zone); }}><Icon name={icon}/><span>{label}</span></button>)}
         {p.overflow > 0 && <button type="button" className={camButton} aria-label={`Còn ${p.overflow} lập trình viên chưa hiện trong cảnh. Mở danh sách nhân viên`} onClick={p.onAgentList}>+{p.overflow}</button>}
-      </CameraBar>{!p.taskbar&&quickChat}</div>
+      </CameraBar>{quickChat}</div>}
     </div>
     {p.taskbar?.(quickChat)}
   </>;

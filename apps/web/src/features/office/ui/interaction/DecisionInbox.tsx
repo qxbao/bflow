@@ -63,9 +63,9 @@ export function DecisionInbox({ api, id, revision, refresh }: { api: ApiClient; 
     {result.data?.nextCursor && <p className="mt-4 text-sm text-muted">Đang hiển thị ít nhất {pending.length} yêu cầu chờ trong {result.data.items.length} mục tải được. Danh sách đã chạm giới hạn dịch vụ; số đếm là cận dưới.</p>}
     <dialog ref={dialog} aria-labelledby="decision-inbox-title" className="m-auto max-h-[92dvh] w-[min(900px,calc(100vw-24px))] overflow-y-auto border border-line bg-surface p-0 shadow-2xl backdrop:bg-ink/60" onCancel={event => { event.preventDefault(); close(); }}>
       {selected && <div className="p-4 sm:p-7"><div className="flex items-start justify-between gap-4"><div><p className="m-0 font-data text-xs uppercase tracking-widest text-muted">Đang xem xét · Phiên bản {selected.expectedVersion.revision}</p><h2 id="decision-inbox-title" className="mt-1">{selected.question}</h2></div><button type="button" className="min-h-11" onClick={close}>Quay lại hộp thư</button></div>
-        {runLoading && <LoadingState loading initial label="Đang xác nhận quyền quyết định…" />}
+        {runLoading && <LoadingState loading initial={!run} label="Đang xác nhận quyền quyết định…" />}
         {Boolean(runError) && <ErrorState error={runError} retry={refresh} />}
-        {run && <DecisionReview key={key} api={api} id={id} decision={selected} actions={run.runId === selected.runId ? run.availableActions : []} fresh={!result.loading && !result.error && !runLoading && !runError && run.runId === selected.runId && run.currentRunId === selected.runId} refresh={refresh} draft={drafts[key]} onDraftChange={draft => setDraft(key, draft)} />}
+        {run && <DecisionReview key={key} api={api} id={id} decision={selected} actions={run.runId === selected.runId ? run.availableActions : []} fresh={!result.loading && !result.error && !runLoading && !runError && run.runId === selected.runId && run.currentRunId === selected.runId} refreshing={(result.loading || runLoading) && !result.error && !runError && run.runId === selected.runId && run.currentRunId === selected.runId} refresh={refresh} draft={drafts[key]} onDraftChange={draft => setDraft(key, draft)} />}
         <Link className="mt-4 inline-block" to={`/projects/${encodeURIComponent(id)}/runs/${encodeURIComponent(selected.runId)}`}>Mở công việc liên quan →</Link>
       </div>}
     </dialog>
