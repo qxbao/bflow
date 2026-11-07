@@ -7,6 +7,7 @@ import { App } from '../src/app';
 import { ApiClient } from '../src/api/client';
 import { writeMode } from '../src/features/office/mode';
 import { AgentInspector, AgentList, handoffEvidence } from '../src/features/office/ui/AgentInspector';
+import { DirectorInspector } from '../src/features/office/ui/DirectorInspector';
 import { CabinetInspector } from '../src/features/office/ui/ObjectInspector';
 import type { OfficeAgent } from '../src/features/office/model/types';
 import { installApi, now, run, session } from './fixtures';
@@ -190,4 +191,12 @@ test('shows the agent terminal text and a link to all staff', async () => {
   expect(screen.getByRole('heading', { name: 'Nội dung gần đây' })).toBeTruthy();
   expect((await screen.findByRole('log')).textContent).toBe('<b>dòng</b> cuối');
   expect(screen.getByRole('link', { name: 'Xem tất cả nhân viên →' }).getAttribute('href')).toBe('/projects/p/agents?agent=dev-1');
+});
+
+test('ac-2: DirectorInspector.tsx và AgentInspector.tsx sử dụng câu chữ tiếng Việt tự nhiên, rõ nghĩa và vẫn giữ đầy đủ các nhãn chẩn đoán cần thiết.', async () => {
+  render(<DirectorInspector onChat={() => {}} onQueue={() => {}} />);
+  expect(screen.getByText(/Director chạy trực tiếp từ phiên làm việc của bạn/)).toBeTruthy();
+  mount({ apiVersion: 1, items: [] });
+  expect(await screen.findByText(/Chưa có hoạt động nào được ghi nhận cho phiên này/)).toBeTruthy();
+  expect(screen.getByText(/Nhật ký ghi theo từng vai trò trong toàn bộ công việc, không riêng nhân viên này/)).toBeTruthy();
 });
