@@ -1394,7 +1394,15 @@ export class HostVerification {
     return json({...record(packet),noChangeDisputeProposalAllowed:unchanged&&complete&&hasCandidateGateReceipt(packet),submissionGuidance:"Historical host observations retain their original attempts. They do not replace Reviewer/QA verdicts. A withheld untrusted handover is not missing spec/lease authority. For an unchanged candidate, a complete all-disputed proposal may use status succeeded only when Runtime re-verifies matching independent host evidence; no finding is closed by the Developer. Cite the displayed receipt ID/digest for a disputed missing-evidence claim. A new source commit is not required merely to change revision when noChangeDisputeProposalAllowed is true; use status succeeded to propose independent adjudication, never to claim acceptance. Otherwise report blocked with complete findingResolutions; the host supplies blockage metadata."});
   }
   /** Capture objective revision/diff before the model evaluates it; the returned ID pins later judgment. */
-  private readonly reviews = new Map<string, { binding: PaneBinding; sourceMessageId: string; context: unknown; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();
+  private readonly reviews = new Map<string, {
+    binding: PaneBinding;
+    sourceMessageId: string;
+    context: ReturnType<typeof QualityGateContextSchema.parse>;
+    observation: Awaited<ReturnType<HostVerification["capture"]>>;
+    testIntegrityObservation?: TestIntegrityObservation | undefined;
+    qaBehavioralObservation?: JsonValue | undefined;
+    candidateBehavioralEvidence?: JsonValue | undefined;
+  }>();
   async inspectReview(binding: PaneBinding, input: unknown) {
     if (!["reviewer", "qa", "tester"].includes(binding.role)) throw new Error("Independent verification role required");
     const args = record(input), state = record(await this.runtime().inspect());
@@ -1407,45 +1415,77 @@ export class HostVerification {
     const details = record(context.input), config = record(context.definition.configuration);
     if (config.kind !== "review" || config.role !== binding.role) throw new Error("Review role mismatch");
     const observation = await this.capture(textField(details.sourceWorktreePath), textField(details.baseRevision), textField(details.sourceRevision));
-    let testIntegrityObservation: TestIntegrityObservation | undefined;
-    if (binding.role === "reviewer") {
-      const integrityReport = await this.measureIntegrity(context, observation.cwd, observation.base, observation.revision);
-      const integrityAfter = await this.capture(observation.cwd, observation.base, observation.revision);
-      if (digest(integrityAfter) !== digest(observation)) throw new Error("Review source changed during test integrity capture");
-      if (integrityReport.findings.length) {
-        const evidence = await this.artifact(context.runId, context.taskId, { report: integrityReport }, `test-integrity-${digest([context, integrityReport])}`);
-        testIntegrityObservation = TestIntegrityObservationSchema.parse({ report: integrityReport, evidence });
-        context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostTestIntegrityObservation: json(testIntegrityObservation) } });
-      }
-    }
-    let qaBehavioralObservation: JsonValue | undefined;
-    if (binding.role === "qa" && details.scope === "workflow") {
-      const dossier = await this.dossierFor(context.runId, context.taskId);
-      const age = out.message && typeof record(out.message).occurred_at === "string" ? Math.max(0, Date.now() - Date.parse(textField(record(out.message).occurred_at))) : 0;
-      const commands = boundQaReviewCommands(this.resolve(dossier), Math.min(540_000, context.definition.timeout.executionTimeoutMs - age - 30_000));
-      if (commands.length) {
-        const measurements = [];
-        for (const command of commands) {
-          const rtk = await this.rtk?.resolve({ role: binding.role, runId: context.runId, ...(context.taskId ? { taskId: context.taskId } : {}),
-            ...(typeof out.attemptId === "string" ? { attemptId: out.attemptId } : {}),
-            commandId: command.id, revision: observation.revision });
-          measurements.push(await measureBehavior(command, observation.cwd, observation.revision, rtk ? { rtk } : {}));
-        }
-        const after = await this.capture(observation.cwd, observation.base, observation.revision);
-        if (digest(after) !== digest(observation)) throw new Error("QA source changed during independent measurement");
-        const artifact = await this.artifact(context.runId, context.taskId, { scope: "workflow", sourceRevision: observation.revision, measurements, verifiedBy: binding.agentId });
-        for (const item of measurements) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
-        qaBehavioralObservation = json({ sourceRevision: observation.revision, passed: measurements.every(item => item.failed === 0 && item.outcome.exitCode === 0),
-          evidenceArtifact: artifact, measurements: measurements.map(item => ({ command: item.command, method: item.method, testNames: item.testNames,
-            tests: item.tests, passed: item.passed, failed: item.failed, exitCode: item.outcome.exitCode,
-            ...(item.rtk ? { rtk: item.rtk } : {}) })) });
-        context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostQaBehavioralObservation: qaBehavioralObservation } });
-      }
-    }
     const reworkResolution = this.reworkDossierFor(state, context.runId, context.taskId, context.attemptId);
-    if (reworkResolution) {
-      if (reworkResolution.submittedRevision !== observation.revision) throw new Error("Rework dossier revision mismatch");
-      context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostReworkVerification: reworkVerificationBinding(reworkResolution) } });
+    if (reworkResolution && reworkResolution.submittedRevision !== observation.revision) {
+      throw new Error("Rework dossier revision mismatch");
+    }
+    const sourceMessageId = textField(args.messageId);
+    const cachedEntry = [...this.reviews.entries()].find(([, rev]) =>
+      rev.sourceMessageId === sourceMessageId &&
+      digest(this.bindingIdentity(rev.binding)) === digest(this.bindingIdentity(binding)) &&
+      digest(rev.observation) === digest(observation)
+    );
+    let reviewId: string;
+    let testIntegrityObservation: TestIntegrityObservation | undefined;
+    let qaBehavioralObservation: JsonValue | undefined;
+    let candidateBehavioralEvidence: JsonValue | undefined;
+    if (cachedEntry) {
+      reviewId = cachedEntry[0];
+      context = cachedEntry[1].context;
+      testIntegrityObservation = cachedEntry[1].testIntegrityObservation;
+      qaBehavioralObservation = cachedEntry[1].qaBehavioralObservation;
+      candidateBehavioralEvidence = cachedEntry[1].candidateBehavioralEvidence;
+    } else {
+      if (binding.role === "reviewer") {
+        const integrityReport = await this.measureIntegrity(context, observation.cwd, observation.base, observation.revision);
+        const integrityAfter = await this.capture(observation.cwd, observation.base, observation.revision);
+        if (digest(integrityAfter) !== digest(observation)) throw new Error("Review source changed during test integrity capture");
+        if (integrityReport.findings.length) {
+          const evidence = await this.artifact(context.runId, context.taskId, { report: integrityReport }, `test-integrity-${digest([context, integrityReport])}`);
+          testIntegrityObservation = TestIntegrityObservationSchema.parse({ report: integrityReport, evidence });
+          context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostTestIntegrityObservation: json(testIntegrityObservation) } });
+        }
+      }
+      if (binding.role === "qa" && details.scope === "workflow") {
+        const dossier = await this.dossierFor(context.runId, context.taskId);
+        const age = out.message && typeof record(out.message).occurred_at === "string" ? Math.max(0, Date.now() - Date.parse(textField(record(out.message).occurred_at))) : 0;
+        const commands = boundQaReviewCommands(this.resolve(dossier), Math.min(540_000, context.definition.timeout.executionTimeoutMs - age - 30_000));
+        if (commands.length) {
+          const measurements = [];
+          for (const command of commands) {
+            const rtk = await this.rtk?.resolve({ role: binding.role, runId: context.runId, ...(context.taskId ? { taskId: context.taskId } : {}),
+              ...(typeof out.attemptId === "string" ? { attemptId: out.attemptId } : {}),
+              commandId: command.id, revision: observation.revision });
+            measurements.push(await measureBehavior(command, observation.cwd, observation.revision, rtk ? { rtk } : {}));
+          }
+          const after = await this.capture(observation.cwd, observation.base, observation.revision);
+          if (digest(after) !== digest(observation)) throw new Error("QA source changed during independent measurement");
+          const artifact = await this.artifact(context.runId, context.taskId, { scope: "workflow", sourceRevision: observation.revision, measurements, verifiedBy: binding.agentId });
+          for (const item of measurements) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
+          qaBehavioralObservation = json({ sourceRevision: observation.revision, passed: measurements.every(item => item.failed === 0 && item.outcome.exitCode === 0),
+            evidenceArtifact: artifact, measurements: measurements.map(item => ({ command: item.command, method: item.method, testNames: item.testNames,
+              tests: item.tests, passed: item.passed, failed: item.failed, exitCode: item.outcome.exitCode,
+              ...(item.rtk ? { rtk: item.rtk } : {}) })) });
+          context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostQaBehavioralObservation: qaBehavioralObservation } });
+        }
+      }
+      if (reworkResolution) {
+        context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostReworkVerification: reworkVerificationBinding(reworkResolution) } });
+      }
+      candidateBehavioralEvidence = details.scope === "task" ? await reviewCandidateEvidence({ context, state, store: this.store(),
+        authenticateEvidence: value => this.authenticateEvidence(value), authenticateGate: value => this.authenticateGate(value) }) : undefined;
+      if (candidateBehavioralEvidence) context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostCandidateBehavioralEvidence: candidateBehavioralEvidence } });
+      reviewId = randomUUID();
+      await this.receipts?.putObservation("review", reviewId, { binding, sourceMessageId, context, observation: json(observation) });
+      this.reviews.set(reviewId, {
+        binding,
+        sourceMessageId,
+        context,
+        observation,
+        testIntegrityObservation,
+        qaBehavioralObservation,
+        candidateBehavioralEvidence
+      });
     }
     const gateScope = this.reviewGateScope(state, context, binding.role);
     const reworkScope = reworkResolution
@@ -1460,19 +1500,6 @@ export class HostVerification {
       requiredTestIntegrityFindingIds: [...integrityIds],
       ...(integrityTotal !== integrityIds.length ? { requiredTestIntegrityFindingTotal: integrityTotal } : {})
     });
-    const candidateBehavioralEvidence = details.scope === "task" ? await reviewCandidateEvidence({ context, state, store: this.store(),
-      authenticateEvidence: value => this.authenticateEvidence(value), authenticateGate: value => this.authenticateGate(value) }) : undefined;
-    if (candidateBehavioralEvidence) context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostCandidateBehavioralEvidence: candidateBehavioralEvidence } });
-    const sourceMessageId = textField(args.messageId);
-    const existingReviewId = [...this.reviews.entries()].find(([, rev]) =>
-      rev.sourceMessageId === sourceMessageId &&
-      digest(this.bindingIdentity(rev.binding)) === digest(this.bindingIdentity(binding)) &&
-      digest(rev.context) === digest(context) &&
-      digest(rev.observation) === digest(observation)
-    )?.[0];
-    const reviewId = existingReviewId ?? randomUUID();
-    await this.receipts?.putObservation("review", reviewId, { binding, sourceMessageId, context, observation: json(observation) });
-    this.reviews.set(reviewId, { binding, sourceMessageId, context, observation });
     const fullIntegrityIds = testIntegrityObservation ? testIntegrityObservation.report.findings.map(f => f.id) : [];
     const fullReply = {
       reviewId,
@@ -1497,77 +1524,94 @@ export class HostVerification {
     let maxChars = typeof args.diffLimit === "number" && Number.isInteger(args.diffLimit) && args.diffLimit > 0
       ? Math.min(args.diffLimit, rawDiff.length - diffOffset)
       : Math.min(4500, rawDiff.length - diffOffset);
-    const buildBounded = (chars: number, compactDossier = false) => {
+    const buildBounded = (chars: number, compactDossier = false, compactContinuation = false) => {
       const endOffset = diffOffset + chars;
-      const boundedRework = compactDossier && reworkResolution
-        ? {
-            dossierId: reworkResolution.dossierId,
-            attempt: reworkResolution.attempt,
-            attemptId: reworkResolution.attemptId,
-            reworkGeneration: reworkResolution.reworkGeneration,
-            failedVerificationId: reworkResolution.failedVerificationId,
-            failedRevision: reworkResolution.failedRevision,
-            submittedRevision: reworkResolution.submittedRevision,
-            submissionStatus: reworkResolution.submissionStatus,
-            reworkContext: {
-              findings: reworkResolution.reworkContext.findings.map(f => ({
-                findingId: f.findingId,
-                code: f.code,
-                severity: f.severity,
-                message: f.message.slice(0, 160),
-                ...(f.location ? { location: f.location } : {}),
-                ...(f.criterionId ? { criterionId: f.criterionId } : {})
-              }))
-            },
-            findingResolutions: reworkResolution.findingResolutions.map(r => ({
-              findingId: r.findingId,
-              findingCode: r.findingCode,
-              disposition: r.disposition,
-              rootCause: r.rootCause.slice(0, 180),
-              hypothesisConfirmed: r.hypothesisConfirmed,
-              sourceLocations: r.sourceLocations,
-              repairSummary: r.repairSummary.slice(0, 180),
-              discriminatingCheck: {
-                kind: r.discriminatingCheck.kind,
-                ...(r.discriminatingCheck.target ? { target: r.discriminatingCheck.target.slice(0, 120) } : {}),
-                beforeOutcome: r.discriminatingCheck.beforeOutcome.slice(0, 140),
-                afterOutcome: r.discriminatingCheck.afterOutcome.slice(0, 140)
+      const boundedRework = compactContinuation
+        ? undefined
+        : compactDossier && reworkResolution
+          ? {
+              dossierId: reworkResolution.dossierId,
+              attempt: reworkResolution.attempt,
+              attemptId: reworkResolution.attemptId,
+              reworkGeneration: reworkResolution.reworkGeneration,
+              failedVerificationId: reworkResolution.failedVerificationId,
+              failedRevision: reworkResolution.failedRevision,
+              submittedRevision: reworkResolution.submittedRevision,
+              submissionStatus: reworkResolution.submissionStatus,
+              reworkContext: {
+                findings: reworkResolution.reworkContext.findings.map(f => ({
+                  findingId: f.findingId,
+                  code: f.code,
+                  severity: f.severity,
+                  message: f.message.slice(0, 160),
+                  ...(f.location ? { location: f.location } : {}),
+                  ...(f.criterionId ? { criterionId: f.criterionId } : {})
+                }))
               },
-              evidence: {
-                sourceRevision: r.evidence.sourceRevision,
-                summary: r.evidence.summary.slice(0, 140),
-                artifactId: r.evidence.artifactRef.artifactId
+              findingResolutions: reworkResolution.findingResolutions.map(r => ({
+                findingId: r.findingId,
+                findingCode: r.findingCode,
+                disposition: r.disposition,
+                rootCause: r.rootCause.slice(0, 180),
+                hypothesisConfirmed: r.hypothesisConfirmed,
+                sourceLocations: r.sourceLocations,
+                repairSummary: r.repairSummary.slice(0, 180),
+                discriminatingCheck: {
+                  kind: r.discriminatingCheck.kind,
+                  ...(r.discriminatingCheck.target ? { target: r.discriminatingCheck.target.slice(0, 120) } : {}),
+                  beforeOutcome: r.discriminatingCheck.beforeOutcome.slice(0, 140),
+                  afterOutcome: r.discriminatingCheck.afterOutcome.slice(0, 140)
+                },
+                evidence: {
+                  sourceRevision: r.evidence.sourceRevision,
+                  summary: r.evidence.summary.slice(0, 140),
+                  artifactId: r.evidence.artifactRef.artifactId
+                }
+              })),
+              verificationOutcome: {
+                status: reworkResolution.verificationOutcome.status,
+                openFindingIds: reworkResolution.verificationOutcome.openFindingIds,
+                closedFindingIds: reworkResolution.verificationOutcome.closedFindingIds
               }
-            })),
-            verificationOutcome: {
-              status: reworkResolution.verificationOutcome.status,
-              openFindingIds: reworkResolution.verificationOutcome.openFindingIds,
-              closedFindingIds: reworkResolution.verificationOutcome.closedFindingIds
+            }
+          : reworkResolution;
+      const dossierContext = compactContinuation
+        ? {
+            runId: context.runId,
+            ...(context.taskId ? { taskId: context.taskId } : {}),
+            ...(context.attemptId ? { attemptId: context.attemptId } : {}),
+            definition: { id: context.definition.id, name: context.definition.name },
+            artifacts: [],
+            input: {
+              scope: details.scope,
+              baseRevision: details.baseRevision,
+              sourceRevision: details.sourceRevision
             }
           }
-        : reworkResolution;
-      const dossierContext = compactDossier
-        ? { ...context, artifacts: context.artifacts.map(a => ({ artifactId: a.artifactId, kind: a.kind })) }
-        : context;
+        : compactDossier
+          ? { ...context, artifacts: context.artifacts.map(a => ({ artifactId: a.artifactId, kind: a.kind })) }
+          : context;
       const findingOffset = typeof args.integrityOffset === "number" && Number.isInteger(args.integrityOffset) && args.integrityOffset >= 0 ? args.integrityOffset : 0;
       const pageSize = isAgy ? 1 : 20;
-      const boundedIntegrity = testIntegrityObservation ? { ...testIntegrityObservation,
-        report: { ...testIntegrityObservation.report, findings: testIntegrityObservation.report.findings.slice(findingOffset, findingOffset + pageSize).map(finding => ({
-          ...finding, reason: finding.reason.slice(0, 512), ...(finding.before === undefined ? {} : { before: finding.before.slice(0, 256) }),
-          ...(finding.after === undefined ? {} : { after: finding.after.slice(0, 256) }) })) },
-        displayedExcerptsBounded: true,
-        reportDigest: digest(testIntegrityObservation.report), findingOffset, findingTotal: testIntegrityObservation.report.findings.length,
-        nextFindingOffset: findingOffset + pageSize < testIntegrityObservation.report.findings.length ? findingOffset + pageSize : null } : undefined;
+      const boundedIntegrity = compactContinuation
+        ? undefined
+        : testIntegrityObservation ? { ...testIntegrityObservation,
+            report: { ...testIntegrityObservation.report, findings: testIntegrityObservation.report.findings.slice(findingOffset, findingOffset + pageSize).map(finding => ({
+              ...finding, reason: finding.reason.slice(0, 512), ...(finding.before === undefined ? {} : { before: finding.before.slice(0, 256) }),
+              ...(finding.after === undefined ? {} : { after: finding.after.slice(0, 256) }) })) },
+            displayedExcerptsBounded: true,
+            reportDigest: digest(testIntegrityObservation.report), findingOffset, findingTotal: testIntegrityObservation.report.findings.length,
+            nextFindingOffset: findingOffset + pageSize < testIntegrityObservation.report.findings.length ? findingOffset + pageSize : null } : undefined;
       // The complete observation remains immutable in the receipt journal and ArtifactStore; response pages carry its digest.
-      const boundedContext = testIntegrityObservation ? { ...dossierContext, input: { ...record(context.input),
+      const boundedContext = !compactContinuation && testIntegrityObservation ? { ...dossierContext, input: { ...record(context.input),
         hostTestIntegrityObservation: { evidence: testIntegrityObservation.evidence, reportDigest: digest(testIntegrityObservation.report), findingTotal: testIntegrityObservation.report.findings.length } } } : dossierContext;
       const pageIntegrityIds = boundedIntegrity ? boundedIntegrity.report.findings.map(f => f.id) : [];
       return {
         reviewId,
-        ...(candidateBehavioralEvidence ? { candidateBehavioralEvidence } : {}),
+        ...(!compactContinuation && candidateBehavioralEvidence ? { candidateBehavioralEvidence } : {}),
         reviewRequirements: buildRequirements(pageIntegrityIds, fullIntegrityIds.length),
         ...(boundedIntegrity ? { testIntegrityObservation: boundedIntegrity } : {}),
-        ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}),
+        ...(!compactContinuation && qaBehavioralObservation ? { qaBehavioralObservation } : {}),
         ...(boundedRework ? { reworkResolution: boundedRework } : {}),
         context: boundedContext,
         observation: {
@@ -1580,12 +1624,13 @@ export class HostVerification {
         }
       };
     };
-    let bounded = buildBounded(maxChars, false);
+    const isDiffContinuation = isAgy && diffOffset > 0 && args.integrityOffset === undefined;
+    let bounded = buildBounded(maxChars, false, isDiffContinuation);
     const shouldCompactDossier = isAgy && exceedsAgyInlineReply(bounded) && Boolean(reworkResolution);
-    if (shouldCompactDossier) bounded = buildBounded(maxChars, true);
+    if (shouldCompactDossier) bounded = buildBounded(maxChars, true, isDiffContinuation);
     while (isAgy && maxChars > 512 && exceedsAgyInlineReply(bounded)) {
       maxChars = Math.max(512, Math.floor(maxChars * 0.75));
-      bounded = buildBounded(maxChars, shouldCompactDossier);
+      bounded = buildBounded(maxChars, shouldCompactDossier, isDiffContinuation);
     }
     return json(bounded);
   }
