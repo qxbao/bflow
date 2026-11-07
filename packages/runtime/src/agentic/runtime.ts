@@ -439,8 +439,11 @@ export class AgenticWorkflowRuntime {
   }
   private now(): string { return (this.ports.clock?.() ?? new Date()).toISOString(); }
   /** Lock-free best-effort diagnostic context derived only from the latest committed journal snapshot. */
-  taskLogAssignmentContext(binding: PaneBinding): TaskLogAssignment | undefined {
-    return taskLogAssignmentContextFromSnapshot(this.taskLogAssignmentSnapshot, binding);
+  taskLogAssignmentContext(
+    binding: PaneBinding,
+    filter?: { runId?: string; taskId?: string; assignmentMessageId?: string; correlationId?: string }
+  ): TaskLogAssignment | undefined {
+    return taskLogAssignmentContextFromSnapshot(this.taskLogAssignmentSnapshot, binding, filter);
   }
   private refreshTaskLogAssignmentSnapshot(state: JournalState): void {
     this.taskLogAssignmentSnapshot = state.outbound.flatMap(item => item.handle && ["accepted", "released"].includes(item.status)
@@ -753,6 +756,11 @@ export class AgenticWorkflowRuntime {
       }
     }
     const needsWakeTransaction = await this.journal.project(state => {
+      if (state.outbound.some(item =>
+        Boolean(item.phaseFailure && (!item.phaseFailure.applied || item.phaseFailure.retryAuthorized)) ||
+        Boolean(item.phaseRetirement?.resumeAuthorizedBy) ||
+        Boolean(item.leaseReacquisition)
+      )) return true;
       if (state.runs.some(run =>
         (run.nativeDeliveries ?? []).some(entry => this.durablySettledNative(state, entry.message)) ||
         (run.pendingAction?.kind === "reconcile_delivery" && run.pendingAction.state === "pending" && !run.cancelled && (
@@ -1672,9 +1680,9 @@ export class AgenticWorkflowRuntime {
   }
   async inspect(runIdOrQuery?: string | InspectInput): Promise<JsonValue> {
     if (typeof runIdOrQuery === "string" || runIdOrQuery === undefined) {
-      return this.journal.project(state => json(runIdOrQuery ? publicExecutionRun(this.run(state, runIdOrQuery)) : {
+      return this.journal.project(state => (runIdOrQuery ? publicExecutionRun(this.run(state, runIdOrQuery)) : {
         runs: state.runs.map(publicExecutionRun), outbound: state.outbound, inbox: state.inbox
-      }));
+      }) as unknown as JsonValue);
     }
     const query = InspectInputSchema.parse(runIdOrQuery);
     return this.journal.project(state => {
@@ -1682,7 +1690,7 @@ export class AgenticWorkflowRuntime {
         runs: state.runs.map(publicExecutionRun), outbound: state.outbound, inbox: state.inbox
       };
       if (query.view === undefined && query.taskId === undefined && query.cursor === undefined) {
-        return json(raw);
+        return raw as unknown as JsonValue;
       }
       return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
     });
@@ -3118,7 +3126,12 @@ export class AgenticWorkflowRuntime {
     await this.transaction(async state => { this.providerDelivery(state, message, binding); });
   }
   /** Current native Agy admission/tool authority; historical delivery matching alone grants no new action. */
-  async authorizeAgyProviderTurn(input: unknown, bindingInput: unknown, operationName?: string): Promise<void> {
+  async authorizeAgyProviderTurn(
+    input: unknown,
+    bindingInput: unknown,
+    operationName?: string,
+    options?: { skipLeaseRenewalIfFresh?: boolean }
+  ): Promise<void> {
     const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);
     await this.transaction(async (state, _save, core, outbox) => {
       if (this.quiesced && (operationName === undefined || !QUIESCED_RECEIPT_DRAIN_OPERATIONS.includes(operationName)))
@@ -3230,7 +3243,10 @@ export class AgenticWorkflowRuntime {
         }
       }
       // Registry, rather than the journal's future expiry, proves current fencing authority.
-      await outbox.renew(out);
+      const leaseFresh = options?.skipLeaseRenewalIfFresh === true &&
+        !owner.leaseRenewal && !owner.leaseReacquisition &&
+        Date.parse(owner.lease.expiresAt) - Date.parse(this.now()) > 240_000;
+      if (!leaseFresh) await outbox.renew(out);
     });
   }
   /** An authenticated Stop is operational evidence only. It never applies ingress, retries delivery or changes business state. */
@@ -4974,7 +4990,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   /** Trusted local tool guard. Keep current ownership and lease checks adjacent
    * to file/commit operations; model arguments never supply the authority. */
   async withDeveloperWorkspace<T>(bindingInput: PaneBinding, runId: string, taskId: string,
-    use: (task: TaskRecord, definition: TaskDefinition) => Promise<T>): Promise<T> {
+    use: (task: TaskRecord, definition: TaskDefinition) => Promise<T>,
+    options?: { readOnly?: boolean }): Promise<T> {
     const binding = PaneBindingSchema.parse(bindingInput);
     return this.transaction(async (state, _save, core, outbox) => {
       if (this.quiesced || binding.role !== "developer") throw new Error("Developer writes are quiesced or unauthorized");
@@ -4989,7 +5006,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           out.handle.target.worktreePath !== binding.worktreePath || digest(out.handle.target.session) !== digest(binding.session) ||
           task.worktrees.at(-1)?.worktreePath !== binding.worktreePath)
         throw new Error("No current Developer assignment owns this task workspace");
-      await outbox.renew(out);
+      const leaseFresh = options?.readOnly === true && out.lease &&
+        !out.leaseRenewal && !out.leaseReacquisition &&
+        Date.parse(out.lease.expiresAt) - Date.parse(this.now()) > 240_000;
+      if (!leaseFresh) await outbox.renew(out);
       const selectedProfile = selectRoleProfile(run.roleProfiles, binding.role, definition.roleProfile);
       assertProfileBinding(selectedProfile, binding);
       if (selectedProfile) {

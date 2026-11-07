@@ -15,7 +15,7 @@ import { isConflictResolverAssignment, type AgenticWorkflowRuntime } from "./run
 import { digest, json, record, strings, textField } from "./journal.js";
 import type { JsonValue, Specification, TestStrategy } from "@bflow/contracts";
 import { darwinWorkspaceFile } from "./workspace-file-darwin.js";
-import { exceedsAgyInlineReply } from "./agy-assignment-admission.js";
+import { AGY_INLINE_REPLY_BYTES, exceedsAgyInlineReply } from "./agy-assignment-admission.js";
 import { selectRoleProfile } from "./profile-admission.js";
 
 const execute = promisify(execFile);
@@ -52,11 +52,15 @@ const workspaceReadSchema = z.object({
   runId: optionalNonEmptyId,
   run_id: optionalNonEmptyId,
   taskId: optionalNonEmptyId,
-  task_id: optionalNonEmptyId
+  task_id: optionalNonEmptyId,
+  offset: z.number().int().min(0).max(FILE_BYTES).optional(),
+  limit: z.number().int().min(1).max(FILE_BYTES).optional()
 }).strict().transform(data => ({
   path: normalizeFilePath(data as Record<string, unknown>),
   runId: data.runId ?? data.run_id,
-  taskId: data.taskId ?? data.task_id
+  taskId: data.taskId ?? data.task_id,
+  offset: data.offset,
+  limit: data.limit
 }));
 const workspaceWriteSchema = z.object({
   path: z.string().min(1).max(4096).optional(),
@@ -114,11 +118,14 @@ export class HostDevelopment {
     const binding = PaneBindingSchema.parse(bindingInput), args = record(input);
     const requestedRunId = normalizeOptionalId(args.runId ?? args.run_id), requestedTaskId = normalizeOptionalId(args.taskId ?? args.task_id);
     if (binding.role !== "developer" || !binding.worktreePath) throw new Error("An assigned Developer worktree is required");
-    const state = record(await this.runtime().inspect());
-    if (!Array.isArray(state.outbound)) throw new Error("Invalid Runtime assignment state");
+    const rt = this.runtime() as AgenticWorkflowRuntime & { outboundForPane?: (paneId: string) => Promise<unknown[]> };
+    const outbound = typeof rt.outboundForPane === "function"
+      ? await rt.outboundForPane(binding.paneId)
+      : record(await rt.inspect()).outbound;
+    if (!Array.isArray(outbound)) throw new Error("Invalid Runtime assignment state");
     // Herdr reuses pane ids across restarts, so a cancelled run's unconfirmed assignment can name this pane too; the
     // per-attempt Developer agent name tells them apart.
-    const candidates = state.outbound.map(record).filter(out => out.status === "accepted" && out.handle &&
+    const candidates = outbound.map(record).filter(out => out.status === "accepted" && out.handle &&
       RoleMessageSchema.parse(out.message).type === "task.assignment" &&
       AgentExecutionHandleSchema.parse(out.handle).target.paneId === binding.paneId &&
       AgentExecutionHandleSchema.parse(out.handle).target.agentId === binding.agentId &&
@@ -275,7 +282,7 @@ export class HostDevelopment {
       this.scope(path, owned, strings(record(definition.metadata).forbiddenPaths ?? []));
       if (writing) await this.authorizeTddPaths(context.cwd, task, owned, [path]);
       return use(context.cwd, path);
-    });
+    }, { readOnly: !writing });
   }
   /** Linux descriptor-relative traversal pins every directory; no check-path-then-open-path authorization gap.
    * Other platforms fail closed. Parent directories must already exist unless `createParents` is set for a new file. */
@@ -321,11 +328,41 @@ export class HostDevelopment {
   /** Bounded UTF-8 source access is allowed before Red; missing leaf files return exists:false. */
   async readWorkspaceFile(binding: PaneBinding, input: unknown): Promise<JsonValue> {
     const args = workspaceReadSchema.parse(input);
+    const isAgy = binding.agentKind === "agy" || binding.provider === "agy";
+    const formatFoundReply = (path: string, content: string, digestHex: string, byteLength: number): JsonValue => {
+      const fullReply = { path, exists: true, content, sha256: digestHex, bytes: byteLength };
+      const pagedRequested = args.offset !== undefined || args.limit !== undefined;
+      if (!pagedRequested && (!isAgy || !exceedsAgyInlineReply(fullReply))) return json(fullReply);
+      const start = Math.min(args.offset ?? 0, content.length);
+      let sliceLimit = Math.min(args.limit ?? (isAgy ? 5600 : content.length), Math.max(0, content.length - start));
+      const buildPaged = (limit: number) => {
+        const end = Math.min(content.length, start + limit);
+        const truncated = end < content.length;
+        return {
+          path,
+          exists: true,
+          content: content.slice(start, end),
+          sha256: digestHex,
+          bytes: byteLength,
+          offset: start,
+          totalChars: content.length,
+          truncated,
+          nextOffset: truncated ? end : null
+        };
+      };
+      let reply = buildPaged(sliceLimit);
+      while (isAgy && sliceLimit > 1 && exceedsAgyInlineReply(reply)) {
+        const overshoot = Buffer.byteLength(JSON.stringify(reply), "utf8") - AGY_INLINE_REPLY_BYTES;
+        sliceLimit = Math.max(1, sliceLimit - Math.max(128, overshoot));
+        reply = buildPaged(sliceLimit);
+      }
+      return json(reply);
+    };
     return this.withWorkspaceFile(binding, args, false, async (cwd, path) => {
       if (process.platform === "darwin") {
         const bytes = await darwinWorkspaceFile(cwd, path);
         return bytes === undefined ? json({ path, exists: false, content: null, sha256: null, bytes: 0 })
-          : json({ path, exists: true, content: utf8(bytes), sha256: sha256(bytes), bytes: bytes.length });
+          : formatFoundReply(path, utf8(bytes), sha256(bytes), bytes.length);
       }
       return this.withFileParent(cwd, path, async file => {
       try { await this.assertRegularPath(file); }
@@ -334,7 +371,7 @@ export class HostDevelopment {
         throw error;
       }
       const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      try { const value = await this.boundedFile(handle); return json({ path, exists: true, content: value.content, sha256: value.sha256, bytes: value.bytes.length }); }
+      try { const value = await this.boundedFile(handle); return formatFoundReply(path, value.content, value.sha256, value.bytes.length); }
       finally { await handle.close(); }
       });
     });
@@ -407,7 +444,7 @@ export class HostDevelopment {
         return json(compact);
       }
       return json(fullReply);
-    });
+    }, { readOnly: true });
     const head=record(reply).head;
     if(!this.candidateEvidence || typeof head!=="string")return reply;
     // Receipt lookup runs outside the workspace transaction; it grants no mutation or acceptance authority.

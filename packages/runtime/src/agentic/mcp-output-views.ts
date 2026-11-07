@@ -815,7 +815,7 @@ export function summarizeInspectState(stateInput: unknown, rawQuery: InspectInpu
 export const AssignmentContextInputSchema = z
   .object({
     view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "compact", "active_only"]).optional()),
-    surveyView: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "summary", "anchors_only"]).optional()),
+    surveyView: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "summary", "anchors_only", "omit"]).optional()),
     includeReleased: z.preprocess(nullToUndefined, z.boolean().optional()),
     paths: z.unknown().optional()
   })
@@ -825,9 +825,12 @@ export type AssignmentContextInput = z.infer<typeof AssignmentContextInputSchema
 
 function compactRepositorySurvey(
   surveyInput: unknown,
-  surveyView: "full" | "summary" | "anchors_only"
+  surveyView: "full" | "summary" | "anchors_only" | "omit"
 ): unknown {
-  if (surveyInput === undefined || surveyView === "full") {
+  if (surveyInput === undefined || surveyView === "omit") {
+    return undefined;
+  }
+  if (surveyView === "full") {
     return surveyInput;
   }
   const surveyWrapper = record(surveyInput);

@@ -94,8 +94,12 @@ export function taskLogAssignmentContext(raw: unknown, binding: PaneBinding, fil
   return { runId, taskId, ...(typeof out.attemptId === "string" ? { attemptId: out.attemptId } : {}) };
 }
 
-export function taskLogAssignmentContextFromSnapshot(assignments: readonly Record<string, unknown>[], binding: PaneBinding): TaskLogAssignment | undefined {
-  return taskLogAssignmentContext({ outbound: assignments }, binding);
+export function taskLogAssignmentContextFromSnapshot(
+  assignments: readonly Record<string, unknown>[],
+  binding: PaneBinding,
+  filter?: { runId?: string; taskId?: string; assignmentMessageId?: string; correlationId?: string }
+): TaskLogAssignment | undefined {
+  return taskLogAssignmentContext({ outbound: assignments }, binding, filter);
 }
 
 /** Implements authenticated activity-log tools; undefined means the tool name is not handled here. */

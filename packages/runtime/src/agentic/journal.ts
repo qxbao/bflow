@@ -731,6 +731,23 @@ function parseSpec(value: SpecRecord): void {
 /** Linux flock + fsync/rename. A crashed process releases its lock; stale PID files are never stolen. */
 export const JOURNAL_LOCK_WAIT_MS = 5_000;
 export const JOURNAL_LOCK_SPAWN_TIMEOUT_MS = 15_000;
+function journalStatesEqual(a: JournalState, b: JournalState): boolean {
+  if (a === b) return true;
+  if (a.version !== b.version || a.repository !== b.repository ||
+      a.runs.length !== b.runs.length || a.outbound.length !== b.outbound.length ||
+      a.inbox.length !== b.inbox.length || a.pendingCore.length !== b.pendingCore.length ||
+      a.pendingVerifications.length !== b.pendingVerifications.length) return false;
+  for (let i = a.outbound.length - 1; i >= 0; i--) {
+    if (!isDeepStrictEqual(a.outbound[i], b.outbound[i])) return false;
+  }
+  for (let i = a.runs.length - 1; i >= 0; i--) {
+    if (!isDeepStrictEqual(a.runs[i], b.runs[i])) return false;
+  }
+  for (let i = a.inbox.length - 1; i >= 0; i--) {
+    if (!isDeepStrictEqual(a.inbox[i], b.inbox[i])) return false;
+  }
+  return isDeepStrictEqual(a, b);
+}
 export class AgenticJournal {
   readonly directory: string;
   private readonly lockWaitMs: number;
@@ -799,10 +816,11 @@ export class AgenticJournal {
       const statePath = join(this.directory, "state.json");
       try {
         const bytes = await readRegularJournalFile(statePath);
-        if (this.validatedSnapshot?.bytes.equals(bytes)) state = readOnly ? this.validatedSnapshot.value : json(this.validatedSnapshot.value) as unknown as JournalState;
+        if (this.validatedSnapshot?.bytes.equals(bytes)) state = readOnly ? this.validatedSnapshot.value : JSON.parse(bytes.toString("utf8")) as JournalState;
         else {
-          state = parseAgenticJournalState(JSON.parse(bytes.toString("utf8")), this.repository, this.validatedSnapshot?.value);
-          this.validatedSnapshot = { bytes: Buffer.from(bytes), value: readOnly ? state : json(state) as unknown as JournalState };
+          const raw = JSON.parse(bytes.toString("utf8"));
+          state = parseAgenticJournalState(raw, this.repository, this.validatedSnapshot?.value);
+          this.validatedSnapshot = { bytes: Buffer.from(bytes), value: readOnly ? state : JSON.parse(bytes.toString("utf8")) as JournalState };
         }
         baseline = this.validatedSnapshot.value; durableBytes = bytes;
       } catch (e) {
@@ -825,7 +843,7 @@ export class AgenticJournal {
             state.outbound.some(out => out.roleProfile || out.executorLineage || out.profileAllocationTaskId))) state.version = 7;
         if (state.version < 8 && requiresDirectorJournal(state)) state.version = 8;
         // Equality covers invalid values that JSON.stringify would omit. Re-read under flock before acknowledging unchanged durable bytes.
-        if (baseline && durableBytes && isDeepStrictEqual(state, baseline)) {
+        if (baseline && durableBytes && journalStatesEqual(state, baseline)) {
           try { if ((await readRegularJournalFile(statePath)).equals(durableBytes)) return; }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         }

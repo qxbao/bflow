@@ -890,8 +890,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       transcriptPath: transcriptPath ?? path, ...(priorAnchor ? { priorAnchor } : {}), ...(pendingTool ? { pendingTool } : {}),
       ...(expectedMcpTool ? { expectedMcpTool } : {}) })) };
   };
-  const assertAgyTurn = async (binding: PaneBinding, expectedAnchor?: unknown, pendingTool?: AgyPendingNativeTool, operationName?: string) => {
-    const current = await readAgyTurn(binding, undefined, undefined, pendingTool);
+  let lastAuthorizedAgyStep: { key: string; at: number } | undefined;
+  const assertAgyTurn = async (binding: PaneBinding, expectedAnchor?: unknown, pendingTool?: AgyPendingNativeTool, operationName?: string,
+    preRead?: Awaited<ReturnType<typeof readAgyTurn>>) => {
+    const current = preRead ?? await readAgyTurn(binding, undefined, undefined, pendingTool);
     if (expectedAnchor !== undefined && digest(expectedAnchor) !== digest(current.anchor)) throw new Error("Agy native hook belongs to another transcript turn");
     if (binding.role === "conversation") {
       await receipts.assertConversationAgyTurn(binding, current.launchId, current.anchor, current.prompt);
@@ -900,7 +902,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const admitted = await receipts.assertAgyNativeTurn(binding, current.launchId, current.anchor);
     const message = RoleMessageSchema.parse(JSON.parse(normalizeProviderPrompt(current.prompt.trim())));
     if (digest(message) !== digest(admitted.message)) throw new Error("Agy native turn envelope changed");
-    await requireWorkspace().runtime.authorizeAgyProviderTurn(message, binding, operationName);
+    const stepKey = pendingTool && binding.session
+      ? `${binding.paneId}:${binding.session.value}:${current.launchId}:${digest(current.anchor)}:${pendingTool.stepIndex}:${digest(pendingTool.toolCall)}`
+      : undefined;
+    const skipLeaseRenewalIfFresh = stepKey !== undefined && lastAuthorizedAgyStep?.key === stepKey && Date.now() - lastAuthorizedAgyStep.at < 5_000;
+    await requireWorkspace().runtime.authorizeAgyProviderTurn(message, binding, operationName,
+      skipLeaseRenewalIfFresh ? { skipLeaseRenewalIfFresh: true } : undefined);
+    if (stepKey !== undefined) lastAuthorizedAgyStep = { key: stepKey, at: Date.now() };
     return admitted;
   };
   const nativeInbox = async () => {
@@ -2018,8 +2026,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (operation.nativeSessionId !== binding.session?.value || operation.nativeToolCall.name !== "call_mcp_tool" ||
           operation.nativeToolCall.args.ServerName !== "bflow" || operation.nativeToolCall.args.ToolName !== name ||
           digest(operation.nativeToolCall.args.Arguments ?? {}) !== digest(parameters)) throw new Error("Agy MCP operation identity mismatch");
-      await readAgyTurn(binding, textField(args.launchId));
-      await assertAgyTurn(binding, operation.anchor, { stepIndex: operation.nativeStepIndex, toolCall: operation.nativeToolCall }, name);
+      const pendingTool = { stepIndex: operation.nativeStepIndex, toolCall: operation.nativeToolCall };
+      const current = await readAgyTurn(binding, textField(args.launchId), undefined, pendingTool);
+      await assertAgyTurn(binding, operation.anchor, pendingTool, name, current);
     }
     const host = requireWorkspace();
     if (quiesced && !QUIESCED_RECEIPT_DRAIN_OPERATIONS.includes(name)) throw new Error("Host is quiesced; new work is disabled while existing receipts can drain");
@@ -2612,9 +2621,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (binding.provider !== "agy") throw new Error("Agy Gateway session is unavailable for this role");
         if (!binding.session || binding.session.value !== input.nativeSessionId)
           throw new Error("Agy Gateway native session or launch mismatch");
-        await readAgyTurn(binding, input.launchId);
+        const pendingTool = { stepIndex: input.nativeStepIndex, toolCall: input.nativeToolCall };
+        const current = await readAgyTurn(binding, input.launchId, undefined, pendingTool);
         if (input.nativeToolCall.name !== "call_mcp_tool" || input.nativeToolCall.args.ServerName === "bflow") throw new Error("Agy Gateway call identity mismatch");
-        await assertAgyTurn(binding, input.anchor, { stepIndex: input.nativeStepIndex, toolCall: input.nativeToolCall });
+        await assertAgyTurn(binding, input.anchor, pendingTool, undefined, current);
         return { permitted: true };
       }
       if (method === "agy_native_turn") {
@@ -2707,7 +2717,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           throw new Error("No native Agy MCP operation for this role");
         const current = await readAgyTurn(binding, input.launchId, undefined, undefined, { name: input.name, arguments: input.arguments });
         if (!current.pendingTool) throw new Error("Agy MCP call has no pending native operation");
-        await assertAgyTurn(binding, current.anchor, current.pendingTool, input.name);
+        await assertAgyTurn(binding, current.anchor, current.pendingTool, input.name, current);
         return AgyMcpOperationSchema.parse({ nativeSessionId: binding.session!.value, anchor: current.anchor,
           nativeStepIndex: current.pendingTool.stepIndex, nativeToolCall: current.pendingTool.toolCall });
       }
@@ -2719,9 +2729,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const args = record(input.arguments ?? {});
         let context: { runId?: string; taskId?: string; attemptId?: string } = {};
         try {
-          const state = record(await requireWorkspace().runtime.inspect());
           const binding = await principal(role, textField(input.paneId));
-          const assigned = taskLogAssignmentContext(state, binding, {
+          const assigned = requireWorkspace().runtime.taskLogAssignmentContext(binding, {
             ...(typeof args.runId === "string" ? { runId: args.runId } : {}), ...(typeof args.taskId === "string" ? { taskId: args.taskId } : {}) });
           if (assigned) context = assigned;
           else if (role === "coordinator" && typeof args.runId === "string") context.runId = args.runId;
@@ -3497,7 +3506,7 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     { name: "propose_task_handover", description: "Propose bounded untrusted continuation context. Read read_task_handover for the exact host binding; submit proposal:{schemaVersion:1,binding,content:{nextAction,decisions,disprovedHypotheses,untestedAngles,references}}. Lists <=8, strings <=768 characters, references <=16 source {kind:source,location:{path,startLine?,endLine?,symbol?}} or evidence {kind:evidence,artifactId}; entire proposal <=16 KiB. No approval, permissions or success evidence." },
     { name: "read_task_handover", description: "Read host-selected untrusted task handover, exact current binding and authoritative requirements/approval/blocker context. Optional runId,taskId,view (full/page),cursor,offset. Large Agy replies are paged: concatenate page strings and parse the complete JSON, following nextOffset with the same cursor. On stale cursor restart at offset 0. Missing or rejected history never supplies proof." },
     { name: "workspace_status", description: "Inspect your assigned task worktree, current Git HEAD and recorded TDD phases; runId,taskId" },
-    { name: "read_workspace_file", description: "Read one UTF-8 file inside your assigned task worktree and obtain its SHA-256. Bounded to 128 KiB, no symlinks or special files; runId,taskId,path" },
+    { name: "read_workspace_file", description: "Read one UTF-8 file inside your assigned task worktree and obtain its full-file SHA-256. Bounded to 128 KiB, no symlinks or special files; runId,taskId,path,offset?,limit?. Large Agy files are paged automatically: while truncated is true, call again with offset=nextOffset and concatenate content slices." },
     { name: "write_workspace_file", description: "Write one UTF-8 file inside accepted ownership and the current TDD phase. Pass expectedSha256 from read_workspace_file to replace, or null to create a new file. Creating a file also creates its missing parent directories inside your ownership; 128 KiB limit; runId,taskId,path,content,expectedSha256" },
     { name: "commit_changes", description: "Commit only approved owned files on your task branch with expectedHead and message. No shell, push or merge; runId,taskId,expectedHead,message" },
     { name: "check_work", description: "Run owner-configured checks as Developer feedback. This never counts as independent acceptance evidence; runId,taskId" },
@@ -3546,7 +3555,7 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     reresolve_execution_plan:{properties:{runId:string},required:["runId"]},
     withdraw_workflow_proposal:{properties:{runId:string,reason:string},required:["runId","reason"]},
     read_role_pane:{properties:{role:string,paneId:string,lines:{type:"integer",minimum:1,maximum:200}},required:["role"]},
-    assignment_context:{properties:{view:{type:"string",enum:["full","compact","active_only"]},surveyView:{type:"string",enum:["full","summary","anchors_only"]},includeReleased:{type:"boolean"}},required:[]},
+    assignment_context:{properties:{view:{type:"string",enum:["full","compact","active_only"]},surveyView:{type:"string",enum:["full","summary","anchors_only","omit"]},includeReleased:{type:"boolean"}},required:[]},
     read_task_log:{properties:{runId:string,taskId:string,lines:{type:"integer",minimum:1,maximum:100},maxBytes:{type:"integer",minimum:256,maximum:16384},cursor:{type:"string",minLength:1,maxLength:128},view:{type:"string",enum:["full","compact"]}},required:[]},
     log_task_step:{properties:{runId:string,taskId:string,action:{type:"string",minLength:1,maxLength:120}},required:["runId","action"]},
     planning_reference:{properties:{section:{type:"string",enum:["specification","test_strategy","workflow","all"]},view:{type:"string",enum:["full","compact","schema_only"]},includeRunners:{type:"boolean"}},required:["section"]},
@@ -3581,7 +3590,7 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     propose_task_handover:{properties:{runId:string,taskId:string,proposal:object},required:["proposal"]},
     read_task_handover:{properties:{runId:string,taskId:string,view:{type:"string",enum:["full","page"]},cursor:{type:"string",pattern:"^[a-f0-9]{64}$"},offset:{type:"integer",minimum:0}},required:[]},
     workspace_status:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
-    read_workspace_file:{properties:{runId:string,taskId:string,path:string},required:["runId","taskId","path"]},
+    read_workspace_file:{properties:{runId:string,taskId:string,path:string,offset:{type:"integer",minimum:0,maximum:131072},limit:{type:"integer",minimum:1,maximum:131072}},required:["runId","taskId","path"]},
     write_workspace_file:{properties:{runId:string,taskId:string,path:string,content:{type:"string",maxLength:131072},expectedSha256:{anyOf:[{type:"string",pattern:"^[a-f0-9]{64}$"},{type:"null"}]}},required:["runId","taskId","path","content","expectedSha256"]},
     commit_changes:{properties:{runId:string,taskId:string,expectedHead:string,message:string},required:["runId","taskId","expectedHead","message"]},
     check_work:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
