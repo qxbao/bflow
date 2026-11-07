@@ -84,7 +84,7 @@ export function AccessibleOffice({ model, onSelect, visible, notice, extra, onTa
         {model.agents.length === 0 ? <p className="m-0 text-sm text-muted">Chưa có nhân viên nào.</p> : <ul className="my-2 list-none p-0">
           {model.agents.map(a => <li key={a.instanceId} className="border-t border-line py-1.5 first:border-t-0">
             <button type="button" className="text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warning" onBlur={onTargetBlur} onFocus={() => onTargetFocus?.({ kind: 'agent', instanceId: a.instanceId })} onClick={() => onSelect({ kind: 'agent', instanceId: a.instanceId })}>
-              <span className="font-semibold">{a.label}</span> ({roleLabel(a.role)}): {a.statusText}. Mức tin cậy: {CERTAINTY[a.certainty]}{a.observedAt ? `, quan sát lúc ${a.observedAt}` : ''}. Việc: {taskTitle(a.runId, a.taskId)}.
+              <span className="font-semibold">{a.label}</span> ({roleLabel(a.role)}): {a.statusText}. Mức tin cậy: {CERTAINTY[a.certainty]}{a.observedAt ? `, quan sát lúc ${directorTime(a.observedAt)}` : ''}. Việc: {taskTitle(a.runId, a.taskId)}.
             </button>
           </li>)}
         </ul>}
