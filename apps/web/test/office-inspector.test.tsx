@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router';
 import { WebAgentViewSchema, WebHandoffViewSchema, WebProjectSessionSchema } from '@bflow/contracts/web';
 import { App } from '../src/app';
 import { ApiClient } from '../src/api/client';
+import { DirectorProvider } from '../src/features/director/status';
 import { writeMode } from '../src/features/office/mode';
 import { AgentInspector, AgentList, handoffEvidence } from '../src/features/office/ui/AgentInspector';
 import { DirectorInspector } from '../src/features/office/ui/DirectorInspector';
@@ -195,7 +196,13 @@ test('shows the agent terminal text and a link to all staff', async () => {
 
 test('ac-2: DirectorInspector.tsx và AgentInspector.tsx sử dụng câu chữ tiếng Việt tự nhiên, rõ nghĩa và vẫn giữ đầy đủ các nhãn chẩn đoán cần thiết.', async () => {
   mount({ apiVersion: 1, items: [] });
-  render(<MemoryRouter initialEntries={['/projects/p']}><DirectorInspector onChat={() => {}} onQueue={() => {}} /></MemoryRouter>);
+  render(
+    <MemoryRouter initialEntries={['/projects/p']}>
+      <DirectorProvider api={new ApiClient()} projectId="p" session={{ key: 's', data: ready, loading: false }} revision={0} resetEpoch={0}>
+        <DirectorInspector onChat={() => {}} onQueue={() => {}} />
+      </DirectorProvider>
+    </MemoryRouter>,
+  );
   expect(screen.queryByText(/Director chạy trực tiếp từ phiên làm việc của bạn/)).not.toBeNull();
   expect(screen.getByText(/Director chạy trực tiếp từ phiên làm việc của bạn/)).toBeTruthy();
   await screen.findByText(/Chưa có hoạt động nào/);
