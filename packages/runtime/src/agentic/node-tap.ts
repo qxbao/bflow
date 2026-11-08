@@ -6,7 +6,10 @@ import type { QualityCommandOutcome } from "@bflow/quality-gates";
 export class NodeTapTestCodeFailure extends Error {
   constructor(readonly outcome: QualityCommandOutcome, readonly failedTestNames: readonly string[],
     readonly rtk?: import("./behavioral-runner.js").BehavioralMeasurement["rtk"]) {
-    super(`Behavioral test code failed without an assertion regression in ${JSON.stringify(failedTestNames.slice(0, 8)).slice(0, 1000)}. ` +
+    const rawDetail = stripVTControlCharacters([outcome?.stderr, outcome?.stdout].filter(Boolean).join("\n")).trim();
+    const errorLine = rawDetail.split(/\r?\n/).find(line => /(?:Error|Exception|ReferenceError|TypeError|SyntaxError):/.test(line))?.trim();
+    const suffix = errorLine ? ` Underlying runtime error: ${errorLine.slice(0, 300)}.` : "";
+    super(`Behavioral test code failed without an assertion regression in ${JSON.stringify(failedTestNames.slice(0, 8)).slice(0, 1000)}.${suffix} ` +
       "Repair the existing mapped tests to assert missing target behavior before calling absent code; preserve their names. Do not implement before valid Red evidence.");
   }
 }

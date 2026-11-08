@@ -456,13 +456,16 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
         await restorePrepareArtifacts(checkout, cachedPrepare);
         await assertPinnedRevision(checkout, revision);
       } else {
+        if (!adapterPreparation && latestPrepareByTree.size > 0) {
+          await restorePrepareArtifacts(checkout, [...latestPrepareByTree.values()].at(-1)!);
+        }
         const prepareCommand = adapterPreparation
           ? { ...command, executable: preparation.executable }
           : { ...command, executable: preparation.executable, ...(command.adapter ? { adapter: { ...command.adapter, projectDirectory: "." } } : {}) };
         const prepareSandbox = await sandboxBehavior(prepareCommand, checkout, preparation.args).catch(error => {
           throw new Error(`Behavioral runner infrastructure failure (prepare): ${String(error)}`, { cause: error });
         });
-        const prepared = await runner.run({ ...prepareSandbox, cwd: prepareCwd, env, timeoutMs: preparation.timeoutMs, maxOutputBytes });
+        const prepared = await runner.run({ ...prepareSandbox, cwd: prepareCwd, env, timeoutMs: Math.max(preparation.timeoutMs, 180_000), maxOutputBytes });
         if (!prepared.ok) throw new Error(`Behavioral runner infrastructure failure (prepare): ${prepared.error.message}`);
         const prepareOutcome = prepared.value as QualityCommandOutcome;
         const failure = prepareOutcome.spawnError ?? (SANDBOX_ERROR.test(prepareOutcome.stderr) ? prepareOutcome.stderr.trim()
@@ -492,7 +495,7 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
       outcome = { ...cachedCompilerOutcome, cwd: projectCwd };
     } else {
       if (isAutoTypecheck) {
-        const warmTreeFiles = latestPrepareByTree.get(treeHash);
+        const warmTreeFiles = latestPrepareByTree.get(treeHash) ?? [...latestPrepareByTree.values()].at(-1);
         if (warmTreeFiles) await restorePrepareArtifacts(checkout, warmTreeFiles);
       }
       const sandbox = await sandboxBehavior(command, checkout, args, reporter).catch(error => {

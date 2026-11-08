@@ -5392,6 +5392,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       }
       await outbox.release(request);
       const failures = state.outbound.filter(item => item.message.run_id === run.runId && item.error?.startsWith("policy_phase_failed:") &&
+        !item.phaseFailure?.retryAuthorized && item.phaseFailure?.repairable !== false &&
         record(item.message.payload).taskId === task.taskId && record(item.message.payload).phase === payload.phase &&
         record(item.message.payload).implementationAttemptId === payload.implementationAttemptId).length;
       if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(run.status)) {

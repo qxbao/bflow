@@ -570,11 +570,15 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
         failure ??= verified.error;
         continue;
       }
-      if (!verified.value.uncertain && verified.value.lost.length > 0) {
+      if (!verified.value.uncertain && (verified.value.lost.length > 0 || [...this.launches.values()].some(
+        record => record.material?.identity.stateDirectory === identity.stateDirectory && record.state === "degraded" && record.reason === GATEWAY_LOST_CODE
+      ))) {
         let refreshed = false;
         for (const record of this.launches.values()) {
           if (record.material?.identity.stateDirectory !== identity.stateDirectory) continue;
-          if (!verified.value.lost.some(item => item.role === record.role && item.taskId === record.taskId)) continue;
+          const isLost = verified.value.lost.some(item => item.role === record.role && item.taskId === record.taskId);
+          const isDegraded = record.state === "degraded" && record.reason === GATEWAY_LOST_CODE;
+          if (!isLost && !isDegraded) continue;
           if (await this.refreshMediatedLaunchGateway(record, options)) refreshed = true;
         }
         if (refreshed) {
@@ -590,6 +594,16 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       for (const registration of verified.value.lost) {
         lost.push(registration);
         this.degradeOwners(identity, registration);
+      }
+      if (!verified.value.uncertain) {
+        for (const record of this.launches.values()) {
+          if (record.material?.identity.stateDirectory !== identity.stateDirectory) continue;
+          if (record.state === "degraded" && record.reason === GATEWAY_LOST_CODE &&
+              !verified.value.lost.some(item => item.role === record.role && item.taskId === record.taskId)) {
+            record.state = record.healthValidUntil !== undefined ? "activated" : "intent";
+            delete record.reason;
+          }
+        }
       }
     }
     if (failure) return failWith(failure);
@@ -737,7 +751,16 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
         toolGrants: serviceGrants,
         configDigest
       }, options);
-      if (!granted.ok) return false;
+      if (!granted.ok) {
+        const uncertain = granted.error.code === "timeout" || granted.error.code === "unknown_delivery" || granted.error.code === "cancelled" ||
+          ("retrySafety" in granted.error && granted.error.retrySafety === "observation_only");
+        const cleanupUnconfirmed = isRecord(granted.error.details) &&
+          granted.error.details["diagnosticCode"] === "gateway_readiness_cleanup_failed";
+        if (!uncertain && !cleanupUnconfirmed && serviceGrants.every(grant => grant.requiredness === "optional")) {
+          continue;
+        }
+        return false;
+      }
     }
     if (record.state === "degraded" && record.reason === GATEWAY_LOST_CODE) {
       record.state = record.healthValidUntil !== undefined ? "activated" : "intent";

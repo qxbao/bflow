@@ -105,14 +105,17 @@ export class CoordinatorTools {
       case "resume_run": {
         const runId = textField(args.runId ?? args.run_id);
         const actionIdVal = args.actionId ?? args.action_id;
+        const resumeOptions = principal.principal === "director"
+          ? { conversationUserMessageId: `director-resume-${Date.now()}` }
+          : {};
         if (actionIdVal === undefined || actionIdVal === null || (typeof actionIdVal === "string" && actionIdVal.trim() === "")) {
           const inspected = record(await this.runtime.inspect(runId));
           const pending = inspected.pendingAction !== null && typeof inspected.pendingAction === "object"
             ? record(inspected.pendingAction)
             : undefined;
-          return this.runtime.resumeBlockedRun(runId, pending?.actionId !== undefined ? textField(pending.actionId) : "");
+          return this.runtime.resumeBlockedRun(runId, pending?.actionId !== undefined ? textField(pending.actionId) : "", resumeOptions);
         }
-        return this.runtime.resumeBlockedRun(runId, textField(actionIdVal));
+        return this.runtime.resumeBlockedRun(runId, textField(actionIdVal), resumeOptions);
       }
       case "authorize_implementation": return this.runtime.authorizeImplementation(textField(args.runId ?? args.run_id), textField(args.taskId ?? args.task_id));
       case "accept_conflict_resolution": return this.runtime.acceptConflictResolution(textField(args.runId ?? args.run_id), textField(args.taskKey ?? args.task_key), textField(args.resolutionCommitHash ?? args.resolution_commit_hash));

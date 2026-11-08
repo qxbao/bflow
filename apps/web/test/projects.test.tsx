@@ -25,8 +25,8 @@ it('explains expired browser sessions without exposing server internals',async()
 });
 it('ac-1: AccessibleOffice.tsx hiển thị thời gian quan sát qua directorTime(a.observedAt) và projects.tsx cung cấp hàm sortProjects ưu tiên dự án ngoài /tmp/ lên trước.',()=>{
  const sorted=sortProjects([
-  {projectId:'p1',displayName:'Temp',canonicalPath:'/tmp/demo',registrationState:'registered',createdAt:'2026-11-07T00:00:00.000Z',updatedAt:'2026-11-07T00:00:00.000Z'},
-  {projectId:'p2',displayName:'Real',canonicalPath:'/mnt/proj',registrationState:'registered',createdAt:'2026-11-07T00:00:00.000Z',updatedAt:'2026-11-07T00:00:00.000Z'},
+  {apiVersion:1,projectId:'p1',displayName:'Temp',canonicalPath:'/tmp/demo',registrationState:'registered'},
+  {apiVersion:1,projectId:'p2',displayName:'Real',canonicalPath:'/mnt/proj',registrationState:'registered'},
  ]);
  expect(sorted.map(p=>p.projectId)).toEqual(['p2','p1']);
  const formatted=directorTime('2026-11-07T20:01:32.898Z');
