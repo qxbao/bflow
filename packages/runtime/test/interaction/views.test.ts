@@ -233,3 +233,10 @@ it("keeps a browser-safe JSON fixture bundle for W03/W06", async () => {
     JSON.stringify(interactionUiFixtures(), null, 2) + "\n",
   ).toMatchFileSnapshot("./fixtures/ui-states.json");
 });
+it("strips pasted_content and bflow-web markers from historical delegation titles while falling back to objective", () => {
+  const r = run("polluted");
+  r.delegation.title = '<pasted_content id="edde">\n[bflow-web:dedfa35f-b2ab-431d-b';
+  r.delegation.objective = '<pasted_content id="edde">\n[bflow-web:dedfa35f-b2ab-431d-ba61-a829ffa6623c:eae9427c]\nOwner feedback cho run hiện tại</pasted_content id="edde">';
+  const view = projectRun(source([r]), "polluted");
+  expect(view.title).toBe("Owner feedback cho run hiện tại");
+});

@@ -540,3 +540,347 @@
   .office-3d:has(.office-windows .bwin:not([hidden])) .office-rail { display:none!important; }
   .office-3d .taskbar-quick-chat { flex:1 1 80px; }
 }
+
+/* ==========================================================================
+   3D Game UI Overhaul — Cozy Tycoon / Tactical RPG HUD & Window Interior
+   ========================================================================== */
+
+/* 1. Tactile Game Window Chrome & Blueprint/Parchment Grid Interior */
+.office-3d .bwin {
+  border: 2px solid var(--win-ink);
+  border-radius: 10px;
+  box-shadow: 0 14px 32px rgb(31 24 20 / 0.24), 4px 4px 0 var(--win-ink);
+}
+.office-3d .bwin-titlebar {
+  min-height: 38px;
+  padding: 5px 8px;
+  box-shadow: inset 0 2px 0 rgb(255 255 255 / 0.28), inset 0 -1px 0 rgb(0 0 0 / 0.18);
+  letter-spacing: 0.04em;
+}
+.office-3d .bwin-title-icon {
+  width: 24px;
+  height: 24px;
+  padding: 2px;
+  border: 1.5px solid var(--win-ink);
+  border-radius: 5px;
+  background: rgb(255 255 255 / 0.92);
+  color: var(--win-ink);
+  box-shadow: 1px 1px 0 var(--win-ink);
+}
+.office-3d .bwin-body,
+.office-3d .bwin-app .workspace-main-content {
+  background-color: var(--win-body);
+  background-image: radial-gradient(rgb(31 24 20 / 0.075) 1px, transparent 0);
+  background-size: 14px 14px;
+}
+
+/* 2. Game Status Badges (RPG Rank / Quest State Chips) */
+.quest-progress {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: 999px;
+  background: var(--color-faint);
+}
+.quest-progress-fill {
+  height: 100%;
+  background: var(--color-success);
+  transition: width 220ms ease-out;
+}
+.agent-terminal-bar { display: none; }
+.agent-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border: 1.5px solid var(--win-ink, #1f1814);
+  border-radius: 999px;
+  background: #8c8a82;
+}
+.agent-status-dot--working,
+.agent-status-dot--accepted,
+.agent-status-dot--starting { background: #2cbf69; box-shadow: 0 0 0 2px rgb(44 191 105 / 0.22); }
+.agent-status-dot--idle,
+.agent-status-dot--done { background: #f2b705; }
+.agent-status-dot--blocked { background: #e67700; }
+.agent-status-dot--disconnected,
+.agent-status-dot--cancelled { background: #d9383a; }
+
+.office-3d .status-badge {
+  border: 2px solid var(--win-ink);
+  border-radius: 5px;
+  padding: 2px 8px;
+  font: 700 11px/1.35 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  box-shadow: 2px 2px 0 var(--win-ink);
+}
+.office-3d .status-badge--success {
+  background: #d8f5e2;
+  color: #114a24;
+  border-color: #145229;
+}
+.office-3d .status-badge--active {
+  background: #dcebfb;
+  color: #163a5f;
+  border-color: #1f4973;
+}
+.office-3d .status-badge--waiting {
+  background: #fff0c2;
+  color: #5c3b00;
+  border-color: #8a5a00;
+}
+.office-3d .status-badge--danger {
+  background: #fde2e2;
+  color: #6e1417;
+  border-color: #8f2427;
+}
+.office-3d .status-badge--muted {
+  background: #ece3d5;
+  color: #3d322a;
+  border-color: #5c4d42;
+}
+
+/* 3. Segmented Game XP / Quest Progress Bar in 3D Mode */
+.office-3d .quest-progress {
+  height: 11px;
+  border: 2px solid var(--win-ink);
+  border-radius: 5px;
+  background: #e4d8c5;
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.18), 1px 1px 0 var(--win-ink);
+}
+.office-3d .quest-progress-fill {
+  background-color: #26b562;
+  background-image: linear-gradient(
+    135deg,
+    rgb(255 255 255 / 0.22) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgb(255 255 255 / 0.22) 50%,
+    rgb(255 255 255 / 0.22) 75%,
+    transparent 75%,
+    transparent
+  );
+  background-size: 14px 14px;
+  border-right: 1.5px solid var(--win-ink);
+}
+
+/* 4. Elimination of Flat 2D Web Tables/Lists — Tactile Quest & Item Cards */
+.office-3d .bwin-body :is(.panel, .quest-step-banner, .quest-actions-card, [data-component="DecisionReview"] fieldset) {
+  border: 2px solid var(--win-ink);
+  border-radius: 8px;
+  background: #fffdf9;
+  box-shadow: 3px 3px 0 var(--win-ink);
+}
+.office-3d .bwin-body .quest-step-banner {
+  border-left: 6px solid var(--win-c-work);
+  background: linear-gradient(180deg, #fffdf9 0%, #f7efe2 100%);
+}
+.office-3d .bwin-body .quest-list {
+  display: grid;
+  gap: 10px;
+  border: 0;
+  margin-block: 8px;
+}
+.office-3d .bwin-body .quest-card {
+  border: 2px solid var(--win-ink) !important;
+  border-radius: 8px !important;
+  padding: 12px 14px !important;
+  background: #fffdf9 !important;
+  box-shadow: 3px 3px 0 var(--win-ink) !important;
+  transition: transform 90ms ease, box-shadow 90ms ease;
+}
+.office-3d .bwin-body .quest-card:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--win-ink) !important;
+  background: #ffffff !important;
+}
+.office-3d .bwin-body .quest-task-list {
+  display: grid;
+  gap: 8px;
+  border: 0;
+}
+.office-3d .bwin-body .quest-task-list > li {
+  border: 2px solid var(--win-ink);
+  border-radius: 7px;
+  padding: 8px 12px;
+  background: #fffdf9;
+  box-shadow: 2px 2px 0 var(--win-ink);
+  font-weight: 600;
+}
+.office-3d .bwin-body [data-component="DecisionInbox"] ul > li > button {
+  border: 2px solid var(--win-ink);
+  border-radius: 8px;
+  background: #fffdf9;
+  box-shadow: 3px 3px 0 var(--win-ink);
+  transition: transform 90ms ease, box-shadow 90ms ease;
+}
+.office-3d .bwin-body [data-component="DecisionInbox"] ul > li > button:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--win-ink);
+  background: #fff9eb;
+  color: var(--win-ink);
+}
+.office-3d .bwin-body [data-component="IssueQueue"] > ul {
+  display: grid;
+  gap: 10px;
+  border: 0;
+}
+.office-3d .bwin-body [data-component="IssueQueue"] > ul > li {
+  border: 2px solid var(--win-ink);
+  border-left: 5px solid var(--win-c-decide);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fffdf9;
+  box-shadow: 3px 3px 0 var(--win-ink);
+}
+
+/* 5. Squad Roster & Retro CRT Tactical Monitor in Nhân viên / Agent Inspector */
+.office-3d .bwin-body .agent-roster-list {
+  display: grid;
+  gap: 7px;
+  align-content: start;
+}
+.office-3d .bwin-body .agent-roster-list > li {
+  border: 0;
+}
+.office-3d .bwin-body .agent-roster-item {
+  border: 2px solid var(--win-ink);
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: #fffdf9;
+  box-shadow: 2px 2px 0 var(--win-ink);
+  transition: transform 80ms ease, background-color 80ms ease;
+}
+.office-3d .bwin-body .agent-roster-item:hover {
+  background: var(--win-panel);
+  color: var(--win-ink);
+}
+.office-3d .bwin-body .agent-roster-item[aria-pressed="true"] {
+  background: #ffe8a3;
+  border-color: var(--win-ink);
+  box-shadow: 3px 3px 0 var(--win-ink);
+}
+.office-3d .bwin-body .agent-detail-card {
+  border: 2px solid var(--win-ink);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fffdf9;
+  box-shadow: 3px 3px 0 var(--win-ink);
+}
+.office-3d .bwin-body .agent-terminal-frame {
+  margin-block: 6px;
+  border: 2px solid var(--win-ink);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #11171a;
+  box-shadow: 3px 3px 0 var(--win-ink);
+}
+.office-3d .bwin-body .agent-terminal-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 2px solid var(--win-ink);
+  background: #232d33;
+  color: #d7e3ea;
+  font: 700 10px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+}
+.office-3d .bwin-body .agent-terminal-dots {
+  display: inline-flex;
+  gap: 5px;
+}
+.office-3d .bwin-body .agent-terminal-dots > i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid rgb(0 0 0 / 0.45);
+}
+.office-3d .bwin-body .agent-terminal-dots > i:nth-child(1) { background: #ff5f56; }
+.office-3d .bwin-body .agent-terminal-dots > i:nth-child(2) { background: #ffbd2e; }
+.office-3d .bwin-body .agent-terminal-dots > i:nth-child(3) { background: #27c93f; }
+.office-3d .bwin-body .agent-terminal-log {
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 10px 12px !important;
+  background-color: #11171a !important;
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgb(255 255 255 / 0.02) 0px,
+    rgb(255 255 255 / 0.02) 1px,
+    transparent 1px,
+    transparent 3px
+  ) !important;
+  color: #8ce99a !important;
+  font: 500 12px/1.55 var(--font-mono) !important;
+  text-shadow: 0 0 6px rgb(140 233 154 / 0.2);
+  scrollbar-color: #3b536f #11171a;
+}
+
+/* 6. RPG Dialogue Cards in Director Chat & Agent Inspector */
+.office-3d .bwin-body [data-component="DirectorChat"] > header {
+  border-bottom: 2px solid var(--win-ink);
+  background: linear-gradient(180deg, #fffdf9 0%, var(--win-panel) 100%);
+}
+.office-3d .bwin-body .director-msg-bubble {
+  border: 2px solid var(--win-ink) !important;
+  border-radius: 8px !important;
+  padding: 10px 12px !important;
+  box-shadow: 2px 2px 0 var(--win-ink);
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+.office-3d .bwin-body .director-msg-bubble.is-director {
+  border-left: 5px solid var(--win-c-chat) !important;
+  background: #fffdf9 !important;
+  color: var(--win-ink) !important;
+}
+.office-3d .bwin-body .director-msg-bubble.is-user {
+  background: var(--color-steel) !important;
+  color: #ffffff !important;
+}
+.office-3d .bwin-body [data-component="DirectorChat"] > form {
+  border-top: 2px solid var(--win-ink);
+  background: var(--win-panel);
+}
+.office-3d .bwin-body [data-component="DirectorChat"] > form textarea {
+  border: 2px solid var(--win-ink);
+  border-radius: 6px;
+  background: #fffdf9;
+  box-shadow: inset 1px 1px 0 rgb(0 0 0 / 0.06);
+}
+.office-3d .bwin-body [data-component="AgentDialogue"] dl,
+.office-3d .bwin-body [aria-label^="Nhân viên "] > dl {
+  display: grid;
+  grid-template-columns: minmax(6.5rem, auto) minmax(0, 1fr);
+  gap: 6px 12px;
+  padding: 10px 12px;
+  border: 2px solid var(--win-ink);
+  border-radius: 8px;
+  background: #fffdf9;
+  box-shadow: 2px 2px 0 var(--win-ink);
+}
+.office-3d .bwin-body [data-component="AgentDialogue"] dt,
+.office-3d .bwin-body [aria-label^="Nhân viên "] > dl > dt {
+  margin: 0;
+  font: 700 11px/1.4 var(--font-mono);
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+.office-3d .bwin-body [data-component="AgentDialogue"] dd,
+.office-3d .bwin-body [aria-label^="Nhân viên "] > dl > dd {
+  margin: 0;
+  color: var(--win-ink);
+}
+
+/* 7. Tactile Pressable Arcade/Game Buttons inside 3D Windows */
+.office-3d .bwin-body button:not(:disabled):active,
+.office-3d .office-rail button:not(:disabled):active,
+.office-3d .bflow-taskbar button:not(:disabled):active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--win-ink);
+}

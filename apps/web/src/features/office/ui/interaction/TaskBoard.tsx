@@ -27,13 +27,15 @@ export function TaskBoard({ api, id, revision, refresh }: { api: ApiClient; id: 
     <form className="my-4 flex flex-wrap items-end gap-3 [&>div]:min-w-0 [&>div]:basis-48 [&>div]:grow" onSubmit={submit}><div><FieldLabel htmlFor="task-search" label="Tìm công việc" help="Tìm theo tiêu đề công việc trong danh sách của phiên này."/><input id="task-search" type="search" maxLength={200} placeholder="Tên công việc" value={search} onChange={event=>setSearch(event.target.value)}/></div><div><FieldLabel htmlFor="task-phase" label="Giai đoạn" help="Lọc theo giai đoạn SDLC hiện tại."/><select id="task-phase" value={phase} onChange={event=>setQuery({...(term?{search:term}:{}),...(event.target.value?{phase:event.target.value}:{})})}><option value="">Tất cả giai đoạn</option>{Object.entries(phases).filter(([key])=>['intake','clarifying','specifying','planning','tdd_deciding','implementing','verifying','reviewing','awaiting_approval','completed','completed_with_parked','escalated','failed','cancelled'].includes(key)).map(([key,value])=><option key={key} value={key}>{value}</option>)}</select></div><button className="min-w-24">Tìm kiếm</button></form>
     <LoadingState loading={result.loading} initial={!result.data} label="Đang tải công việc…" />
     {Boolean(result.error) && <ErrorState stale={Boolean(result.data)} error={result.error} retry={refresh} />}
-    {result.data && (result.data.items.length ? <div className="grid gap-3 sm:grid-cols-2">
+    {result.data && (result.data.items.length ? <div className="quest-board-grid grid gap-3 sm:grid-cols-2">
       {result.data.items.map(run => {
         const completed = run.tasks.filter(task => task.status === 'succeeded').length;
+        const pct = run.tasks.length ? Math.round((completed / run.tasks.length) * 100) : 0;
         const next = waitingOn(run);
-        return <Link key={run.runId} className="block min-h-40 border border-line bg-surface p-4 no-underline shadow-sm hover:border-accent hover:no-underline focus-visible:outline-2 focus-visible:outline-accent" to={`${base}/runs/${encodeURIComponent(run.runId)}`}>
+        return <Link key={run.runId} className="quest-card block min-h-40 border border-line bg-surface p-4 no-underline shadow-sm hover:border-accent hover:no-underline focus-visible:outline-2 focus-visible:outline-accent" to={`${base}/runs/${encodeURIComponent(run.runId)}`}>
           <div className="flex items-start justify-between gap-3"><h2 className="m-0 text-lg">{run.title}</h2><StatusBadge value={run.sdlcStatus} /></div>
-          <p className="my-3 text-sm">{run.tasks.length ? `${completed}/${run.tasks.length} nhiệm vụ hoàn thành` : 'Đang chuẩn bị danh sách nhiệm vụ'}</p>
+          <p className="my-2.5 text-sm">{run.tasks.length ? `${completed}/${run.tasks.length} nhiệm vụ hoàn thành` : 'Đang chuẩn bị danh sách nhiệm vụ'}</p>
+          {run.tasks.length > 0 && <div aria-hidden="true" className="quest-progress mb-3"><div className="quest-progress-fill" style={{ width: `${pct}%` }} /></div>}
           <p className="mb-0 border-t border-line pt-3 text-sm"><strong>{next.title}:</strong> {next.detail}</p>
         </Link>;
       })}

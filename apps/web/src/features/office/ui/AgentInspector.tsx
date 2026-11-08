@@ -56,7 +56,7 @@ export function AgentInspector({ api, projectId, agent, view, handoffs, revision
     <h2 className="mt-0">{agent.label}</h2>
     <dl className="my-2">
       <dt>Vai trò</dt><dd>{roleLabel(agent.role)}</dd>
-      {view && <><dt>Tên hiển thị</dt><dd>{view.displayName}</dd><dt>Nhà cung cấp</dt><dd>{view.provider}</dd><dt>Mô hình</dt><dd>{view.model ?? 'Không công bố'}</dd></>}
+      {view && <><dt>Tên hiển thị</dt><dd>{view.displayName === 'Qa' ? 'QA' : view.displayName}</dd><dt>Nhà cung cấp</dt><dd>{view.provider}</dd><dt>Mô hình</dt><dd>{view.model ?? 'Không công bố'}</dd></>}
       <dt>Trạng thái</dt><dd>{agent.statusText}</dd>
       <dt>Mức tin cậy</dt><dd>{CERTAINTY[agent.certainty]}</dd>
       <dt>Quan sát lúc</dt><dd>{agent.observedAt ? <time dateTime={agent.observedAt}>{when(agent.observedAt)}</time> : 'Chưa có quan sát'}</dd>

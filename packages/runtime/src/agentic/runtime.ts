@@ -1744,6 +1744,14 @@ export class AgenticWorkflowRuntime {
       return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
     });
   }
+  /** Lightweight read-only projection of active accepted task assignments for provider failure polling. */
+  async acceptedTaskAssignments(): Promise<Array<{ selector: string; handle: AgentExecutionHandle }>> {
+    return this.journal.project(state =>
+      state.outbound
+        .filter(out => out.status === "accepted" && out.message.type === "task.assignment" && Boolean(out.handle))
+        .map(out => ({ selector: out.selector, handle: out.handle! }))
+    );
+  }
   /** Read-only bounded projection for Director progress snapshots (`bflow progress` and `/api/v1/projects/:id/director`). */
   async inspectDirectorProgressState(): Promise<unknown> {
     return this.journal.project(state => ({

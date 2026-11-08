@@ -18,7 +18,7 @@ function labels(agents: readonly WebAgentView[]): Map<string, string> {
   const out = new Map<string, string>();
   const plain = agents.filter(a => a.role === 'developer' && !a.profileId).sort((a, b) => a.boundAt.localeCompare(b.boundAt) || a.instanceId.localeCompare(b.instanceId));
   plain.forEach((a, i) => out.set(a.instanceId, `Developer #${i + 1}`));
-  for (const a of agents) if (!out.has(a.instanceId)) out.set(a.instanceId, a.displayName);
+  for (const a of agents) if (!out.has(a.instanceId)) out.set(a.instanceId, a.displayName === 'Qa' ? 'QA' : a.displayName);
   return out;
 }
 

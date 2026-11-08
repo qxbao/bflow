@@ -137,7 +137,7 @@ export function projectWorkforce(s: ReadSources): WebWorkforceView {
     if (all.length > MAX_WORK) truncated = true;
     return {
       instanceId, role, ...(pane.roleProfile ? { profileId: pane.roleProfile.profileId } : {}),
-      displayName: display(s, profileName(pane) ?? role.charAt(0).toUpperCase() + role.slice(1), 200),
+      displayName: display(s, profileName(pane) ?? (role === "qa" ? "QA" : role.charAt(0).toUpperCase() + role.slice(1)), 200),
       ...(pane.paneGroup ? { group: pane.paneGroup } : {}), permanent: pane.permanent ?? false,
       provider: sliceSafe(pane.provider, 100), ...(pane.model ? { model: sliceSafe(pane.model, 200) } : {}),
       allocation,

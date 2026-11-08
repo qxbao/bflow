@@ -36,21 +36,26 @@ export function AgentTranscript({ api, projectId, instanceId, className = 'h-72'
   // Follows new text only while the reader is at the bottom.
   useLayoutEffect(() => { const e = log.current; if (e && pinned.current) e.scrollTop = e.scrollHeight; }, [data?.text]);
   const unsupported = unsupportedError(error) && !data;
-  return <section aria-label="Nội dung gần đây của nhân viên" className="min-w-0">
+  const hasText = data ? data.text.trim() !== '' : false;
+  return <section aria-label="Nội dung gần đây của nhân viên" className="agent-transcript-panel min-w-0">
     <p className="my-1 text-xs text-muted">Bản chụp màn hình terminal của nhân viên, đã che thông tin nhạy cảm. Có thể thiếu và không phải bằng chứng hoàn thành công việc.</p>
     {unsupported ? <p className="my-1 text-sm text-muted">Máy chủ chưa cung cấp nội dung của nhân viên này.</p> : <>
       {Boolean(error) && <p role="status" className="my-1 text-sm text-warning">Chưa đọc được nội dung. Điều này không cho biết nhân viên đang rảnh.</p>}
       {data?.truncated && <p className="my-1 text-xs text-muted">Chỉ hiện phần cuối của nội dung; phần đầu đã bị cắt.</p>}
       {data && data.text.trim() === '' && <p className="my-1 text-sm text-muted">Nhân viên chưa có nội dung nào.</p>}
       {!data && !loaded && <p className="my-1 text-sm text-muted">Đang đọc nội dung…</p>}
-      {(data ? data.text.trim() !== '' : false) && <div ref={log} role="log" aria-label="Nội dung terminal" tabIndex={0} onScroll={event => { const e = event.currentTarget; pinned.current = e.scrollHeight - e.scrollTop - e.clientHeight < 40; }}
-        className={`${className} overflow-y-auto rounded border border-line bg-canvas p-2 font-data text-xs whitespace-pre-wrap text-ink [overflow-wrap:anywhere]`}>{data?.text}</div>}
+      {hasText && <div className="agent-terminal-frame">
+        <div aria-hidden="true" className="agent-terminal-bar"><span className="agent-terminal-dots"><i/><i/><i/></span><span className="agent-terminal-title">TERMINAL SNAPSHOT · READ-ONLY</span></div>
+        <div ref={log} role="log" aria-label="Nội dung terminal" tabIndex={0} onScroll={event => { const e = event.currentTarget; pinned.current = e.scrollHeight - e.scrollTop - e.clientHeight < 40; }}
+          className={`agent-terminal-log ${className} overflow-y-auto rounded border border-line bg-canvas p-2 font-data text-xs whitespace-pre-wrap text-ink [overflow-wrap:anywhere]`}>{data?.text}</div>
+      </div>}
       {data && <p className="my-1 text-xs text-muted">Quan sát lúc <time dateTime={data.observedAt}>{new Date(data.observedAt).toLocaleString('vi')}</time></p>}
     </>}
   </section>;
 }
 
 const openWork = (a: WebAgentView): number => a.work.length;
+const formatAgentName = (name: string): string => name === 'Qa' ? 'QA' : name;
 /** Every agent of the session with the terminal text of the selected one. Works inside the Classic page and the 3D overlay panel. */
 export function AgentsPage({ api, id, revision }: { api: ApiClient; id: string; revision: number }) {
   const [reload, setReload] = useState(0), [params, setParams] = useSearchParams();
@@ -65,13 +70,13 @@ export function AgentsPage({ api, id, revision }: { api: ApiClient; id: string; 
     {Boolean(result.error) && (unsupported && !result.data ? <EmptyState title="Chưa có dữ liệu nhân viên"><p>Máy chủ chưa cung cấp danh sách nhân viên. Có thể phiên chưa chạy.</p></EmptyState> : <ErrorState stale={Boolean(result.data)} error={result.error} retry={() => setReload(n => n + 1)} />)}
     {result.data && agents.length === 0 && <EmptyState title="Chưa có nhân viên nào"><p>Phiên chưa có nhân viên nào được theo dõi.</p></EmptyState>}
     {selected && <div className="content-grid grid min-w-0 gap-4 md:grid-cols-[minmax(0,14rem)_minmax(0,1fr)]">
-      <ul aria-label="Danh sách nhân viên" className="m-0 list-none p-0">{agents.map(a => <li key={a.instanceId} className="border-t border-line first:border-t-0">
-        <button type="button" aria-pressed={a.instanceId === selected.instanceId} onClick={() => setParams({ agent: a.instanceId }, { replace: true })} className="w-full rounded-none border-transparent px-2 py-1.5 text-left aria-pressed:bg-faint">
-          <span className="block font-semibold [overflow-wrap:anywhere]">{a.displayName}</span>
+      <ul aria-label="Danh sách nhân viên" className="agent-roster-list m-0 list-none p-0">{agents.map(a => <li key={a.instanceId} className="border-t border-line first:border-t-0">
+        <button type="button" aria-pressed={a.instanceId === selected.instanceId} onClick={() => setParams({ agent: a.instanceId }, { replace: true })} className="agent-roster-item w-full rounded-none border-transparent px-2 py-1.5 text-left aria-pressed:bg-faint">
+          <span className="flex items-center justify-between gap-1.5 font-semibold [overflow-wrap:anywhere]"><span>{formatAgentName(a.displayName)}</span><span aria-hidden="true" className={`agent-status-dot agent-status-dot--${a.transport.state}`} /></span>
           <span className="block text-xs text-muted">{roleLabel(a.role)} · {TRANSPORT[a.transport.state] ?? 'Chưa rõ'} · {openWork(a)} việc đang giữ</span>
         </button>
       </li>)}</ul>
-      <div className="min-w-0"><h3 className="mt-0">{selected.displayName}</h3><AgentTranscript key={selected.instanceId} api={api} projectId={id} instanceId={selected.instanceId} className="h-[min(28rem,60dvh)]" /></div>
+      <div className="agent-detail-card min-w-0"><h3 className="mt-0">{formatAgentName(selected.displayName)}</h3><AgentTranscript key={selected.instanceId} api={api} projectId={id} instanceId={selected.instanceId} className="h-[min(28rem,60dvh)]" /></div>
     </div>}
   </section>;
 }

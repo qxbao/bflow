@@ -11,11 +11,13 @@ export function clampRect(rect: WindowRect, viewport: Viewport, min = { w: 320, 
 
 export function defaultRect(kind: WindowKind, viewport: Viewport, index = 0): WindowRect {
   const taskbar = 56;
-  if (kind === 'app') return clampRect({ x: 120 + (viewport.width - 120) * .32, y: 16, w: Math.max(420, Math.min(920, viewport.width * .52)), h: viewport.height - taskbar - 32 }, viewport, { w: 420, h: 320 });
-  if (kind === 'status') return clampRect({ x: viewport.width - 436, y: 72, w: 420, h: 380 }, viewport);
-  if (kind === 'cabinet' || kind === 'server') return clampRect({ x: viewport.width - 560, y: 168, w: 480, h: 320 }, viewport);
-  const w = Math.min(480, viewport.width - 32), h = Math.min(560, viewport.height - 200);
-  return clampRect({ x: viewport.width - w - 16 - (index % 4) * 32, y: 168 + (index % 4) * 32, w, h }, viewport);
+  const dockClearance = 76;
+  const maxWinH = Math.max(240, viewport.height - taskbar - dockClearance);
+  if (kind === 'app') return clampRect({ x: 120 + (viewport.width - 120) * .32, y: 16, w: Math.max(420, Math.min(920, viewport.width * .52)), h: Math.min(maxWinH, viewport.height - taskbar - 88) }, viewport, { w: 420, h: 320 });
+  if (kind === 'status') return clampRect({ x: viewport.width - 436, y: 72, w: 420, h: Math.min(380, maxWinH - 56) }, viewport);
+  if (kind === 'cabinet' || kind === 'server') return clampRect({ x: viewport.width - 560, y: 140, w: 480, h: Math.min(320, maxWinH - 124) }, viewport);
+  const w = Math.min(480, viewport.width - 32), h = Math.min(520, Math.max(240, maxWinH - 140));
+  return clampRect({ x: viewport.width - w - 16 - (index % 4) * 32, y: Math.min(136 + (index % 4) * 28, Math.max(16, viewport.height - taskbar - dockClearance - h)), w, h }, viewport);
 }
 
 export function cascade(rect: WindowRect, index: number, viewport: Viewport): WindowRect {

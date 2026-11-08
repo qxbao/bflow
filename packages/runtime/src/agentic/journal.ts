@@ -807,13 +807,22 @@ export class AgenticJournal {
     }
   }
   private async locked<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>, readOnly = false): Promise<T> {
+    const statePath = join(this.directory, "state.json");
+    if (readOnly && this.validatedSnapshot?.ino !== undefined && this.validatedSnapshot.size !== undefined) {
+      const fastState = await readMatchingSnapshotIfUnchanged(statePath, this.validatedSnapshot);
+      if (fastState) {
+        freezeJournalState(fastState);
+        return await action(fastState, async () => {
+          throw new Error("Read-only journal projection cannot save");
+        });
+      }
+    }
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const lock = await open(join(this.directory, "lock"), constants.O_CREAT | constants.O_RDWR | (constants.O_NOFOLLOW ?? 0), 0o600);
     try {
       if (!(await lock.stat()).isFile()) throw Object.assign(new Error(`Journal lock is not a regular file: ${this.directory}`), { code: "EISDIR" });
       await this.acquireFlock(lock.fd);
       let state: JournalState, baseline: JournalState | undefined, durableBytes: Buffer | undefined;
-      const statePath = join(this.directory, "state.json");
       try {
         const readResult = await readRegularJournalFileWithStat(statePath, this.validatedSnapshot);
         const bytes = readResult.bytes;
@@ -844,12 +853,7 @@ export class AgenticJournal {
         state = { version: 1, repository: this.repository, runs: [], outbound: [], inbox: [], pendingCore: [], pendingVerifications: [] };
       }
       if (readOnly) {
-        const freeze = (value: unknown): void => {
-          if (!value || typeof value !== "object" || Object.isFrozen(value)) return;
-          for (const child of Object.values(value)) freeze(child);
-          Object.freeze(value);
-        };
-        freeze(state);
+        freezeJournalState(state);
       }
       return await action(state, async () => {
         if (readOnly) throw new Error("Read-only journal projection cannot save");
@@ -891,6 +895,39 @@ export class AgenticJournal {
 }
 
 const IGNORED_REGULAR_FSYNC_CODES = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EROFS"]);
+function freezeJournalState(value: unknown): void {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return;
+  for (const child of Object.values(value)) freezeJournalState(child);
+  Object.freeze(value);
+}
+async function readMatchingSnapshotIfUnchanged(
+  path: string,
+  cached: { ino?: number; size?: number; mtimeMs?: number; ctimeMs?: number; value: JournalState }
+): Promise<JournalState | undefined> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch {
+    return undefined;
+  }
+  try {
+    const stat = await handle.stat();
+    if (
+      stat.isFile() &&
+      cached.ino === stat.ino &&
+      cached.size === stat.size &&
+      cached.mtimeMs === stat.mtimeMs &&
+      cached.ctimeMs === stat.ctimeMs
+    ) {
+      return cached.value;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
 export async function syncFileHandle(file: { sync(): Promise<void> }): Promise<void> {
   try { await file.sync(); }
   catch (error) {

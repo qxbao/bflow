@@ -47,6 +47,21 @@ const safe = (s: ReadSources, text: string, max = 16000) =>
   sliceUtf16Safe(s.redact?.(text) ?? text, max) || "[redacted]";
 const safeOption = (s: ReadSources, text: string, max = 200) =>
   sliceUtf16Safe((s.redactOption ?? s.redact)?.(text) ?? text, max) || "[redacted]";
+function cleanDelegationTitle(delegation: { title: string; objective?: string }): string {
+  if (!/<\/?pasted_content\b/i.test(delegation.title) && !/\[bflow-web:/i.test(delegation.title)) {
+    return delegation.title;
+  }
+  const strip = (text: string) =>
+    text
+      .replace(/<\/?pasted_content\b[^>]*>/gi, "")
+      .replace(/^\s*\[bflow-web:[^\s\]\r\n]*\]?\s*/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const cleanedTitle = strip(delegation.title);
+  if (cleanedTitle) return cleanedTitle;
+  const cleanedObjective = delegation.objective ? strip(delegation.objective).slice(0, 80).trim() : "";
+  return cleanedObjective || delegation.title;
+}
 export function projectDecision(
   s: ReadSources,
   r: RunRecord,
@@ -198,7 +213,7 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
       s.commandsSupported,
       s.transport?.states,
     ]),
-    title: safe(s, r.delegation.title, 200),
+    title: safe(s, cleanDelegationTitle(r.delegation), 200),
     originRunId:
       typeof origin === "string" && runs.some((n) => n.runId === origin)
         ? origin
@@ -347,6 +362,7 @@ const snapshotStatCache = new Map<string, {
   ctimeMs: number;
   bytes: Buffer;
   parsedByRepo: Map<string, ReturnType<ProjectionSnapshots["parse"]>>;
+  parsedContext?: ReturnType<typeof ConversationContextSnapshotSchema.parse>;
 }>();
 async function readSnapshotBytes(path: string, maxBytes: number): Promise<Buffer | undefined> {
   const key = `${path}:${maxBytes}`;
@@ -420,6 +436,18 @@ async function readJournalSnapshot(path: string, repository: string, maxBytes: n
     return parsed;
   }
   return projectionSnapshots.parse(path, repository, bytes);
+}
+async function readConversationContextSnapshot(path: string) {
+  const bytes = await readSnapshotBytes(path, 16 * 1024 * 1024);
+  if (bytes === undefined) return undefined;
+  const cached = snapshotStatCache.get(path);
+  if (cached && cached.bytes === bytes) {
+    if (cached.parsedContext !== undefined) return cached.parsedContext;
+    const parsed = ConversationContextSnapshotSchema.parse(JSON.parse(bytes.toString("utf8")));
+    cached.parsedContext = parsed;
+    return parsed;
+  }
+  return ConversationContextSnapshotSchema.parse(JSON.parse(bytes.toString("utf8")));
 }
 async function readSnapshot(path: string): Promise<unknown | undefined>;
 async function readSnapshot<T>(path: string, decode: (bytes: Buffer) => T, maxBytes?: number): Promise<T | undefined>;
@@ -586,8 +614,7 @@ export async function hostInteractionQuery(
       ok: true, value: await readRunActivityPage(join(root, "agentic/task-activity.jsonl"), query.runId, query.cursor, redact),
     });
   }
-  const rawContext = await readSnapshot(join(root, "agentic/conversation", sessionId + ".context.json"));
-  const context = rawContext === undefined ? undefined : ConversationContextSnapshotSchema.parse(rawContext);
+  const context = await readConversationContextSnapshot(join(root, "agentic/conversation", sessionId + ".context.json"));
   if (context && (context.session.sessionId !== sessionId || context.session.herdrSessionId !== configuration.sessionId))
     throw new Error("Conversation scope mismatch");
   const source: ReadSources = {

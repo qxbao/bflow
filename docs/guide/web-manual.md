@@ -178,13 +178,13 @@ Khi tất cả nhiệm vụ đã lập trình xong, vượt qua bộ kiểm th�
 
 ## Không gian Văn phòng 3D & Làm việc trực tiếp cùng Director
 
-Từ phiên bản giao diện **Văn phòng 3D (Office 3D HUD)** và chế độ **Director (`bflow director start`)**, Bflow Web mang toàn bộ đội ngũ trợ lý AI (`Director`, `Planner`, `Specifier`, `Architect`, các nhánh `Developer` song song, `Reviewer`, `QA`) vào một không gian kiến trúc 3D ấm áp, trực quan ngay trên trình duyệt.
+Từ phiên bản giao diện **Văn phòng 3D (Office 3D HUD)** và chế độ **Director (`bflow director start`)**, Bflow Web mang toàn bộ đội ngũ trợ lý AI (`Director`, `Planner`, `Specifier`, `Architect`, các nhánh `Developer` song song, `Reviewer`, `QA`) vào một không gian mô phỏng văn phòng 3D sống động như một tựa game quản lý chiến thuật ngay trên trình duyệt.
 
 ### 1. Toàn cảnh Văn phòng 3D và Thanh tác vụ thông minh
 
-Ngay khi mở `http://127.0.0.1:4317`, bạn quan sát thấy toàn bộ bàn làm việc của từng vai trò cùng hệ thống điều khiển nổi đồng bộ tông màu gỗ/kem ấm với không gian 3D:
+Ngay khi mở `http://127.0.0.1:4317`, bạn quan sát thấy toàn bộ bàn làm việc của từng vai trò cùng hệ thống HUD điều khiển nổi đồng bộ phong cách game 3D (viền đậm sắc nét, bóng đổ khối nổi, bảng màu giấy kem ấm áp):
 - **Góc trái trên (`Bflow Office`):** Chọn nhanh dự án đang mở (tự động ưu tiên các dự án thực tế trên máy trước các thư mục thử nghiệm tạm thời `/tmp/`), xem trạng thái công việc đang chạy và tình trạng kết nối trực tiếp.
-- **Thanh lối tắt gọn phía dưới:** Các nút mở nhanh **Tổng quan**, **Công việc**, **Quyết định**, **Trò chuyện**, **Sự cố**, **Nhân viên**, **Tài liệu**, **Cài đặt** và **Thao tác đã gửi** được gom gọn, không che khuất tầm nhìn 3D.
+- **Thanh lối tắt gọn phía dưới:** Các nút bấm nổi **Tổng quan**, **Công việc**, **Quyết định**, **Trò chuyện**, **Sự cố**, **Nhân viên**, **Tài liệu**, **Cài đặt** và **Thao tác đã gửi** được gom gọn, không che khuất tầm nhìn 3D và không bao giờ bị các cửa sổ nổi đè lên.
 - **Thanh tác vụ đáy màn hình:** Chứa nút menu `◆ Bflow`, danh sách cửa sổ đang mở, ô nhập nhanh **Trò chuyện với Director…** và nút chuyển đổi tức thì giữa chế độ **Web** (2D cổ điển) và **3D**.
 
 ![Toàn cảnh Văn phòng 3D với Director đang hoạt động và thanh lối tắt gọn gàng](../assets/guide/web-3d-office-overview.png)
@@ -197,27 +197,28 @@ Khi bạn khởi động phiên Director bằng lệnh:
 bflow director start
 ```
 
-Bạn có thể nhấp trực tiếp vào bàn **Director** trong phòng 3D hoặc bấm nút **Trò chuyện** ở thanh lối tắt để mở cửa sổ **Trò chuyện**:
+Bạn có thể nhấp trực tiếp vào bàn **Director** trong phòng 3D hoặc bấm nút **Trò chuyện** ở thanh lối tắt để mở cửa sổ **Trò chuyện** mang phong cách hộp thoại nhân vật (RPG Dialogue Card):
 - Huy hiệu **`● Director đang hoạt động`** xác nhận phiên điều phối đang kết nối trực tiếp với mô hình đã cấu hình (ví dụ `agy`).
-- Giao việc mới, gửi phản hồi bổ sung hoặc theo dõi toàn bộ báo cáo tiến độ và kết quả nghiệm thu ngay trong cùng một khung hội thoại tự nhiên.
+- Các tin nhắn của bạn và phản hồi từ Director được trình bày dưới dạng thẻ hội thoại nổi trên nền giấy chấm bi (dot-grid parchment), giúp theo dõi báo cáo tiến độ và kết quả nghiệm thu trực quan, dễ đọc.
 
 ![Cửa sổ Trò chuyện trực tiếp cùng Director trên nền Văn phòng 3D](../assets/guide/web-3d-director-chat.png)
 
-### 3. Theo dõi danh sách Công việc và các nhánh Developer chạy song song
+### 3. Bảng nhiệm vụ (Quest Board) và thanh tiến độ trực quan
 
-Bấm nút **Công việc** trên thanh lối tắt (hoặc nhấp vào **Bảng nhiệm vụ — Task Board** trong phòng 3D) để mở cửa sổ quản lý toàn bộ luồng công việc:
+Bấm nút **Công việc** trên thanh lối tắt (hoặc nhấp vào **Bảng nhiệm vụ — Task Board** trong phòng 3D) để mở cửa sổ quản lý toàn bộ luồng công việc như một bảng nhiệm vụ trong game:
 - Tìm kiếm theo tên công việc hoặc lọc theo giai đoạn (`Chờ làm rõ`, `Chờ bạn duyệt`, `Đang lập trình`, `Đang kiểm chứng`, `Hoàn tất`).
-- Với các công việc lớn được phân rã thành nhiều nhánh độc lập (DAG), Bflow cấp phát tự động mỗi `Developer` một Git worktree riêng biệt và hiển thị trực quan tiến độ hoàn thành (ví dụ `2/2 nhiệm vụ hoàn thành`).
+- Mỗi luồng công việc được hiển thị dưới dạng **thẻ nhiệm vụ nổi (Quest Card)** kèm huy hiệu trạng thái (`HOÀN TẤT`, `ĐANG CHẠY`, `CHỜ BẠN`) và **thanh tiến độ kẻ sọc xanh lá (XP/Quest Progress Bar)** phản ánh số nhiệm vụ con đã hoàn thành (ví dụ `2/2 nhiệm vụ hoàn thành`).
+- Với các công việc lớn được phân rã thành nhiều nhánh độc lập (DAG), Bflow cấp phát tự động mỗi `Developer` một Git worktree riêng biệt để lập trình song song.
 
-![Cửa sổ Công việc hiển thị các luồng Nhỏ, Trung bình và Lớn đã hoàn tất](../assets/guide/web-3d-work-progress.png)
+![Cửa sổ Công việc hiển thị các thẻ nhiệm vụ và thanh tiến độ phong cách game 3D](../assets/guide/web-3d-work-progress.png)
 
-### 4. Quan sát Nhân viên và bản chụp màn hình Terminal an toàn
+### 4. Đội ngũ Nhân viên (Squad Roster) và Màn hình CRT Terminal an toàn
 
 Bấm nút **Nhân viên** trên thanh lối tắt (hoặc nhấp vào từng nhân vật trong phòng 3D) để mở cửa sổ **Nhân viên**:
-- Xem danh sách các vai trò chuyên trách (`Planner`, `Architect`, `Specifier`, `Reviewer`, `Qa`, cùng các `Developer` đang mở).
-- Xem bản chụp màn hình terminal thực tế của từng vai trò đã được tự động ẩn thông tin nhạy cảm (`[redacted]`), giúp bạn nắm rõ hoạt động bên dưới mà không cần mở cửa sổ dòng lệnh.
+- **Danh sách đội hình (Squad Roster):** Hiển thị thẻ nhân vật của các vai trò chuyên trách (`Planner`, `Architect`, `Specifier`, `Reviewer`, `QA`, cùng các `Developer` đang mở) kèm đèn LED báo trạng thái hoạt động trực tiếp.
+- **Màn hình CRT Terminal (`TERMINAL SNAPSHOT · READ-ONLY`):** Hiển thị bản chụp màn hình terminal thực tế của từng vai trò trong khung màn hình phosphor xanh lá cổ điển kèm hiệu ứng dòng quét (scanlines), đã tự động ẩn thông tin nhạy cảm (`[redacted]`), giúp bạn nắm rõ hoạt động bên dưới mà không cần mở cửa sổ dòng lệnh.
 
-![Cửa sổ Nhân viên và bản chụp màn hình terminal đã che thông tin nhạy cảm](../assets/guide/web-3d-workforce-inspector.png)
+![Cửa sổ Nhân viên với thẻ đội hình và màn hình CRT Terminal đã che thông tin nhạy cảm](../assets/guide/web-3d-workforce-inspector.png)
 
 ### 5. Tham khảo thời gian thực thi & lượng Token theo quy mô công việc (với mô hình `agy`)
 

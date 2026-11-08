@@ -44,17 +44,17 @@ export function DirectorChat({initialDraft='',handoffKey='',immersive=false,hist
       {transcript.hasOlder&&<div className="text-center"><button type="button" disabled={transcript.loadingOlder} onClick={()=>{const e=log.current;if(e)anchor.current=e.scrollHeight-e.scrollTop;void transcript.loadOlder();}}>{transcript.loadingOlder?'Đang đọc tin cũ…':'Xem tin cũ hơn'}</button></div>}
       {Boolean(transcript.olderError)&&<p role="alert" className="text-center text-xs text-warning">Chưa đọc được tin cũ hơn. Thử lại sau.</p>}
       {transcript.loaded&&!items.length&&(immersive?<p className="mx-auto my-8 max-w-sm rounded-2xl bg-surface px-5 py-4 text-center text-sm">Chào bạn, tôi là Director của dự án này. Bạn có thể giao việc, hỏi tiến độ hoặc hỏi điều gì đang chờ xử lý.</p>:<p className="mx-auto text-center text-sm text-muted">Chưa có tin nhắn với Director.</p>)}
-      <ol className="m-0 flex list-none flex-col gap-2 p-0">{items.map((item,index)=><Bubble key={item.seq} item={item} previous={items[index-1]} note={item.messageId===lastOwn?.messageId&&!replied?c.ownNote[d.presence]:undefined}/>)}</ol>
+      <ol className="director-msg-list m-0 flex list-none flex-col gap-2 p-0">{items.map((item,index)=><Bubble key={item.seq} item={item} previous={items[index-1]} note={item.messageId===lastOwn?.messageId&&!replied?c.ownNote[d.presence]:undefined}/>)}</ol>
     </div>
     <DirectorChatComposer initialDraft={initialDraft} handoffKey={handoffKey} immersive={immersive}/>
   </section>;
 }
 function Bubble({item,previous,note}:{item:DirectorMessage;previous:DirectorMessage|undefined;note:string|undefined}){
   const own=item.author==='user';
-  return <li className="min-w-0">
+  return <li className={`director-msg-row min-w-0 ${own?'is-user':'is-director'}`}>
     {(!previous||day(previous.at)!==day(item.at))&&<p className="mx-auto my-3 text-center font-data text-xs text-muted">{day(item.at)}</p>}
     <div className={`flex flex-col ${own?'items-end':'items-start'}`}>
-      <p className={`m-0 max-w-[92%] rounded-2xl px-4 py-3 whitespace-pre-wrap [overflow-wrap:anywhere] sm:max-w-[85%] ${own?'rounded-br-sm bg-steel text-surface':'rounded-bl-sm bg-faint'}`}>{item.text}</p>
+      <p className={`director-msg-bubble m-0 max-w-[92%] rounded-2xl px-4 py-3 whitespace-pre-wrap [overflow-wrap:anywhere] sm:max-w-[85%] ${own?'is-user rounded-br-sm bg-steel text-surface':'is-director rounded-bl-sm bg-faint'}`}>{item.text}</p>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-2 font-data text-xs text-muted">
         <span>{own?'Bạn':'Director'}</span>
         <time dateTime={item.at} title={new Date(item.at).toLocaleString('vi')}>{clock(item.at)}</time>

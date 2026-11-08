@@ -214,6 +214,10 @@ export class HostReceiptJournal {
   private static readonly directoryNamesCache = new Map<string, { ino: number; mtimeMs: number; ctimeMs: number; size: number; names: ReadonlySet<string> }>();
   private readonly noticeCache = new Map<string, ConversationNotice>();
   private readonly receiptCache = new Map<string, { mtimeMs: number; size: number; ino: number; id: string; payload: JsonValue }>();
+  private readonly settledNativeIntentIds = new Set<string>();
+  private readonly settledSpecialistStopIds = new Set<string>();
+  private readonly settledProviderErrorSignalIds = new Set<string>();
+  private readonly settledProviderFailureIds = new Set<string>();
   private directoryPrepared = false;
   private lastDirectoryStat?: { ino: number; mtimeMs: number; ctimeMs: number; size: number };
   private noticeAppends: Promise<unknown> = Promise.resolve();
@@ -395,9 +399,15 @@ export class HostReceiptJournal {
     }
     const name = this.filename(kind, id);
     const cachedDir = HostReceiptJournal.directoryNamesCache.get(this.directory);
-    if (cachedDir && !cachedDir.names.has(name)) {
-      this.receiptCache.delete(name);
-      return undefined;
+    if (cachedDir) {
+      if (!cachedDir.names.has(name)) {
+        this.receiptCache.delete(name);
+        return undefined;
+      }
+      const cachedFast = this.receiptCache.get(name);
+      if (cachedFast && cachedFast.id === id) {
+        return json(cachedFast.payload);
+      }
     }
     let file;
     try { file = await open(join(this.directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
@@ -467,13 +477,17 @@ export class HostReceiptJournal {
   async pendingProviderErrorSignals() {
     const result = [];
     for (const id of await this.receiptIds("provider-error-signal")) {
-      if (await this.read("provider-error-signal-handled", id)) continue;
+      if (this.settledProviderErrorSignalIds.has(id)) continue;
+      if (await this.read("provider-error-signal-handled", id)) {
+        this.settledProviderErrorSignalIds.add(id);
+        continue;
+      }
       const value = record(await this.read("provider-error-signal", id));
       result.push({ id, binding: PaneBindingSchema.parse(value.binding), event: ProviderNativeFailureEventSchema.parse(value.event), observedAt: textField(value.observedAt) });
     }
     return result;
   }
-  async completeProviderErrorSignal(id: string) { await this.write("provider-error-signal-handled", id, { id }); }
+  async completeProviderErrorSignal(id: string) { await this.write("provider-error-signal-handled", id, { id }); this.settledProviderErrorSignalIds.add(id); }
   async authenticateProviderFailure(binding: PaneBinding, failure: ProviderFailureObservation): Promise<boolean> {
     const id = digest([binding.bindingId, failure.executionId, failure.evidenceDigest]);
     const value = await this.read("provider-failure", id);
@@ -482,13 +496,17 @@ export class HostReceiptJournal {
   async pendingProviderFailures() {
     const result: { id: string; binding: PaneBinding; failure: ProviderFailureObservation }[] = [];
     for (const id of await this.receiptIds("provider-failure")) {
-      if (await this.read("provider-failure-handled", id)) continue;
+      if (this.settledProviderFailureIds.has(id)) continue;
+      if (await this.read("provider-failure-handled", id)) {
+        this.settledProviderFailureIds.add(id);
+        continue;
+      }
       const value = record(await this.read("provider-failure", id));
       result.push({ id, binding: PaneBindingSchema.parse(value.binding), failure: ProviderFailureObservationSchema.parse(value.failure) });
     }
     return result;
   }
-  async completeProviderFailure(id: string) { await this.write("provider-failure-handled", id, { id }); }
+  async completeProviderFailure(id: string) { await this.write("provider-failure-handled", id, { id }); this.settledProviderFailureIds.add(id); }
   private bindingIdentity(binding: PaneBinding): string { return digest({ ...binding, transportState: undefined, lastHeartbeatAt: undefined }); }
   private legacyBindingIdentity(binding: PaneBinding): string { return digest({ ...binding, transportState: undefined }); }
   private isExpectedAgyTurnReceiptId(binding: PaneBinding, launchId: unknown, anchor: unknown, id: string): boolean {
@@ -518,6 +536,11 @@ export class HostReceiptJournal {
     return entries.filter(name => pattern.test(name));
   }
   private async receiptId(kind: Kind, name: string): Promise<string> {
+    const cachedDir = HostReceiptJournal.directoryNamesCache.get(this.directory);
+    if (cachedDir) {
+      const cachedFast = this.receiptCache.get(name);
+      if (cachedFast && name === this.filename(kind, cachedFast.id)) return cachedFast.id;
+    }
     const file = await open(join(this.directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     let id: string;
     let stat;
@@ -614,7 +637,11 @@ export class HostReceiptJournal {
   async pendingSpecialistStops(): Promise<{ stopId: string; binding: PaneBinding; observedAt: string; sourceMessageId?: string }[]> {
     const pending: { stopId: string; binding: PaneBinding; observedAt: string; sourceMessageId?: string }[] = [];
     for (const id of await this.receiptIds("specialist-stop")) {
-      if (await this.read("specialist-settled", id) !== undefined) continue;
+      if (this.settledSpecialistStopIds.has(id)) continue;
+      if (await this.read("specialist-settled", id) !== undefined) {
+        this.settledSpecialistStopIds.add(id);
+        continue;
+      }
       const raw = record(await this.read("specialist-stop", id));
       pending.push({ stopId: id, binding: PaneBindingSchema.parse(raw.binding), observedAt: textField(raw.observedAt),
         ...(raw.sourceMessageId === undefined ? {} : { sourceMessageId: textField(raw.sourceMessageId) }) });
@@ -623,6 +650,7 @@ export class HostReceiptJournal {
   }
   async completeSpecialistStop(stopId: string): Promise<void> {
     await this.write("specialist-settled", stopId, { stopId });
+    this.settledSpecialistStopIds.add(stopId);
   }
   async recordAgyAdmission(bindingInput: PaneBinding, launchId: string, messageInput: RoleMessage, envelopeDigest: string): Promise<{ admissionId: string; duplicate: boolean }> {
     return this.serializeAgy(async () => {
@@ -811,8 +839,18 @@ export class HostReceiptJournal {
   async unacknowledgedNativeDeliveries(): Promise<{ operationId: string; message: RoleMessage }[]> {
     const uncertain: { operationId: string; message: RoleMessage }[] = [];
     for (const operationId of await this.receiptIds("native-intent")) {
+      if (this.settledNativeIntentIds.has(operationId)) continue;
       const delivery = await this.nativeDelivery(operationId);
-      if (delivery?.status === "unknown_delivery" && !await this.nativeRejection(delivery.message.message_id)) uncertain.push({ operationId, message: delivery.message });
+      if (!delivery) continue;
+      if (delivery.status === "acknowledged") {
+        this.settledNativeIntentIds.add(operationId);
+        continue;
+      }
+      if (await this.nativeRejection(delivery.message.message_id)) {
+        this.settledNativeIntentIds.add(operationId);
+        continue;
+      }
+      uncertain.push({ operationId, message: delivery.message });
     }
     return uncertain;
   }

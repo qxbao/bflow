@@ -1034,9 +1034,13 @@ export class ConversationGateway {
           const msgValidation = this.validateConversationMessages(userMsg, agentReply);
           if (!msgValidation.ok) return msgValidation;
 
+          const cleanDraftInput = input.content
+            .replace(/<\/?pasted_content\b[^>]*>/gi, "")
+            .replace(/^\s*\[bflow-web:[^\s\]\r\n]*\]?\s*/i, "")
+            .trim() || input.content;
           const draft: ExtractedRequirementDraft = classification.requirementDraft ?? {
-            title: input.content.slice(0, 60),
-            objective: input.content,
+            title: cleanDraftInput.slice(0, 60),
+            objective: cleanDraftInput,
             kind: "feature",
             sddLevel: "lightweight",
             priority: "normal",

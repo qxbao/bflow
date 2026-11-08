@@ -15,6 +15,11 @@ export interface ChatTransportPort {
  unavailable?():boolean;
 }
 const marker='[bflow-web:';
+export function unwrapWebEchoPrompt(prompt:string):string{
+ const wrapped=/^\s*<pasted_content id="([A-Za-z0-9_-]{1,128})">\s*([\s\S]*?)\s*<\/pasted_content id="\1">\s*$/.exec(prompt);
+ if(wrapped&&!wrapped[2]!.includes('<pasted_content')&&!wrapped[2]!.includes('</pasted_content')&&wrapped[2]!.startsWith(marker))return wrapped[2]!;
+ return prompt;
+}
 export class ChatApprovalRejectionError extends Error {
  constructor(message:string){super(message);this.name='ChatApprovalRejectionError';}
 }
@@ -109,9 +114,10 @@ export class HostChat {
   }
  }
  async echo(input:{nativeSessionId:string;paneId:string;prompt:string}):Promise<unknown|undefined>{
-  if(!input.prompt.startsWith(marker))return undefined;
+  const prompt=unwrapWebEchoPrompt(input.prompt);
+  if(!prompt.startsWith(marker))return undefined;
   return this.store.exclusive(async()=>{
-   const r=(await this.store.all()).find(r=>this.wire(r)===input.prompt);
+   const r=(await this.store.all()).find(r=>{const w=this.wire(r);return w===prompt||w.trim()===prompt.trim();});
    if(!r||r.state==='queued'||r.nativeSessionId!==input.nativeSessionId||r.paneId!==input.paneId)throw Error('Uncorrelated web echo');
    const s=await this.port.session();if(s.sessionId!==r.input.sessionId||s.nativeSessionId!==r.nativeSessionId||s.paneId!==r.paneId)throw Error('Web echo session replaced');
    // Admission itself must be idempotent on messageId, so a crash before this final receipt replays one turn.

@@ -79,3 +79,9 @@ it('unblocks subsequent queued chat messages when an earlier dispatch never echo
   expect(items.find(m=>m.messageId==='11111111-1111-4111-8111-111111111111')?.delivery).toBe('failed');
  }finally{vi.useRealTimers();}
 });
+it('correlates web echo when the terminal provider wraps the wire in a single pasted_content block',async()=>{
+ const f=await fixture();await f.chat.send(input,'user');expect(f.sent).toHaveLength(1);
+ const wrapped=`<pasted_content id="edde">\n${f.sent[0]!}\n</pasted_content id="edde">`;
+ await f.chat.echo({nativeSessionId:'native',paneId:'pane',prompt:wrapped});
+ expect(f.admitted).toEqual([input.messageId]);expect((await f.chat.list('conversation')).items[0]?.delivery).toBe('delivered');
+});

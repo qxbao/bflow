@@ -8,7 +8,7 @@ import { prepareNativeExtensionOutput } from "./extension-tools.js";
 export { prepareNativeExtensionOutput } from "./extension-tools.js";
 import { nativeImplementationResult } from "./native-implementation-result.js";
 import { encodeNativePluginSelection } from "./native-intent-selection.js";
-import { HostChat } from "../interaction/chat.js";
+import { HostChat, unwrapWebEchoPrompt } from "../interaction/chat.js";
 import { registeredAssistantHistory, registeredChatAvailable, chatMessageId } from "../interaction/chat-history.js";
 import { ProjectionFeed } from "../interaction/events.js";
 import { projectionFingerprint } from "../interaction/fingerprint.js";
@@ -655,13 +655,17 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   // Excerpts spawn one herdr read per busy pane: a 2 s cache with one shared in-flight read keeps several tabs from multiplying subprocesses.
   // Terminal output is deliberately not part of webProjectionFingerprint, so it never raises an `invalidate` event.
   const sharedExcerpts = sharedFor<string, unknown>(2000, value => record(value).ok === true);
+  const sharedTranscripts = sharedFor<string, unknown>(1500, value => record(value).ok === true);
   const readPane = (paneId: string, lines: number) => herdr(["pane", "read", paneId, "--source", "recent", "--lines", String(lines), "--format", "text"]);
   const readWebQuery = async (params: unknown) => {
     // Director view/issue queue: the host's single store owner answers (no file reads in the generic projection).
     const director = await directorWeb.query(params);
     if (director !== undefined) return director;
-    if (record(params).kind === "workforce_excerpts")
-      return sharedExcerpts(String(record(params).projectId), () => readWebQueryUncached(params));
+    const p = record(params);
+    if (p.kind === "workforce_excerpts")
+      return sharedExcerpts(String(p.projectId), () => readWebQueryUncached(params));
+    if (p.kind === "agent_transcript")
+      return sharedTranscripts(`${String(p.projectId)}:${String(p.instanceId)}`, () => readWebQueryUncached(params));
     return readWebQueryUncached(params);
   };
   const readWebQueryUncached = async (params: unknown) => {
@@ -2885,8 +2889,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (isAgy ? hook.hook_event_name !== "PreInvocation" : hook.hook_event_name !== "UserPromptSubmit")
           throw new Error("Physical user input hook required");
         const prompt = textField(hook.prompt), nativeSessionId = textField(hook.session_id);
-        if(prompt.startsWith("[bflow-web:")) {
-          const work=userQueue.catch(()=>undefined).then(()=>webChat.echo({nativeSessionId,paneId:binding.paneId,prompt}));
+        const unwrappedWebEcho = unwrapWebEchoPrompt(prompt);
+        if(unwrappedWebEcho.startsWith("[bflow-web:")) {
+          const work=userQueue.catch(()=>undefined).then(()=>webChat.echo({nativeSessionId,paneId:binding.paneId,prompt:unwrappedWebEcho}));
           userQueue=work;return work;
         }
         if (!binding.session || binding.session.value !== nativeSessionId) throw new Error("Physical user input native session mismatch");
@@ -3261,9 +3266,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   }, 100);
   const pumpProviderFailures = async () => {
     if (!workspace || !platformRoles.some(option => option.failover)) return;
-    const snapshot = record(await workspace.runtime.inspect());
-    const outbound = (snapshot.outbound as unknown[]).map(record);
-    const active = outbound.filter(out => out.status === "accepted" && record(out.message).type === "task.assignment" && out.handle);
+    const active = await workspace.runtime.acceptedTaskAssignments();
     for (const out of active) {
       const handle = AgentExecutionHandleSchema.parse(out.handle), target = handle.target;
       const registration = target.paneId ? nativeSessions.get(target.paneId) : undefined;
