@@ -29,14 +29,14 @@
 .office-3d {
   color-scheme: light;
   color: var(--color-ink);
-  --win-ink: #1b1033; --win-shadow: 4px 4px 0 var(--win-ink); --win-shadow-sm: 2px 2px 0 var(--win-ink);
-  --win-border: 2px solid var(--win-ink); --win-radius: 6px; --win-body: #f6f2ff; --win-panel: #e9e0ff;
-  --win-title-inactive: #786f94; --win-c-system: #5b4fc4; --win-c-work: #a71970; --win-c-decide: #f29d12;
-  --win-c-chat: #6c2fc9; --win-c-people: #12615f; --win-c-docs: #2f5fb3; --win-c-alert: #a3202a;
-  --color-canvas: #f6f2ff; --color-ink: #1b1033; --color-muted: #4b3f6b; --color-faint: #efe8ff;
-  --color-line: #cfc4ee; --color-accent: #6a2fd0; --color-steel: #2f4b7c; --color-brand: #ffc400;
-  --color-on-brand: #1a1a1a; --color-focus: #a71970; --color-surface: #ffffff; --color-input: #786f94;
-  --color-success: #1e6b3a; --color-danger: #a3202a; --color-warning: #7a5600; --color-code: #efe8ff; --color-code-line: #cfc4ee;
+  --win-ink: #1f1814; --win-shadow: 0 10px 26px rgb(31 24 20 / .16), 3px 3px 0 var(--win-ink); --win-shadow-sm: 2px 2px 0 var(--win-ink);
+  --win-border: 2px solid var(--win-ink); --win-radius: 10px; --win-body: #faf6f0; --win-panel: #efe7db;
+  --win-title-inactive: #78695c; --win-c-system: #3b536f; --win-c-work: #8c3d1e; --win-c-decide: #d98200;
+  --win-c-chat: #2d5a4c; --win-c-people: #1f5c58; --win-c-docs: #2b4c6f; --win-c-alert: #962226;
+  --color-canvas: #faf6f0; --color-ink: #1f1814; --color-muted: #52453b; --color-faint: #f2ebe1;
+  --color-line: #d8ccb8; --color-accent: #7a4100; --color-steel: #2b4c6f; --color-brand: #f2b705;
+  --color-on-brand: #1f1814; --color-focus: #8a4b00; --color-surface: #ffffff; --color-input: #78695c;
+  --color-success: #1b5e32; --color-danger: #962226; --color-warning: #6e4c00; --color-code: #f2ebe1; --color-code-line: #d8ccb8;
 }
 .bwin { position: fixed; display:flex; flex-direction:column; min-width:320px; min-height:240px; border:var(--win-border); border-radius:var(--win-radius); background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); overflow:hidden; }
 .bwin[hidden] { display:none!important; }
@@ -400,30 +400,30 @@
 .office-3d .bwin-body [data-component="EmptyState"] h2 { font-size:14px; }
 .office-3d .bwin-body [data-component="EmptyState"] p { font-size:12px; }
 
-/* The shortcut strip occupies its own row above the taskbar and never scrolls vertically. */
+/* The shortcut strip occupies its own compact dock above the taskbar and never stretches empty space across the 3D scene. */
 .office-3d .office-rail,
-.office-3d .office-rail.office-rail-anchored { position:fixed; display:flex; flex-direction:row; align-items:center; left:12px; right:12px; top:auto!important; bottom:64px; width:auto; height:60px; max-height:60px!important; padding:6px; gap:6px; overflow-x:auto; overflow-y:hidden; transform:none; border:2px solid var(--win-ink); border-radius:0; background:var(--win-body); box-shadow:var(--win-shadow); scrollbar-width:none; }
+.office-3d .office-rail.office-rail-anchored { position:fixed; display:flex; flex-direction:row; align-items:center; left:12px; right:auto; max-width:calc(100vw - 24px); top:auto!important; bottom:64px; width:fit-content; height:56px; max-height:56px!important; padding:6px 8px; gap:6px; overflow-x:auto; overflow-y:hidden; transform:none; border:2px solid var(--win-ink); border-radius:10px; background:rgb(250 246 240 / .94); backdrop-filter:blur(8px); box-shadow:var(--win-shadow); scrollbar-width:none; }
 .office-3d .office-rail::-webkit-scrollbar { display:none; }
-.office-3d .office-rail button { display:inline-flex; flex:0 0 auto; flex-direction:row; width:auto; height:44px; min-height:44px; padding:6px 10px; gap:6px; white-space:nowrap; line-height:1; font-size:11px; border:2px solid var(--win-ink); border-radius:0; background:#fff; box-shadow:var(--win-shadow-sm); }
-.office-3d .office-rail button svg { width:24px; height:24px; padding:2px; border:0; border-radius:0; background:var(--win-panel); }
+.office-3d .office-rail button { display:inline-flex; flex:0 0 auto; flex-direction:row; width:auto; height:42px; min-height:42px; padding:6px 10px; gap:6px; white-space:nowrap; line-height:1; font-size:11px; border:2px solid var(--win-ink); border-radius:6px; background:#fff; box-shadow:var(--win-shadow-sm); }
+.office-3d .office-rail button svg { width:24px; height:24px; padding:2px; border:0; border-radius:4px; background:var(--win-panel); }
 .office-3d .office-rail button span { white-space:nowrap; }
-.office-3d :is(.office-rail button,.bflow-taskbar button,.bwin-body button,.office-desktop-nav button,.bwin-controls button) { border:2px solid var(--win-ink); border-radius:0; box-shadow:var(--win-shadow-sm); font-family:var(--font-mono); }
-.office-3d .bflow-taskbar button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:44px; height:44px; padding:6px 10px; background:#fff; font-size:11px; line-height:1; }
+.office-3d :is(.office-rail button,.bflow-taskbar button,.bwin-body button,.office-desktop-nav button,.bwin-controls button) { border:2px solid var(--win-ink); border-radius:6px; box-shadow:var(--win-shadow-sm); font-family:var(--font-mono); }
+.office-3d .bflow-taskbar button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:42px; height:42px; padding:6px 10px; background:#fff; font-size:11px; line-height:1; }
 .office-3d .bflow-taskbar .taskbar-start { background:#fff!important; }
 .office-3d .bflow-taskbar .taskbar-windows button[aria-pressed="true"] { background:var(--win-panel); }
 .office-3d .bflow-taskbar .taskbar-start-menu button { justify-content:flex-start; }
-.taskbar-button-icon { flex:none; width:24px; height:24px; padding:2px; background:var(--win-panel); }
+.taskbar-button-icon { flex:none; width:24px; height:24px; padding:2px; border-radius:4px; background:var(--win-panel); }
 .office-3d [data-hud-bottom] { bottom:124px!important; }
-.office-3d .bflow-taskbar { gap:6px; }
+.office-3d .bflow-taskbar { gap:6px; background:rgb(250 246 240 / .96); backdrop-filter:blur(8px); }
 .office-3d .taskbar-windows { flex:1 1 auto; }
-.office-3d .taskbar-quick-chat { flex:2 1 260px; max-width:none; min-width:120px; border-radius:0; }
-.office-3d .office-topbar > section[aria-label="Văn phòng Bflow"] { border-radius:0; }
+.office-3d .taskbar-quick-chat { flex:2 1 260px; max-width:none; min-width:120px; border-radius:8px; }
+.office-3d .office-topbar > section[aria-label="Văn phòng Bflow"] { border-radius:10px; background:rgb(250 246 240 / .94); backdrop-filter:blur(8px); }
 .office-3d .office-project-widget { padding:8px 10px 6px; }
 .office-3d .office-project-widget > div { margin-top:6px; padding-top:6px; }
 .office-3d .office-project-widget .office-status { margin-top:4px; padding-top:4px; }
 .office-3d .office-project-widget .office-status summary { min-height:24px; line-height:1; }
-.office-3d .office-desktop-nav { grid-column:1; grid-row:2; justify-self:start; display:flex; gap:5px; padding:4px; border:2px solid var(--win-ink); background:var(--win-body); box-shadow:var(--win-shadow-sm); }
-.office-3d .office-desktop-nav button { width:34px; height:34px; min-height:34px; padding:0; border:2px solid var(--win-ink); border-radius:0; background:#fff; box-shadow:var(--win-shadow-sm); font:700 18px/1 var(--font-mono); }
+.office-3d .office-desktop-nav { grid-column:1; grid-row:2; justify-self:start; display:flex; gap:5px; padding:4px; border:2px solid var(--win-ink); border-radius:8px; background:rgb(250 246 240 / .94); backdrop-filter:blur(8px); box-shadow:var(--win-shadow-sm); }
+.office-3d .office-desktop-nav button { width:34px; height:34px; min-height:34px; padding:0; border:2px solid var(--win-ink); border-radius:6px; background:#fff; box-shadow:var(--win-shadow-sm); font:700 18px/1 var(--font-mono); }
 .office-3d .office-topbar { grid-template-rows:auto auto; }
 .office-3d .office-topbar:has([aria-label="Thông báo văn phòng"]) .office-desktop-nav { grid-column:1; grid-row:3; }
 @media (min-width:768px) and (max-width:1099px) { .office-3d .office-desktop-nav { display:none; } }
@@ -528,9 +528,9 @@
 }
 
 /* Keep the desktop strip above the taskbar at every viewport height. */
-.office-3d .office-rail { top:auto; bottom:64px; display:flex; width:auto; max-height:60px; overflow-x:auto; overflow-y:hidden; }
+.office-3d .office-rail { top:auto; bottom:64px; display:flex; width:fit-content; max-width:calc(100vw - 24px); max-height:56px; overflow-x:auto; overflow-y:hidden; }
 .office-3d:has(.bwin-app[data-display="maximized"]:not(.hidden)) .office-rail { display:none!important; }
-.office-3d .office-rail button { width:auto; min-height:44px; height:44px; padding:6px 10px; font-size:11px; }
+.office-3d .office-rail button { width:auto; min-height:42px; height:42px; padding:6px 10px; font-size:11px; }
 .office-3d .office-rail button svg { width:24px; height:24px; }
 .office-3d .taskbar-status { display:grid; }
 .office-3d [data-hud-bottom] { bottom:124px!important; }

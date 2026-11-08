@@ -182,3 +182,35 @@ Live screenshots captured during this real execution:
 
 - Frozen `@bflow/contracts/web` (`apiVersion: 1`) intentionally omits per-task TDD sub-phase fields, raw terminal pane streams, and full notice body retrieval; Web surfaces authoritative Runtime projections and verified `ArtifactStore` documents without inventing unverified client state.
 - The live Web SDLC run certifies an isolated single-provider (`Claude Code v2.1.316` + `Herdr 0.9.5`) feature workflow on Linux; multi-provider live matrix closure (`PV3-01`) and active mid-turn `SIGKILL` fault campaigns (`RR-02`/`RR-19`) remain tracked separately in [implementation status](../implementation-status.md).
+
+---
+
+## 9. 2026-11-08 Bflow 3D Office + Director (`agy`) Live Audit, Runtime Optimization & Multi-Scale Benchmarks
+
+Operating the 3D Office (`http://127.0.0.1:4317`) with `bflow director start` and all roles configured on `agy` (`Antigravity CLI 1.5.3`) across three real workflows (**Small**, **Medium**, and **Large** parallel DAG) uncovered and resolved the following runtime blockers, CPU/I/O bottlenecks, and 3D UI/copy issues:
+
+### 9.1 Blockers & Runtime Optimizations Landed
+1. **`ensureAgenticHost` False `repository-snapshot` Rejection on Live Host (`packages/runtime/src/agentic/host-controller.ts`):**
+   - **Blocker:** Running `bflow director start` (or re-attaching a host client) after any Git commit or working-tree change while the host daemon was already live failed with `Persisted host execution sources differ; quiesce the existing host before re-resolution` because `REPOSITORY_SNAPSHOT_COMPONENT` (`repository-snapshot`) was compared in the static startup authority even when `repositoryRoot` was tracked dynamically at runtime.
+   - **Fix:** Excluded `REPOSITORY_SNAPSHOT_COMPONENT` and normalized `sources.plan.repository` in `ensureAgenticHost` when `options.executionResolution?.repositoryRoot !== undefined` on a live host, while preserving full snapshot refresh when restarting a stopped host. Covered by `packages/runtime/test/agentic/host-recovery.test.ts`.
+2. **Infinite 500ms Exclusive Transaction Loop on Historical `phaseFailure.retryAuthorized` (`packages/runtime/src/agentic/runtime.ts`):**
+   - **Bottleneck:** `hasMissingCoordinatorWakeups(state)` returned `true` whenever *any* historical outbound entry had `phaseFailure.retryAuthorized === true`, even after its run reached `completed` or `cancelled`. On a 30.5 MB `state.json`, this caused every 500ms `tick()` to open a read-write `this.transaction(...)` (`JSON.parse` on 30.5 MB), pegging `host.js daemon` at **~110–125% CPU** while idle.
+   - **Fix:** Scoped `hasMissingCoordinatorWakeups(state)` to active `implementing` runs where the phase recovery notice or alternative evidence request has not yet been created, and consolidated idle `tick()` read-only checks into a single `this.journal.project(...)` pass. Idle `host.js daemon` V8 profiler idle time improved from **2.3% idle** to **>71% idle**.
+3. **Stat-Backed Snapshot Reuse for Large Journals & Web Projections (`packages/runtime/src/agentic/journal.ts`, `packages/runtime/src/interaction/views.ts`):**
+   - Cached `{ ino, size, mtimeMs, ctimeMs, bytes, value }` in `AgenticJournal` (including across `save()` writes) and cached decoded `ProjectionSnapshots` per `(ino, size, mtimeMs, ctimeMs)` in `views.ts` so the 1 Hz `observeWebFeed()` loop reuses the frozen state in O(1) without re-reading or byte-comparing 30.5 MB buffers when `state.json` is unchanged.
+4. **In-Memory Notice & Directory Listing Cache (`packages/runtime/src/agentic/host-receipts.ts`):**
+   - Updated `unsurfacedConversationNotices()`, `undisplayedUserFacingNotices()`, and `conversationNoticeStates()` to reuse `this.allConversationNotices()` (`noticeCache`) and cached directory entry sets keyed by `lstat(this.directory)` to eliminate `readdir` and `open -> ENOENT` storms on large receipt directories.
+5. **Gateway Lost-Registration Warning Deduplication (`packages/runtime/src/agentic/host.ts`):**
+   - Deduplicated the 30s `gatewayTimer` warning (`Bflow Gateway: N registration(s) lost`) via `lastReportedGatewayLostKey` so stderr only logs when the set of affected registrations changes.
+6. **3D Office Visual & Vietnamese Copy Harmonization (`apps/web/src/styles/global.css`, `apps/web/src/features/office/**`):**
+   - Replaced the cold neon-purple HUD theme (`#1b1033` / `#f6f2ff` / `#6a2fd0`) with a warm 3D architectural studio palette (`#1f1814` ink, `#faf6f0` cream surfaces, `#7a4100` warm wood/amber accents, `#2b4c6f` slate window headers, rounded controls, backdrop blur), compacted `.office-rail` to `width: fit-content`, prioritized real workspace paths before `/tmp/` fixtures in project lists, formatted observation timestamps in Vietnamese, and refined robotic phrasing in `DirectorInspector.tsx`, `AgentInspector.tsx`, and `FloatingWindow.tsx` while preserving all 37 WCAG AA contrast assertions (`office-contrast.test.ts`).
+
+### 9.2 Live Multi-Scale SDLC Benchmarks (`bflow director` + `agy` Across All Roles)
+
+Executed on repository `AI-flow-SDLC` (`sessionId: bf-c1695ccd3f2b994f91bd`, all roles on `agy`):
+
+| Scale | Run ID | Scope & Deliverables | Active Execution Time | Wall-Clock Time | Direct Tokens (Director + Specialists) | Cumulative Billed Context (Est.) |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| **Small (Task Nhỏ)** | `run-director-434d45c73a8a9e46196562be` | Add `formatDurationVi(ms)` in `labels.ts` + unit tests in `office-characters.test.ts` (1 Developer, 2 QA ops, 2 Reviewer ops) | **34.7 min** *(Dev: 20.6m, Gates: 11.5m, SDD/Coord: 2.6m)* | **49.4 min** *(incl. 14.7m approval wait)* | **~148,024 tokens** *(86,653 Director + 61,371 Specialist)* | **~0.85M – 1.1M tokens** |
+| **Medium (Task Trung bình)** | `run-director-bf3c077bffbfcecc9cfa3f98` | Hide `CameraBar` when taskbar active in `OfficeHud.tsx`, prioritize active runs in `currentRun`, stabilize `DecisionInbox.tsx` refreshing state + tests (Specifier + Developer + QA + Reviewer) | **81.5 min** *(SDD/Spec: 12.4m, Dev+Rework: 57.4m, Gates: 11.7m)* | **253.6 min** *(incl. 172.1m session pause/wait gap)* | **~680,983 tokens** *(392,102 Director + 288,881 Specialist)* | **~3.2M – 3.8M tokens** |
+| **Large (Task Lớn — Parallel DAG)** | `run-director-0b2915429c60fd2662e180cb` | 2 parallel Developer tasks (`task-1`, `task-2`) across isolated worktrees: 3D UI harmonization, `/tmp/` project sorting, `AccessibleOffice` time formatting, natural Vietnamese copy in `DirectorInspector` & `AgentInspector` + full task & workflow gates | **232.1 min** *(Arch/DAG: 18.5m, 2x Parallel Dev+Recovery: 156.8m, 8x QA/Reviewer Gates: 56.8m)* | **241.3 min** *(incl. 9.2m approval wait)* | **~815,046 tokens** *(406,314 Director + 408,732 Specialist)* | **~4.5M – 5.4M tokens** |

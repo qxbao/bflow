@@ -696,16 +696,105 @@ export class AgenticWorkflowRuntime {
         sdlcStatus: run.status, result: message.payload, next: "Call inspect to read the durable inbox, then continue the workflow or report a blocker." },
       artifact_references: message.artifact_references, occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
   }
+  private hasMissingCoordinatorWakeups(state: Readonly<JournalState>): boolean {
+    if (state.outbound.some(item => {
+      if (item.phaseFailure && !item.phaseFailure.applied) {
+        return state.runs.some(r => r.runId === item.message.run_id);
+      }
+      if (item.phaseRetirement && item.status !== "cancelled") {
+        return true;
+      }
+      if (!item.phaseFailure?.retryAuthorized && !item.phaseRetirement?.resumeAuthorizedBy && !item.leaseReacquisition) {
+        return false;
+      }
+      const run = state.runs.find(r => r.runId === item.message.run_id);
+      if (!run || run.cancelled || run.status !== "implementing") return false;
+      if (item.leaseReacquisition) return true;
+      const payload = record(item.message.payload);
+      const task = run.tasks.find(t => t.taskId === payload.taskId);
+      if (!task) return false;
+      if (task.writerReleased || task.result !== undefined) {
+        if (this.ports.automaticAlternativeEvidence && task.result?.status === "succeeded" && task.spec.strategy.tddDecision.mode !== "required") {
+          let evidenceComplete = false;
+          try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); evidenceComplete = true; } catch { /* still needed */ }
+          if (!evidenceComplete && !state.outbound.some(out => out.message.run_id === run.runId &&
+              out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence" &&
+              record(out.message.payload).taskId === task.taskId && !out.phaseFailure && !out.phaseRetirement && out.status !== "cancelled")) {
+            return true;
+          }
+        }
+        return false;
+      }
+      const phase = typeof payload.phase === "string" ? payload.phase : "";
+      const id = `phase-notice-${digest([run.runId, task.taskId, phase, item.message.message_id])}`;
+      const notice = state.outbound.find(out => out.message.message_id === id);
+      if (!notice) return true;
+      return notice.status === "cancelled" && !notice.request && !notice.handle && Boolean(notice.error?.includes("parent lease is expired"));
+    })) return true;
+    if (state.runs.some(run =>
+      (run.nativeDeliveries ?? []).some(entry => this.durablySettledNative(state, entry.message)) ||
+      (run.pendingAction?.kind === "reconcile_delivery" && run.pendingAction.state === "pending" && !run.cancelled && (
+        (() => {
+          const action = run.pendingAction!;
+          const intent = (run.nativeDeliveries ?? []).find(entry => entry.message.message_id === action.sourceMessageId);
+          return intent ? this.durablySettledNative(state, intent.message) : state.inbox.some(item =>
+            item.message.message_id === action.sourceMessageId && item.message.run_id === run.runId &&
+            item.message.correlation_id === run.delegation.correlationId && item.message.idempotency_key !== undefined && ["received", "applied", "rejected"].includes(item.status));
+        })()
+      ))
+    )) return true;
+    for (const item of state.inbox) {
+      if (item.status !== "applied") continue;
+      const message = item.message;
+      if (isConversationContext(message)) {
+        if (!message.run_id) continue;
+        const run = state.runs.find(candidate => candidate.runId === message.run_id);
+        if (!run || run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status) ||
+            message.correlation_id !== run.delegation.correlationId) continue;
+        const wakeId = `p19-wake-${digest([run.runId, message.message_id])}`;
+        if (!state.outbound.some(out => out.message.message_id === wakeId)) return true;
+        continue;
+      }
+      if (message.recipient.role === "coordinator" && message.sender.role !== "coordinator" && message.sender.role !== "conversation") {
+        if (!message.run_id || !message.causation_id || !["spec.draft", "task.status", "verification.escalation"].includes(message.type)) continue;
+        const source = state.outbound.find(out => out.message.message_id === message.causation_id && out.message.run_id === message.run_id &&
+          out.message.recipient.role === message.sender.role && out.handle?.target.agentId === message.sender.agent_id &&
+          out.handle?.target.paneId === message.sender.pane_id && ["accepted", "released"].includes(out.status));
+        if (!source) continue;
+        const run = state.runs.find(candidate => candidate.runId === message.run_id);
+        if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || run.status === "awaiting_approval" ||
+            Object.values(run.userDecisions ?? {}).some(decision => decision.status === "pending")) continue;
+        const wakeId = `p19-wake-${digest([run.runId, message.message_id])}`;
+        if (!state.outbound.some(out => out.message.message_id === wakeId)) return true;
+      }
+    }
+    return false;
+  }
   /** Reconstruct a lost deterministic wake from an already-applied, correlated result during recovery. */
   async recoverMissingCoordinatorWakeups(): Promise<JsonValue> {
     // `received` is the durable inbox write-ahead before semantic application. The envelope was parsed and authenticated
     // before that write. Reapply all business validators, deferring blocked/terminal runs until an authorized resume.
-    const received = await this.journal.project(state => state.inbox.filter(item => item.status === "received" &&
-        (isCancellationHandoff(item.message) || state.outbound.some(out => out.reviewReplacement && out.message.message_id === item.message.causation_id) || !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
-          TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message) &&
-          !this.acceptsPausedUserDecision(run, item.message) &&
-          !(run.status === "escalated" && isConversationContext(item.message))))))
-      .map(item => RoleMessageSchema.parse(item.message)));
+    const initial = await this.journal.project(state => {
+      const received = state.inbox.filter(item => item.status === "received" &&
+          (isCancellationHandoff(item.message) || state.outbound.some(out => out.reviewReplacement && out.message.message_id === item.message.causation_id) || !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
+            TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message) &&
+            !this.acceptsPausedUserDecision(run, item.message) &&
+            !(run.status === "escalated" && isConversationContext(item.message))))))
+        .map(item => RoleMessageSchema.parse(item.message));
+      const rawDeliveredApprovals = received.length > 0 ? [] : state.outbound.filter(out => out.message.sender.role === "conversation" && out.message.recipient.role === "coordinator" &&
+        out.message.type === "approval.decision" && (out.handle !== undefined && ["accepted", "released"].includes(out.status) ||
+          out.delivery === "director_mailbox" && out.status === "delivered") &&
+        !state.inbox.some(item => item.message.message_id === out.message.message_id ||
+          (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
+        state.runs.some(run => run.runId === out.message.run_id && !run.cancelled &&
+          (!TERMINAL_RUN_STATUSES.includes(run.status) || this.acceptsPausedUserDecision(run, out.message))))
+        .map(out => ({ mailbox: out.delivery === "director_mailbox", message: out.message }));
+      const needsWakeTransaction = received.length === 0 && rawDeliveredApprovals.length === 0
+        ? this.hasMissingCoordinatorWakeups(state)
+        : false;
+      return { received, rawDeliveredApprovals, needsWakeTransaction };
+    });
+    const received = initial.received;
     let replayed = 0;
     for (const message of received) {
       try {
@@ -720,16 +809,18 @@ export class AgenticWorkflowRuntime {
         await this.reportInboundFailure(message, String(error));
       }
     }
-    const rawDeliveredApprovals = await this.journal.project(state =>
-      state.outbound.filter(out => out.message.sender.role === "conversation" && out.message.recipient.role === "coordinator" &&
-        out.message.type === "approval.decision" && (out.handle !== undefined && ["accepted", "released"].includes(out.status) ||
-          out.delivery === "director_mailbox" && out.status === "delivered") &&
-        !state.inbox.some(item => item.message.message_id === out.message.message_id ||
-          (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
-        state.runs.some(run => run.runId === out.message.run_id && !run.cancelled &&
-          (!TERMINAL_RUN_STATUSES.includes(run.status) || this.acceptsPausedUserDecision(run, out.message))))
-        .map(out => ({ mailbox: out.delivery === "director_mailbox", message: out.message }))
-    );
+    const rawDeliveredApprovals = received.length === 0
+      ? initial.rawDeliveredApprovals
+      : await this.journal.project(state =>
+          state.outbound.filter(out => out.message.sender.role === "conversation" && out.message.recipient.role === "coordinator" &&
+            out.message.type === "approval.decision" && (out.handle !== undefined && ["accepted", "released"].includes(out.status) ||
+              out.delivery === "director_mailbox" && out.status === "delivered") &&
+            !state.inbox.some(item => item.message.message_id === out.message.message_id ||
+              (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
+            state.runs.some(run => run.runId === out.message.run_id && !run.cancelled &&
+              (!TERMINAL_RUN_STATUSES.includes(run.status) || this.acceptsPausedUserDecision(run, out.message))))
+            .map(out => ({ mailbox: out.delivery === "director_mailbox", message: out.message }))
+        );
     const sender = rawDeliveredApprovals.length > 0
       ? await (async () => {
           const result = await this.ports.panes?.getManifest?.();
@@ -755,51 +846,9 @@ export class AgenticWorkflowRuntime {
         await this.reportInboundFailure(message, String(error));
       }
     }
-    const needsWakeTransaction = await this.journal.project(state => {
-      if (state.outbound.some(item =>
-        Boolean(item.phaseFailure && (!item.phaseFailure.applied || item.phaseFailure.retryAuthorized)) ||
-        Boolean(item.phaseRetirement?.resumeAuthorizedBy) ||
-        Boolean(item.leaseReacquisition)
-      )) return true;
-      if (state.runs.some(run =>
-        (run.nativeDeliveries ?? []).some(entry => this.durablySettledNative(state, entry.message)) ||
-        (run.pendingAction?.kind === "reconcile_delivery" && run.pendingAction.state === "pending" && !run.cancelled && (
-          (() => {
-            const action = run.pendingAction!;
-            const intent = (run.nativeDeliveries ?? []).find(entry => entry.message.message_id === action.sourceMessageId);
-            return intent ? this.durablySettledNative(state, intent.message) : state.inbox.some(item =>
-              item.message.message_id === action.sourceMessageId && item.message.run_id === run.runId &&
-              item.message.correlation_id === run.delegation.correlationId && item.message.idempotency_key !== undefined && ["received", "applied", "rejected"].includes(item.status));
-          })()
-        ))
-      )) return true;
-      for (const item of state.inbox) {
-        if (item.status !== "applied") continue;
-        const message = item.message;
-        if (isConversationContext(message)) {
-          if (!message.run_id) continue;
-          const run = state.runs.find(candidate => candidate.runId === message.run_id);
-          if (!run || run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status) ||
-              message.correlation_id !== run.delegation.correlationId) continue;
-          const wakeId = `p19-wake-${digest([run.runId, message.message_id])}`;
-          if (!state.outbound.some(out => out.message.message_id === wakeId)) return true;
-          continue;
-        }
-        if (message.recipient.role === "coordinator" && message.sender.role !== "coordinator" && message.sender.role !== "conversation") {
-          if (!message.run_id || !message.causation_id || !["spec.draft", "task.status", "verification.escalation"].includes(message.type)) continue;
-          const source = state.outbound.find(out => out.message.message_id === message.causation_id && out.message.run_id === message.run_id &&
-            out.message.recipient.role === message.sender.role && out.handle?.target.agentId === message.sender.agent_id &&
-            out.handle?.target.paneId === message.sender.pane_id && ["accepted", "released"].includes(out.status));
-          if (!source) continue;
-          const run = state.runs.find(candidate => candidate.runId === message.run_id);
-          if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || run.status === "awaiting_approval" ||
-              Object.values(run.userDecisions ?? {}).some(decision => decision.status === "pending")) continue;
-          const wakeId = `p19-wake-${digest([run.runId, message.message_id])}`;
-          if (!state.outbound.some(out => out.message.message_id === wakeId)) return true;
-        }
-      }
-      return false;
-    });
+    const needsWakeTransaction = received.length === 0 && rawDeliveredApprovals.length === 0
+      ? initial.needsWakeTransaction
+      : await this.journal.project(state => this.hasMissingCoordinatorWakeups(state));
     if (!needsWakeTransaction) return json({ recovered: replayed });
     return this.transaction(async (state, save, _core, outbox) => {
       let recovered = 0;
@@ -5837,8 +5886,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   async tick(options?: { returnState?: boolean }): Promise<JsonValue> {
     await this.initialize();
     if (this.quiesced) return options?.returnState === false ? null : this.inspect();
-    await this.recoverParkSettlements();
-    const needsCancelOrProfileCleanup = await this.journal.project(state =>
+    const cancelOrProfilePredicate = (state: Readonly<JournalState>): boolean =>
       state.runs.some(item => item.cancelled && (
         Boolean(item.pendingAction) ||
         Object.values(item.userDecisions ?? {}).some(d => d.status === "pending") ||
@@ -5849,32 +5897,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           !isCancellationHandoff(out.message) && (out.message.recipient.role !== "conversation" || out.message.type === "approval.request"))
       )) ||
       state.outbound.some(item => (item.status === "queued" && !item.handle && isCancellationHandoff(item.message)) ||
-        Boolean(item.roleProfile && item.profileAllocationTaskId && !item.profileAllocationReleased))
-    );
-    if (needsCancelOrProfileCleanup) {
-      await this.transaction(async (state, save, core, outbox) => {
-        await this.drainCancellationControls(state, save, core, outbox);
-        await this.cleanupProfileSpecialists(state, save);
-      });
-    }
-    try { await this.continueProviderFailovers(); } catch { /* isolate failover continuation errors so sibling runs still tick */ }
-    await this.recoverMissingCoordinatorWakeups();
-    const prePending = await this.journal.project(state => ({
-      needsDecisionCleanup: state.runs.some(run => (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) && Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending")),
-      pending: state.pendingVerifications
-    }));
-    const pending = prePending.needsDecisionCleanup
-      ? await this.transaction(async (state, save, _core, outbox) => {
-          if (this.closeUserDecisionsOfEndedRuns(state, outbox)) await save();
-          return structuredClone(state.pendingVerifications);
-        })
-      : prePending.pending;
-    for (const item of pending) {
-      if (item.stuck) continue; // waits for an explicit retry_verification
-      try { await this.finishVerification(this.parseJob(item.job), this.parseOutcome(item.outcome)); }
-      catch (error) { await this.recordVerificationFailure(item, error); }
-    }
-    const needsMainTickWork = await this.journal.project(state =>
+        Boolean(item.roleProfile && item.profileAllocationTaskId && !item.profileAllocationReleased));
+    const mainTickWorkPredicate = (state: Readonly<JournalState>): boolean =>
       state.runs.some(run =>
         (run.cancelled && !run.cancelReconciled) ||
         (!run.cancelled && !(run.nativeDeliveries?.length) && !(run.pendingAction?.state === "pending" && run.pendingAction.recovery === "reconcile_delivery") &&
@@ -5886,8 +5910,100 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           ["queued", "sending", "accepted", "unknown_delivery"].includes(out.status) ||
           (out.status === "failed" && Boolean(out.error?.includes(RoleCapabilityPreflightError.name)))
         )
-      )
-    );
+      );
+    const idleCheck = await this.journal.project(state => {
+      const hasParkSettlements = state.runs.some(run => !run.cancelled && !ENDED_RUN_STATUSES.includes(run.status) &&
+        run.tasks.some(task => Boolean(task.parkSettlement)));
+      const needsCancelOrProfileCleanup = cancelOrProfilePredicate(state);
+      const hasProviderFailovers = state.runs.some(run =>
+        run.tasks.some(task => (task.failovers ?? []).some(entry => !["dispatched", "cancelled"].includes(entry.phase)))
+      );
+      const hasMissingWakeups = state.inbox.some(item => item.status === "received" &&
+          (isCancellationHandoff(item.message) || state.outbound.some(out => out.reviewReplacement && out.message.message_id === item.message.causation_id) || !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
+            TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message) &&
+            !this.acceptsPausedUserDecision(run, item.message) &&
+            !(run.status === "escalated" && isConversationContext(item.message)))))) ||
+        state.outbound.some(out => out.message.sender.role === "conversation" && out.message.recipient.role === "coordinator" &&
+          out.message.type === "approval.decision" && (out.handle !== undefined && ["accepted", "released"].includes(out.status) ||
+            out.delivery === "director_mailbox" && out.status === "delivered") &&
+          !state.inbox.some(item => item.message.message_id === out.message.message_id ||
+            (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
+          state.runs.some(run => run.runId === out.message.run_id && !run.cancelled &&
+            (!TERMINAL_RUN_STATUSES.includes(run.status) || this.acceptsPausedUserDecision(run, out.message)))) ||
+        this.hasMissingCoordinatorWakeups(state);
+      const needsDecisionCleanup = state.runs.some(run => (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) &&
+        Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending"));
+      const hasUnstuckPendingVerifications = state.pendingVerifications.some(item => !item.stuck);
+      const needsMainTickWork = mainTickWorkPredicate(state);
+      const hasInProcessDelivery = state.outbound.some(out => isInProcessDelivery(out) && out.status === "sending");
+      return {
+        hasParkSettlements,
+        needsCancelOrProfileCleanup,
+        hasProviderFailovers,
+        hasMissingWakeups,
+        needsDecisionCleanup,
+        hasUnstuckPendingVerifications,
+        needsMainTickWork,
+        hasInProcessDelivery
+      };
+    });
+    if (
+      !idleCheck.hasParkSettlements &&
+      !idleCheck.needsCancelOrProfileCleanup &&
+      !idleCheck.hasProviderFailovers &&
+      !idleCheck.hasMissingWakeups &&
+      !idleCheck.needsDecisionCleanup &&
+      !idleCheck.hasUnstuckPendingVerifications &&
+      !idleCheck.needsMainTickWork &&
+      !idleCheck.hasInProcessDelivery
+    ) {
+      return options?.returnState === false ? null : this.inspect();
+    }
+    let anyEarlierMutated = false;
+    if (idleCheck.hasParkSettlements) {
+      await this.recoverParkSettlements();
+      anyEarlierMutated = true;
+    }
+    const needsCancelOrProfileCleanup = anyEarlierMutated
+      ? await this.journal.project(cancelOrProfilePredicate)
+      : idleCheck.needsCancelOrProfileCleanup;
+    if (needsCancelOrProfileCleanup) {
+      await this.transaction(async (state, save, core, outbox) => {
+        await this.drainCancellationControls(state, save, core, outbox);
+        await this.cleanupProfileSpecialists(state, save);
+      });
+      anyEarlierMutated = true;
+    }
+    if (anyEarlierMutated || idleCheck.hasProviderFailovers) {
+      try { await this.continueProviderFailovers(); } catch { /* isolate failover continuation errors so sibling runs still tick */ }
+      anyEarlierMutated = true;
+    }
+    if (anyEarlierMutated || idleCheck.hasMissingWakeups) {
+      await this.recoverMissingCoordinatorWakeups();
+      anyEarlierMutated = true;
+    }
+    const prePending = (anyEarlierMutated || idleCheck.needsDecisionCleanup || idleCheck.hasUnstuckPendingVerifications)
+      ? await this.journal.project(state => ({
+          needsDecisionCleanup: state.runs.some(run => (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) && Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending")),
+          pending: state.pendingVerifications
+        }))
+      : { needsDecisionCleanup: false, pending: [] };
+    const pending = prePending.needsDecisionCleanup
+      ? await this.transaction(async (state, save, _core, outbox) => {
+          if (this.closeUserDecisionsOfEndedRuns(state, outbox)) await save();
+          anyEarlierMutated = true;
+          return structuredClone(state.pendingVerifications);
+        })
+      : prePending.pending;
+    for (const item of pending) {
+      if (item.stuck) continue; // waits for an explicit retry_verification
+      anyEarlierMutated = true;
+      try { await this.finishVerification(this.parseJob(item.job), this.parseOutcome(item.outcome)); }
+      catch (error) { await this.recordVerificationFailure(item, error); }
+    }
+    const needsMainTickWork = anyEarlierMutated
+      ? await this.journal.project(mainTickWorkPredicate)
+      : idleCheck.needsMainTickWork;
     const jobs = !needsMainTickWork ? [] : await this.transaction(async (state, save, core, outbox) => {
       const jobs: VerificationJob[] = [];
         for (const run of state.runs) {
@@ -6035,7 +6151,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         }
         await save(); return jobs;
     });
-    await this.deliverInProcessInbox();
+    if (needsMainTickWork || anyEarlierMutated || idleCheck.hasInProcessDelivery) {
+      await this.deliverInProcessInbox();
+    }
     for (const job of jobs) {
       // No Runtime lock is held: QA/Reviewer may reply through Herdr while verification awaits them.
       try {

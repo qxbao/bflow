@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, rename, rm } from "node:fs/promises";
+import { mkdir, open, rename, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
@@ -752,7 +752,7 @@ export class AgenticJournal {
   readonly directory: string;
   private readonly lockWaitMs: number;
   private readonly spawnTimeoutMs: number;
-  private validatedSnapshot?: { bytes: Buffer; value: JournalState };
+  private validatedSnapshot?: { ino?: number; size?: number; mtimeMs?: number; ctimeMs?: number; bytes: Buffer; value: JournalState };
   constructor(directory: string, readonly repository: string, options: { lockWaitMs?: number; spawnTimeoutMs?: number } = {}) {
     this.directory = resolve(directory);
     this.lockWaitMs = options.lockWaitMs ?? JOURNAL_LOCK_WAIT_MS;
@@ -815,12 +815,27 @@ export class AgenticJournal {
       let state: JournalState, baseline: JournalState | undefined, durableBytes: Buffer | undefined;
       const statePath = join(this.directory, "state.json");
       try {
-        const bytes = await readRegularJournalFile(statePath);
-        if (this.validatedSnapshot?.bytes.equals(bytes)) state = readOnly ? this.validatedSnapshot.value : JSON.parse(bytes.toString("utf8")) as JournalState;
-        else {
+        const readResult = await readRegularJournalFileWithStat(statePath, this.validatedSnapshot);
+        const bytes = readResult.bytes;
+        if (readResult.reused && this.validatedSnapshot) {
+          state = readOnly ? this.validatedSnapshot.value : JSON.parse(bytes.toString("utf8")) as JournalState;
+        } else if (this.validatedSnapshot?.bytes.equals(bytes)) {
+          state = readOnly ? this.validatedSnapshot.value : JSON.parse(bytes.toString("utf8")) as JournalState;
+          this.validatedSnapshot.ino = readResult.ino;
+          this.validatedSnapshot.size = readResult.size;
+          this.validatedSnapshot.mtimeMs = readResult.mtimeMs;
+          this.validatedSnapshot.ctimeMs = readResult.ctimeMs;
+        } else {
           const raw = JSON.parse(bytes.toString("utf8"));
           state = parseAgenticJournalState(raw, this.repository, this.validatedSnapshot?.value);
-          this.validatedSnapshot = { bytes: Buffer.from(bytes), value: readOnly ? state : JSON.parse(bytes.toString("utf8")) as JournalState };
+          this.validatedSnapshot = {
+            ino: readResult.ino,
+            size: readResult.size,
+            mtimeMs: readResult.mtimeMs,
+            ctimeMs: readResult.ctimeMs,
+            bytes: Buffer.from(bytes),
+            value: readOnly ? state : JSON.parse(bytes.toString("utf8")) as JournalState
+          };
         }
         baseline = this.validatedSnapshot.value; durableBytes = bytes;
       } catch (e) {
@@ -863,7 +878,12 @@ export class AgenticJournal {
             }
           } finally { await dir.close(); }
         } finally { await rm(path, { force: true }); }
-        this.validatedSnapshot = { bytes: Buffer.from(serialized, "utf8"), value: normalized };
+        const savedStat = await stat(statePath).catch(() => undefined);
+        this.validatedSnapshot = {
+          ...(savedStat?.isFile() ? { ino: savedStat.ino, size: savedStat.size, mtimeMs: savedStat.mtimeMs, ctimeMs: savedStat.ctimeMs } : {}),
+          bytes: Buffer.from(serialized, "utf8"),
+          value: normalized
+        };
         baseline = normalized; durableBytes = this.validatedSnapshot.bytes;
       });
     } finally { await lock.close(); }
@@ -879,10 +899,27 @@ export async function syncFileHandle(file: { sync(): Promise<void> }): Promise<v
   }
 }
 async function readRegularJournalFile(path: string): Promise<Buffer> {
+  return (await readRegularJournalFileWithStat(path)).bytes;
+}
+async function readRegularJournalFileWithStat(
+  path: string,
+  cached?: { ino?: number; size?: number; mtimeMs?: number; ctimeMs?: number; bytes: Buffer }
+): Promise<{ bytes: Buffer; ino: number; size: number; mtimeMs: number; ctimeMs: number; reused: boolean }> {
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
-    if (!(await handle.stat()).isFile()) throw Object.assign(new Error(`Journal state is not a regular file: ${path}`), { code: "EISDIR" });
-    return await handle.readFile();
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw Object.assign(new Error(`Journal state is not a regular file: ${path}`), { code: "EISDIR" });
+    if (
+      cached &&
+      stat.size > 65536 &&
+      cached.ino === stat.ino &&
+      cached.size === stat.size &&
+      cached.mtimeMs === stat.mtimeMs &&
+      cached.ctimeMs === stat.ctimeMs
+    ) {
+      return { bytes: cached.bytes, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, reused: true };
+    }
+    return { bytes: await handle.readFile(), ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, reused: false };
   } finally {
     await handle.close();
   }

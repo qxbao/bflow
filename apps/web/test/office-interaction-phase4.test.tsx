@@ -77,7 +77,7 @@ test('AgentDialogue reports unknown waiting authority and mounts technical evide
   expect(screen.getByRole('link', { name: /Xem công việc: Build search/ }).getAttribute('href')).toBe('/projects/p/runs/run-1');
   expect(fetcher.mock.calls.some(([path]) => String(path).includes('/activity'))).toBe(false);
   fireEvent.click(screen.getByText('Chi tiết kỹ thuật'));
-  expect(await screen.findByText(/Nhật ký chỉ ghi vai trò/)).toBeTruthy();
+  expect(await screen.findByText(/Nhật ký ghi theo từng vai trò/)).toBeTruthy();
   expect(fetcher.mock.calls.some(([path]) => String(path).includes('/activity'))).toBe(true);
   expect(screen.getByText(/Nội dung gần đây/)).toBeTruthy();
 });

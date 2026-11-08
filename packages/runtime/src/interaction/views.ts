@@ -340,6 +340,14 @@ const WebExcerptsResultSchema = OperationResultSchema(WebWorkforceExcerptsSchema
 const WebTranscriptResultSchema = OperationResultSchema(WebAgentTranscriptSchema);
 const WebActivityResultSchema = OperationResultSchema(WebPageSchema(WebActivityEntrySchema));
 const inflightSnapshotBytes = new Map<string, Promise<Buffer | undefined>>();
+const snapshotStatCache = new Map<string, {
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  bytes: Buffer;
+  parsedByRepo: Map<string, ReturnType<ProjectionSnapshots["parse"]>>;
+}>();
 async function readSnapshotBytes(path: string, maxBytes: number): Promise<Buffer | undefined> {
   const key = `${path}:${maxBytes}`;
   const existing = inflightSnapshotBytes.get(key);
@@ -352,16 +360,42 @@ async function readSnapshotBytes(path: string, maxBytes: number): Promise<Buffer
         constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
       );
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        snapshotStatCache.delete(path);
+        return undefined;
+      }
       throw e;
     }
     try {
       const stat = await file.stat();
       if (!stat.isFile() || stat.size > maxBytes)
         throw new Error("Invalid read source");
+      const cached = snapshotStatCache.get(path);
+      if (
+        cached &&
+        stat.size > 65536 &&
+        cached.ino === stat.ino &&
+        cached.size === stat.size &&
+        cached.mtimeMs === stat.mtimeMs &&
+        cached.ctimeMs === stat.ctimeMs
+      ) {
+        return cached.bytes;
+      }
       const bytes = await file.readFile();
       if (bytes.byteLength > maxBytes)
         throw new Error("Read source too large");
+      if (stat.size > 65536) {
+        snapshotStatCache.set(path, {
+          ino: stat.ino,
+          size: stat.size,
+          mtimeMs: stat.mtimeMs,
+          ctimeMs: stat.ctimeMs,
+          bytes,
+          parsedByRepo: new Map(),
+        });
+      } else {
+        snapshotStatCache.delete(path);
+      }
       return bytes;
     } finally {
       await file.close();
@@ -373,6 +407,19 @@ async function readSnapshotBytes(path: string, maxBytes: number): Promise<Buffer
   } finally {
     if (inflightSnapshotBytes.get(key) === work) inflightSnapshotBytes.delete(key);
   }
+}
+async function readJournalSnapshot(path: string, repository: string, maxBytes: number) {
+  const bytes = await readSnapshotBytes(path, maxBytes);
+  if (bytes === undefined) return undefined;
+  const cached = snapshotStatCache.get(path);
+  if (cached && cached.bytes === bytes) {
+    const existing = cached.parsedByRepo.get(repository);
+    if (existing !== undefined) return existing;
+    const parsed = projectionSnapshots.parse(path, repository, bytes);
+    cached.parsedByRepo.set(repository, parsed);
+    return parsed;
+  }
+  return projectionSnapshots.parse(path, repository, bytes);
 }
 async function readSnapshot(path: string): Promise<unknown | undefined>;
 async function readSnapshot<T>(path: string, decode: (bytes: Buffer) => T, maxBytes?: number): Promise<T | undefined>;
@@ -456,7 +503,7 @@ export async function hostInteractionQuery(
     };
   }
   const journalPath = join(root, "agentic/journal/state.json");
-  const journal = await readSnapshot(journalPath, bytes => projectionSnapshots.parse(journalPath, configuration.repositoryPath, bytes), 64 * 1024 * 1024);
+  const journal = await readJournalSnapshot(journalPath, configuration.repositoryPath, 64 * 1024 * 1024);
   let state =
     journal === undefined
       ? {
@@ -477,7 +524,7 @@ export async function hostInteractionQuery(
     const extensionPath = join(root, "agentic/extensions", digest(configuration.sessionId), "routes/state.json");
     const diagnostic = options.onDiagnostic ?? ((code: string) => console.warn(code));
     try {
-      const extensionRoutes = await readSnapshot(extensionPath, bytes => projectionSnapshots.parse(extensionPath, configuration.repositoryPath, bytes), 64 * 1024 * 1024);
+      const extensionRoutes = await readJournalSnapshot(extensionPath, configuration.repositoryPath, 64 * 1024 * 1024);
       if (extensionRoutes) state = projectExtensionRoutes(state, extensionRoutes, sessionId, diagnostic);
     } catch { diagnostic("extension_routes_unavailable"); }
   }

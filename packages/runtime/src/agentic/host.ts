@@ -3308,11 +3308,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   schedulerTimerAlive = true;
   // F5: reconcile Gateway registrations periodically; lost ones degrade their launches until `bflow up` relaunches them.
   let verifyingGateway = false;
+  let lastReportedGatewayLostKey = "";
   const gatewayTimer = setInterval(() => {
     if (!workspace || !platformSession || quiesced || closing || verifyingGateway) return;
     verifyingGateway = true;
     void platformSession.verifyGateway().then(check => {
-      if (check.lost.length) process.stderr.write(`Bflow Gateway: ${check.lost.length} registration(s) lost; affected roles are held until bflow up relaunches them\n`);
+      const lostKey = check.lost.map(item => `${item.role}:${item.taskId ?? ""}`).sort().join(",");
+      if (check.lost.length && lostKey !== lastReportedGatewayLostKey) {
+        process.stderr.write(`Bflow Gateway: ${check.lost.length} registration(s) lost; affected roles are held until bflow up relaunches them\n`);
+      }
+      lastReportedGatewayLostKey = lostKey;
     }, error => { process.stderr.write(`Bflow Gateway check: ${redactString(String(error))}\n`); }).finally(() => { verifyingGateway = false; });
   }, 30_000);
   gatewayTimer.unref();
