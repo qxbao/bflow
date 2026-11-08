@@ -176,6 +176,49 @@ Khi tất cả nhiệm vụ đã lập trình xong, vượt qua bộ kiểm th�
 
 ---
 
+## Không gian Văn phòng 3D & Làm việc trực tiếp cùng Director
+
+Từ phiên bản giao diện **Văn phòng 3D (Office 3D HUD)** và chế độ **Director (`bflow director start`)**, Bflow Web mang toàn bộ đội ngũ trợ lý AI (`Director`, `Planner`, `Analyst · Specification`, `Architect`, các nhánh `Developer` song song, `Reviewer`, `QA`) vào một không gian 3D trực quan ngay trên trình duyệt.
+
+### 1. Toàn cảnh Văn phòng 3D và Thanh tác vụ thông minh
+
+Ngay khi mở `http://127.0.0.1:4317`, bạn quan sát thấy toàn bộ bàn làm việc của từng vai trò cùng thanh điều khiển nổi gọn gàng ở phía trên:
+- **Góc trái trên:** Chọn nhanh dự án đang mở (tự động ưu tiên các dự án thực tế trên máy trước các thư mục thử nghiệm tạm thời `/tmp/`), xem tên công việc đang chạy và bấm **Mở chi tiết** bất cứ lúc nào.
+- **Giữa màn hình trên:** Thanh nút nhanh **Tạo việc**, **Quyết định** (kèm huy hiệu đếm số mục cần bạn duyệt), **Nhân sự**, **Dự án** và **Cài đặt**.
+- **Góc phải trên:** Hộp chọn chuyển nhanh giữa các công việc trong phiên và nút bật/tắt âm thanh thông báo.
+
+![Toàn cảnh Văn phòng 3D và danh sách Nhân sự trực tiếp](../assets/web-manual/bflow-3d-workforce-agents.png)
+
+### 2. Duyệt thiết kế & bàn giao ngay trên không gian 3D
+
+Khi có đặc tả thiết kế hoặc gói bàn giao cần bạn quyết định, hộp thoại **Cần duyệt** mở ngay trên nền 3D mà không làm giật bố cục hay khóa nút khi dữ liệu ngầm tự làm mới:
+- Đọc tóm tắt tiếng Việt rõ ràng (*Mục tiêu*, *Mức độ thay đổi*, *Tiêu chí nghiệm thu*) hoặc bấm **Đọc nội dung an toàn**.
+- Bấm **Duyệt gói**, **Yêu cầu sửa** hoặc **Từ chối** ngay tại chỗ.
+
+![Hộp thoại Cần duyệt hiển thị trực tiếp trên Văn phòng 3D](../assets/web-manual/bflow-3d-decision-inbox.png)
+
+### 3. Theo dõi các nhánh Developer lập trình song song theo thời gian thực
+
+Với các công việc lớn được phân rã thành nhiều nhánh độc lập (DAG), Bflow cấp phát tự động mỗi `Developer` một Git worktree riêng biệt và hiển thị trực quan trạng thái hoạt động của từng bàn làm việc trong phòng 3D, đi kèm hộp kiểm thử độc lập của `Reviewer` và `QA`.
+
+![Theo dõi tiến độ thực thi song song đa nhánh trên Văn phòng 3D](../assets/web-manual/bflow-3d-parallel-execution.png)
+
+### 4. Trò chuyện và điều phối trực tiếp cùng Director (`bflow director start`)
+
+Khi bạn khởi động phiên Director bằng lệnh:
+
+```bash
+bflow director start
+```
+
+Bạn có thể nhấp trực tiếp vào bàn **Director** trong phòng 3D để mở bảng **Director** ở cạnh phải:
+- Huy hiệu **`● Director đang hoạt động`** xác nhận phiên điều phối đang kết nối trực tiếp với mô hình đã cấu hình (ví dụ `agy`).
+- Giao việc mới, gửi phản hồi bổ sung hoặc theo dõi luồng trao đổi giữa bạn và Director ngay trong cùng một khung chat thống nhất.
+
+![Bảng hội thoại và trạng thái Director đang hoạt động trên Văn phòng 3D](../assets/web-manual/bflow-3d-director-chat.png)
+
+---
+
 ## Câu hỏi thường gặp (FAQ)
 
 ### 1. Tôi lỡ đóng trình duyệt hoặc tắt lệnh `bflow web` trong Terminal thì công việc đang chạy có mất không?
