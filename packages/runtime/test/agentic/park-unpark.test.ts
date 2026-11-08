@@ -327,7 +327,9 @@ describe("Runtime park/unpark", () => {
     await f.runtime.unparkTask({ runId: "run-1", taskId: "implement", source: "director" });
     await Promise.all(tick.mock.results.map(result => result.value));
     await vi.waitFor(async () => { expect((await snapshot(f)).tasks[0]!.attempt).toBe(2); });
-    expect(await park(f)).toMatchObject({ parked: true, episode: 23 });
+    for (const binding of f.panes.bindings.filter(item => item.role === "developer")) binding.metadata = { taskId: "run-1-implement", runId: "run-1" };
+    const second = await park(f);
+    expect(second, JSON.stringify(second)).toMatchObject({ parked: true, episode: 23 });
     const task = (await state(f)).runs[0].tasks[0];
     expect(task.parkHistory).toHaveLength(20);
     expect(task.parkHistory[0].episode).toBe(3);

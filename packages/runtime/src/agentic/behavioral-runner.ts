@@ -342,9 +342,11 @@ const MAX_PREPARE_CACHE_ENTRIES = 4;
 const MAX_PREPARE_CACHE_BYTES = 64 * 1024 * 1024;
 const prepareArtifactCache = new Map<string, ReadonlyMap<string, Buffer>>();
 const latestPrepareByTree = new Map<string, ReadonlyMap<string, Buffer>>();
+/** Prepare command identity that produced each `latestPrepareByTree` entry; a tree-only match must not skip a different prepare command. */
+const latestPrepareIdByTree = new Map<string, string>();
 const compilerOutcomeCache = new Map<string, QualityCommandOutcome>();
 
-async function savePrepareArtifacts(checkout: string, cacheKey: string, treeHash: string): Promise<void> {
+async function savePrepareArtifacts(checkout: string, cacheKey: string, treeHash: string, prepareId: string): Promise<void> {
   try {
     const raw = await verificationGit(checkout, ["ls-files", "--others", "-i", "--exclude-standard", "-z"]);
     const paths = raw.split("\0").filter(p => p.length > 0 && !p.startsWith("/") && !p.split("/").includes("..") && !/(^|\/)node_modules(\/|$)/.test(p));
@@ -366,9 +368,10 @@ async function savePrepareArtifacts(checkout: string, cacheKey: string, treeHash
     prepareArtifactCache.set(cacheKey, files);
     if (latestPrepareByTree.size >= MAX_PREPARE_CACHE_ENTRIES) {
       const oldestTree = latestPrepareByTree.keys().next().value;
-      if (oldestTree !== undefined) latestPrepareByTree.delete(oldestTree);
+      if (oldestTree !== undefined) { latestPrepareByTree.delete(oldestTree); latestPrepareIdByTree.delete(oldestTree); }
     }
     latestPrepareByTree.set(treeHash, files);
+    latestPrepareIdByTree.set(treeHash, prepareId);
   } catch {
     // Best-effort cache; never fail verification if caching fails.
   }
@@ -451,7 +454,9 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
       const prepareProjectDir = adapterPreparation ? (command.adapter?.projectDirectory ?? ".") : ".";
       const prepareCwd = prepareProjectDir !== "." ? join(checkout, prepareProjectDir) : checkout;
       const prepKey = digest([treeHash, testBlobs, command.dependencySource ?? "", preparation.executable, preparation.args, prepareProjectDir]);
-      const cachedPrepare = prepareArtifactCache.get(prepKey) ?? (!adapterPreparation ? latestPrepareByTree.get(treeHash) : undefined);
+      const prepareId = digest([preparation.executable, preparation.args, prepareProjectDir, preparation.timeoutMs]);
+      const cachedPrepare = prepareArtifactCache.get(prepKey) ??
+        (!adapterPreparation && latestPrepareIdByTree.get(treeHash) === prepareId ? latestPrepareByTree.get(treeHash) : undefined);
       if (cachedPrepare) {
         await restorePrepareArtifacts(checkout, cachedPrepare);
         await assertPinnedRevision(checkout, revision);
@@ -465,7 +470,7 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
         const prepareSandbox = await sandboxBehavior(prepareCommand, checkout, preparation.args).catch(error => {
           throw new Error(`Behavioral runner infrastructure failure (prepare): ${String(error)}`, { cause: error });
         });
-        const prepared = await runner.run({ ...prepareSandbox, cwd: prepareCwd, env, timeoutMs: Math.max(preparation.timeoutMs, 180_000), maxOutputBytes });
+        const prepared = await runner.run({ ...prepareSandbox, cwd: prepareCwd, env, timeoutMs: preparation.timeoutMs, maxOutputBytes });
         if (!prepared.ok) throw new Error(`Behavioral runner infrastructure failure (prepare): ${prepared.error.message}`);
         const prepareOutcome = prepared.value as QualityCommandOutcome;
         const failure = prepareOutcome.spawnError ?? (SANDBOX_ERROR.test(prepareOutcome.stderr) ? prepareOutcome.stderr.trim()
@@ -473,7 +478,7 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
           : prepareOutcome.exitCode !== 0 ? `exit ${prepareOutcome.exitCode}` : undefined);
         if (failure !== undefined) throw new Error(`Behavioral runner infrastructure failure (prepare): ${failure}${outputTail(prepareOutcome)}`);
         await assertPinnedRevision(checkout, revision);
-        await savePrepareArtifacts(checkout, prepKey, treeHash);
+        await savePrepareArtifacts(checkout, prepKey, treeHash, prepareId);
       }
     }
     // The official JSON reporter omits runtime errors. A fixed host companion attests its onFinished errors argument.

@@ -195,7 +195,8 @@ describe("guarded host workspace files", () => {
     expect(Buffer.byteLength(content)).toBe(131072);
     await chmod(join(root, "src/math.ts"), 0o755);
     expect(await development.writeWorkspaceFile(binding, { path: "src/math.ts", content, expectedSha256: digest("original") })).toMatchObject({ bytes: 131072, sha256: digest(content), created: false });
-    expect(await development.readWorkspaceFile(binding, { path: "src/math.ts" })).toMatchObject({ content, bytes: 131072, sha256: digest(content) });
+    // Agy replies are paged by design; the full-content round trip is asserted through a non-Agy binding.
+    expect(await development.readWorkspaceFile({ ...binding, agentKind: "claude" }, { path: "src/math.ts" })).toMatchObject({ content, bytes: 131072, sha256: digest(content) });
     await expect(development.writeWorkspaceFile(binding, { path: "src/math.ts", content: content + "!", expectedSha256: digest(content) })).rejects.toThrow();
     expect(await readFile(join(root, "src/math.ts"), "utf8")).toBe(content);
     await development.writeWorkspaceFile(binding, { path: "src/math.ts", content: "", expectedSha256: digest(content) });

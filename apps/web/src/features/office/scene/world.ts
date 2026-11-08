@@ -6,7 +6,7 @@
 //               whoever is not working spends the time here) | Verification (Reviewer, QA, Tester, Security, print corner) above the pool room
 // Every room is laid out mirror-symmetric about its own centre line, and every door sits in the middle of its wall.
 import { findPath } from '../model/path';
-import { DIRECTOR_SEAT } from '../model/seats';
+import { DIRECTOR_SEAT } from '../model/director-seat';
 import type { OfficeFocusZone, OfficeObjectId } from '../model/types';
 
 export const GRID_W = 28;

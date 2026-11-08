@@ -1,6 +1,7 @@
 // Pure seat assignment. No React, three.js, fetch or clock; the result is plain data and inputs are never mutated.
 import { seatCell } from '../scene/world';
 import type { OfficeAgent, OfficeModel, OfficeRole, SeatMap } from './types';
+import { DIRECTOR_SEAT } from './director-seat';
 
 export type SeatableAgent = OfficeAgent & { allocation?: 'active' | 'released' | 'stopped_retained' | undefined };
 
@@ -8,7 +9,7 @@ export type SeatableAgent = OfficeAgent & { allocation?: 'active' | 'released' |
 export const DEVELOPER_SEATS: readonly string[] = Array.from({ length: 20 }, (_, i) => `developer:${i + 1}`);
 
 /** The Director desk (a UI entity, not an agent): the existing executive desk of the control room, i.e. the Conversation base cell. */
-export const DIRECTOR_SEAT = 'control:director';
+export { DIRECTOR_SEAT } from './director-seat';
 /** The fixed seat the Director desk occupies; a stray conversation instance in a Director layout takes a spare seat instead. */
 const DIRECTOR_CELL_SEAT = 'conversation:conversation';
 

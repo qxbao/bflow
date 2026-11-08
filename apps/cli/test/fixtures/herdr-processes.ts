@@ -97,7 +97,10 @@ export class HerdrProcesses implements EnvironmentProcessRunner {
     }
     if (domain === "pane" && action === "list") return wire("pane_list", { panes: session.panes.filter((p) => p.workspace_id === flag("--workspace")) });
     if (domain === "pane" && action === "close") {
+      const closed = session.panes.find(pane => pane.pane_id === target);
       session.panes = session.panes.filter(pane => pane.pane_id !== target);
+      // Herdr closes a tab together with its last pane.
+      if (closed && !session.panes.some(pane => pane.tab_id === closed.tab_id)) session.tabs = session.tabs.filter(tab => tab.tab_id !== closed.tab_id);
       return wire("ok", {});
     }
     if (domain === "pane" && action === "get") {

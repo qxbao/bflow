@@ -1126,7 +1126,8 @@ describe("Suite #1 \\\\ Core", () => {
     );
     (f.runtime as any).journal = {
       exclusive: async (fn: (state: any, save: () => Promise<void>) => Promise<unknown>) =>
-        fn(baseState, async () => {})
+        fn(baseState, async () => {}),
+      project: async (select: (state: any) => unknown) => select(baseState)
     };
 
     try {
