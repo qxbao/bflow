@@ -729,7 +729,12 @@ export class AgenticWorkflowRuntime {
       const id = `phase-notice-${digest([run.runId, task.taskId, phase, item.message.message_id])}`;
       const notice = state.outbound.find(out => out.message.message_id === id);
       if (!notice) return true;
-      return notice.status === "cancelled" && !notice.request && !notice.handle && Boolean(notice.error?.includes("parent lease is expired"));
+      if (notice.status === "cancelled" && !notice.request && !notice.handle && Boolean(notice.error?.includes("parent lease is expired"))) return true;
+      if (notice.status === "sending" || notice.status === "unknown_delivery") return false;
+      // A delivered notice is retained, but an expired writer lease on its parent still needs the wake transaction's lease continuation.
+      const parent = state.outbound.find(out => out.message.run_id === run.runId && out.message.type === "task.assignment" &&
+        out.taskId === task.taskId && out.status === "accepted" && out.handle?.attemptId === payload.implementationAttemptId);
+      return Boolean(parent?.lease && Date.parse(parent.lease.expiresAt) <= Date.parse(this.now()));
     })) return true;
     if (state.runs.some(run =>
       (run.nativeDeliveries ?? []).some(entry => this.durablySettledNative(state, entry.message)) ||
@@ -2081,8 +2086,12 @@ export class AgenticWorkflowRuntime {
             ? await this.resolveDeveloperExecutionBinding(out) : undefined;
           const scoped = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope && (!binding || ownsCancellationPane(out.handle!, binding))
             ? await this.ports.stopDeveloperExecutionScope(out.handle!, binding).catch(() => undefined) : undefined;
+          // A scoped proof is accepted only for this exact execution handle, observed after acceptance; otherwise the stop stays unconfirmed.
+          const scopedProof = scoped ? CancellationStopProofSchema.parse(scoped) : undefined;
+          const scopedProofOwned = scopedProof !== undefined && digest(scopedProof.handle) === digest(out.handle!) &&
+            Date.parse(scopedProof.observedAt) >= Date.parse(out.handle!.acceptedAt);
           // Observe a copy: an unconfirmed park does not overwrite the original assignment's diagnostic/error.
-          const observed = scoped ? { proof: CancellationStopProofSchema.parse(scoped) } : await this.stopObserved({ ...out });
+          const observed: { proof?: typeof scopedProof } = scopedProof ? (scopedProofOwned ? { proof: scopedProof } : {}) : await this.stopObserved({ ...out });
           // Journal validation reconstructs nested proof records on save; always update the currently owned record.
           if (observed.proof) out.parkStop.proof = observed.proof;
           await save();
