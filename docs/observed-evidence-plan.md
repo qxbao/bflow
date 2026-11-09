@@ -447,7 +447,17 @@ Tiêu chí xong: mọi test mới từng đỏ rồi xanh; bộ cũ xanh **nguy�
 
 ### GĐ3: Sửa phạm vi trong run [TT sau GĐ1], khoảng 1–1,5 tuần
 
-- Trạng thái: **BƯỚC 1 (chi tiết hóa) xong ngày 2026-11-09, chờ chủ dự án duyệt. Chưa có mã.** Nhánh `fix/runtime/in-run-scope-amend`, tạo từ `origin/main` `a04ba51f` (đã có GĐ0, GĐ1 và GĐ2). Mức bằng chứng: kế hoạch + đọc mã nguồn.
+- Trạng thái: **đã cài đặt (BƯỚC 2) trên nhánh `fix/runtime/in-run-scope-amend`, chờ review/merge.** Chủ dự án giao toàn quyền và chọn các đề xuất mặc định Q1–Q5. Mức bằng chứng: mã nguồn + test cục bộ; chưa kiểm chứng live.
+
+**Kết quả cài đặt và khác biệt so với T3.1–T3.11 phía dưới (đọc mục này trước):**
+- **Không đổi ownership.** Xác minh T3.5 cho thấy `CoreSession.create` ném `Persisted Core run definition conflicts with proposed workflow definition` khi digest `run.definition` khác bản Core đã lưu, và `ownedPaths` nằm trong `definition.tasks[].metadata`. Sửa ownership cần Core cập nhật definition hoặc lớp ownership hiệu lực ở `host-development.ts`/`host-verification.ts` (thuộc phạm vi GĐ2, ngoài danh sách tệp GĐ3). Vì vậy `narrow_owned_paths` và `expand_owned_paths` **bị bỏ khỏi schema**, không có thẻ duyệt mở rộng (T3.7 không làm). Mở rộng/thu hẹp ownership là thay đổi yêu cầu; Coordinator được hướng dẫn dùng revision yêu cầu mới. Việc này chặt hơn D3 (không có đường mở rộng), nên không vi phạm ràng buộc "mở rộng bắt buộc qua thẻ". Cần quyết định riêng nếu muốn hỗ trợ (xem "Giả định còn mở").
+- Đã làm: T3.1 (`scope-amendment.ts`, schema Zod strict ở Runtime, Q4), T3.2 (bất biến: tiêu chí bằng digest, mapping, TDD, chỉ bỏ đường dẫn Runtime đã ghi nhận thiếu), T3.3 (`amendTaskScope`, admission theo phase failure không resumable hoặc task park `plan_mismatch`; Runtime tự duyệt spec mới với `decidedBy: "coordinator"` + `metadata.autoApproved: "scope-amend"`, Q5), T3.4 (journal v10 `TaskRecord.scopeAmendments`), T3.5 (xác nhận không cần gắn lại digest plan vì chỉ đổi spec/strategy của task; `run.definition` và `executionPlan.fingerprint` không đổi; có test), T3.6 (nối vào cầu dao qua `inputsChanged`; không xóa phase failure), T3.8 (đăng ký tool, `argumentsByName`, view `scopeAmendments`, README), T3.9 (prompt Coordinator và Director), T3.10 (kịch bản 06/11 đầu-cuối: cầu dao ngắt → amend → resume → Red/Green/Refactor → completed, cùng `run-1`, không có run mới; biến thể Director `completed_with_parked`).
+- Q2: `park_task` của Director nhận `kind` tùy chọn (`other` | `plan_mismatch`), sửa lệch của GĐ1. Q3: amend không tự unpark/resume.
+- Phát hiện khi cài đặt: nếu người dùng đã resume một lần trên đầu vào không đổi (action chuyển `queued`, run về `implementing`), `resume_run` lần hai bị từ chối. `amendTaskScope` khôi phục đúng action đó về `pending`/`escalated` (giữ `manualResumeAttempts`) để đường resume bình thường, vốn là nơi duy nhất cấp `retryAuthorized`, đo lại được.
+- Không sửa `apps/cli/src/director-skill.ts` vì skill đã sát giới hạn 8192 byte của test; quy tắc nằm trong `agents/director/system-prompt.md`.
+- `docs/sdlc-policies.md` và `docs/contracts.md` (tệp chung, cần review) chưa sửa; không có contract mới.
+
+**Giả định còn mở:** (1) hỗ trợ đổi ownership trong run cần Core API cập nhật definition hoặc lớp ownership hiệu lực, chưa có; (2) chưa kiểm tra `plan_mismatch` có xuất hiện ở run không do Director tạo; (3) `validateTaskCommands` cho spec mới chạy với ownership cũ, đúng vì ownership không đổi; (4) chưa có test host đầu-cuối với Herdr thật.
 
 Mục tiêu: một run bị cầu dao GĐ1 ngắt (`Plan mismatch`, hoặc task đã bị park `plan_mismatch`) sửa được phạm vi **ngay trong run đó**, đo lại, rồi hoàn tất. Không tạo run mới. Phase failure cũ không bị xóa tay: nó được đo lại vì `inputsChanged` (GĐ1) thấy digest spec/strategy đã đổi.
 
