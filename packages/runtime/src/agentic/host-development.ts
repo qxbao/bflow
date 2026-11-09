@@ -17,6 +17,7 @@ import type { JsonValue, Specification, TestStrategy } from "@bflow/contracts";
 import { darwinWorkspaceFile } from "./workspace-file-darwin.js";
 import { AGY_INLINE_REPLY_BYTES, exceedsAgyInlineReply } from "./agy-assignment-admission.js";
 import { selectRoleProfile } from "./profile-admission.js";
+import { blockerOf, type TaskBlocker } from "./blockers.js";
 
 const execute = promisify(execFile);
 /** Rules every conflict resolver receives in assignment_context and workspace_status. */
@@ -453,6 +454,15 @@ export class HostDevelopment {
     const combined=json({...record(reply),candidateBehavioralEvidence:packet});
     return isAgy && exceedsAgyInlineReply(combined) ? reply : combined;
   }
+  private blockedReply(context: { runId: string; taskId: string; attemptId: string }, reason: string, blocker?: TaskBlocker) {
+    const classification = !blocker ? "infrastructure" : {
+      director: "plan_mismatch", developer: "code", environment: "infrastructure", runtime: "runtime", user: "runtime"
+    }[blocker.fixableBy];
+    return json({ status: "blocked", classification, independentAcceptanceEvidence: false,
+      runId: context.runId, taskId: context.taskId, attemptId: context.attemptId, reason,
+      recovery: blocker?.nextAction ?? "Restore local runner/browser/sandbox prerequisites, then call check_work again on this same assignment. No package installation or network access is performed.",
+      ...(blocker ? { blocker: { code: blocker.code, fixableBy: blocker.fixableBy, details: blocker.details } } : {}) });
+  }
   /** Useful Developer feedback, deliberately not authenticated QA evidence. */
   async check(binding: PaneBinding, input: unknown) {
     const context = await this.identity(binding, input);
@@ -469,7 +479,7 @@ export class HostDevelopment {
     const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => {
       let commands;
       try { commands = this.commandsFor(task, strings(record(definition.metadata).ownedPaths)); }
-      catch (error) { return { blocked: `Host runner readiness is unavailable: ${String(error).slice(0, 800)}` }; }
+      catch (error) { return { blocked: `Host runner readiness is unavailable: ${String(error).slice(0, 800)}`, blocker: blockerOf(error) }; }
       if (!commands.length) return { blocked: "No automated checks are currently ready for this accepted task." };
       let environmentReadiness;
       try {
@@ -481,15 +491,19 @@ export class HostDevelopment {
       return { commands, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
         originalRevision: (task.worktrees[0] ?? task.worktrees.at(-1))!.baseCommitHash, environmentReadiness };
     });
-    if ("blocked" in selected) return json({ status: "blocked", classification: "infrastructure", independentAcceptanceEvidence: false,
-      runId: context.runId, taskId: context.taskId, attemptId: context.attemptId, reason: selected.blocked,
-      recovery: "Restore local runner/browser/sandbox prerequisites, then call check_work again on this same assignment. No package installation or network access is performed." });
+    if ("blocked" in selected) return this.blockedReply(context, selected.blocked, "blocker" in selected ? selected.blocker : undefined);
     const measurements = [];
-    for (const command of selected.commands) {
-      const rtk = await this.rtk?.resolve({ role: "developer", runId: context.runId, taskId: context.taskId,
-        attemptId: context.attemptId, commandId: command.id, revision: selected.head });
-      measurements.push(await measureBehavior(command.checkoutDependencyRoots === undefined ? command : { ...command, originalRevision: selected.originalRevision },
-        context.cwd, selected.head, rtk ? { rtk } : {}));
+    try {
+      for (const command of selected.commands) {
+        const rtk = await this.rtk?.resolve({ role: "developer", runId: context.runId, taskId: context.taskId,
+          attemptId: context.attemptId, commandId: command.id, revision: selected.head });
+        measurements.push(await measureBehavior(command.checkoutDependencyRoots === undefined ? command : { ...command, originalRevision: selected.originalRevision },
+          context.cwd, selected.head, rtk ? { rtk } : {}));
+      }
+    } catch (error) {
+      const blocker = blockerOf(error);
+      if (!blocker) throw error;
+      return this.blockedReply(context, blocker.message, blocker);
     }
     const bytes = Buffer.from(JSON.stringify({ sourceRevision: selected.head, ...(reworkGeneration !== undefined ? { reworkGeneration } : {}), measurements }));
     const artifactId = `check-work-${digest([context.runId, context.taskId, selected.head, reworkGeneration ?? 0, measurements]).slice(0, 36)}`;

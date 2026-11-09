@@ -3,6 +3,7 @@ import { verificationGit } from "./behavioral-runner.js";
 import { bindRunnerProfile, testFilePattern, type BehavioralCommand, type BoundBehavioralCommand, type RunnerDetection, type RunnerProfile } from "./behavioral-runner.js";
 import { PREPARE_TIMEOUT_MS, PROFILE_TIMEOUT_MS, detectTestRunners } from "./runner-detection.js";
 import { detectTypecheck, type TypecheckProfile } from "./typecheck.js";
+import { TaskBlocker } from "./blockers.js";
 
 /**
  * Runtime-detected runner labels. Coordinators reference them in `infrastructure.commands` (command `auto:unit` or
@@ -182,7 +183,7 @@ export function resolveTaskCommands(input: TaskCommandInput): BoundBehavioralCom
       if (!testPaths.length) return false;
       try { bindRunnerProfile(profile, { testNames: unique(mapping.testNames), testPaths }); return true; } catch { return false; }
     });
-    if (matches.length !== 1) throw new Error(`runner_identity_unselectable: criterion ${criterion.id} needs one unambiguous selected runner; split ambiguous criterion mappings`);
+    if (matches.length !== 1) throw new TaskBlocker("runner_identity_unselectable", `runner_identity_unselectable: criterion ${criterion.id} needs one unambiguous selected runner; split ambiguous criterion mappings`);
     const profile = matches[0]!, testPaths = automaticTestPaths(profile, input.specification, input.ownedPaths);
     if (!testPaths.length) continue;
     try { bindRunnerProfile(profile, { testNames: unique(mapping.testNames), testPaths }); }
@@ -194,7 +195,7 @@ export function resolveTaskCommands(input: TaskCommandInput): BoundBehavioralCom
   }));
   const commands = [...owner, ...bound];
   if (!commands.length && input.ownedPaths === undefined && input.specification.acceptanceCriteria.some(item => item.required !== false && item.status !== "waived" && item.verificationMethod !== "manual_review")) {
-    throw new Error("runner_identity_unselectable: no behavioral runner command could be bound for required criteria; verify test files and criterion mappings");
+    throw new TaskBlocker("runner_identity_unselectable", "runner_identity_unselectable: no behavioral runner command could be bound for required criteria; verify test files and criterion mappings");
   }
   const commandBudget = (command: BoundBehavioralCommand) =>
     command.timeoutMs + (command.prepare?.timeoutMs ?? command.adapter?.prepare?.timeoutMs ?? command.adapter?.bind(command, "/tmp/bflow-profile-validation").prepare?.timeoutMs ?? 0) + 90000;
