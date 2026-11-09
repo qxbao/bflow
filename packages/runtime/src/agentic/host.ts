@@ -1940,7 +1940,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           if (configuration.policy?.sdd.minimumLevel === "full" && spec.level !== "full") throw new Error("Project policy requires a full specification");
         } });
         guardWorkflowProposal({ phase: "verification", specification: spec, configuredMethods, check: () =>
-          verification.assertSupported(spec, strategy, normalizedDefinition) });
+          normalizedDefinition !== undefined
+            ? verification.assertWorkflowSupported(spec, strategy, normalizedDefinition, candidate => host.runtime.ports.policies.strategy.resolve(candidate))
+            : verification.assertSupported(spec, strategy, normalizedDefinition) });
       } catch (error) {
         // Outside any journal transaction: Conversation learns why, and the Coordinator receives the same structured reason as its tool error.
         // Coordinator-fixable refusals stay with the Coordinator (structured tool error only); user notices are for the rest.

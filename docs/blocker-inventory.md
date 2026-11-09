@@ -194,7 +194,7 @@ Cột cuối: GIỮ = giữ chặn cứng; FINDING = chuyển thành finding/c�
 | host-verification.ts:502 | `assertSupported` | WorkflowProposalRejected | throw new WorkflowProposalRejected({ code:  | có kênh |
 | host-verification.ts:507 | `assertSupported` | WorkflowProposalRejected | if (deterministic.length) throw new WorkflowProposalRejected({ code:  | có kênh |
 | host-verification.ts:509 | `assertSupported` | Error | Behavioral development requires configured independent behavioral acceptance checks | GIỮ |
-| host-verification.ts:512 | `assertSupported` | Error | Mixed manual and behavioral TDD criteria require separate tasks with complete independent evidence | GIỮ |
+| host-verification.ts:512 | `assertSupported` | WorkflowProposalRejected | `task_evidence_mixed`: tiêu chí `manual_review` trộn với tiêu chí hành vi trong cùng một task; cổng nhận xét theo task (`assertWorkflowSupported`) | có kênh |
 | host-verification.ts:518 | `assertSupported` | Error | No owner-configured behavioral runner for ${criterion.verificationMethod} | THIẾU PHỤC HỒI |
 | host-verification.ts:522 | `assertSupported` | Error | No complete owner-configured test mapping for ${criterion.id} | FINDING |
 | host-verification.ts:524 | `assertSupported` | Error | No owner-configured argv for ${command} | THIẾU PHỤC HỒI |

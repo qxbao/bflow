@@ -76,7 +76,6 @@
       "\"Invalid stored host observation\"); return { cwd: textField(value.cwd), base: textField(va": 1,
       "\"Missing or stale rework observation binding\"); } }": 1,
       "\"Missing rework dossier; historical state cannot supply independent finding evidence\"); } ": 1,
-      "\"Mixed manual and behavioral TDD criteria require separate tasks with complete independent": 1,
       "\"Mutation check does not match owner configuration\"); const cwd = textField(input.sourceWo": 1,
       "\"No active independent policy review capability/assignment\"); const prior = assignment.str": 1,
       "\"No detected TypeScript compiler for the original revision; provision typecheck before pro": 1,

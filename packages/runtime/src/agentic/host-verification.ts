@@ -12,6 +12,7 @@ import {
   type ArtifactReference, type ArtifactStore, type JsonValue, type PaneBinding, type QualityGate, type QualityGateDefinition, type QualityGateResult, type Specification, type TestStrategy, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
+import { projectDagTask } from "./task-projection.js";
 import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, reworkVerificationBinding, parseRequiredFindingVerdicts, requiredReworkFindingIdsForGate, hasReworkAssignment, type ReworkResolutionDossier } from "./rework-causality.js";
 import { unwrap } from "./outbox.js";
 import { BehavioralMeasurementError, behavioralChecks, bindRegressionProfile, verificationGit, measureBehavior, measureRegression, parseBehavioralCommands, testFilePattern,
@@ -509,7 +510,10 @@ export class HostVerification {
       if (spec.affectedPaths.some(path => !/\.(md|txt|rst)$/i.test(path)) && !realAppEvidence) throw new Error("Behavioral development requires configured independent behavioral acceptance checks");
       return;
     }
-    if (active.some(criterion => criterion.verificationMethod === "manual_review")) throw new Error("Mixed manual and behavioral TDD criteria require separate tasks with complete independent evidence");
+    const manual = active.filter(criterion => criterion.verificationMethod === "manual_review");
+    if (manual.length) throw new WorkflowProposalRejected({ code: "task_evidence_mixed",
+      reason: `Manual review criteria (${manual.map(item => item.id).join(", ")}) cannot share a task with behavioral criteria (${automated.map(item => item.id).join(", ")}). Move the manual_review criteria into a separate task that owns documentation files, and keep the behavioral criteria in their own task with independent evidence.`,
+      criteria: [...manual, ...automated].map(item => item.id), options: [] });
     if (this.runners.automatic) {
       this.assertDetectedSupported(spec, automated, strategy, new Set(split?.app.map(binding => binding.criterion.verificationMethod) ?? []));
       return;
@@ -524,6 +528,54 @@ export class HostVerification {
       for (const command of strategy.targetCommands) if (!this.runners.owner.some(config => config.command === command)) throw new Error(`No owner-configured argv for ${command}`);
       if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
     }
+  }
+  /**
+   * Workflow-level admission, evaluated per DAG task. Every required criterion must belong to a task; a task may not mix
+   * manual review with behavioral evidence; each task passes the same checks as its own task review; and the union of the
+   * task policies must cover the methods the whole-specification policy requires.
+   */
+  assertWorkflowSupported(specInput: unknown, strategyInput: unknown, definitionInput: unknown, resolveStrategy: (specification: Specification) => TestStrategy) {
+    const specification = SpecificationSchema.parse(normalizeSpecificationOptionals(specInput));
+    const definition = WorkflowDefinitionSchema.parse(normalizeWorkflowDefinitionOptionals(definitionInput));
+    const wholeStrategy = strategyInput === undefined ? undefined : TestStrategySchema.parse(strategyInput);
+    const isActive = (criterion: Specification["acceptanceCriteria"][number]) => criterion.required !== false && criterion.status !== "waived";
+    const owned = new Set(definition.tasks.flatMap(task => task.acceptanceCriteria.map(id => id.normalize("NFC"))));
+    const orphans = specification.acceptanceCriteria.filter(criterion => isActive(criterion) && !owned.has(criterion.id.normalize("NFC"))).map(criterion => criterion.id);
+    if (orphans.length) throw new WorkflowProposalRejected({ code: "invalid_specification", criteria: orphans,
+      reason: `Required acceptance criteria ${orphans.join(", ")} are not assigned to any task. Assign each required criterion to a task acceptanceCriteria list.`, options: [] });
+    const taskMethods: string[][] = [];
+    for (const task of definition.tasks) {
+      const ids = new Set(task.acceptanceCriteria.map(id => id.normalize("NFC")));
+      const criteria = specification.acceptanceCriteria.filter(criterion => ids.has(criterion.id.normalize("NFC")));
+      const active = criteria.filter(isActive);
+      const manual = active.filter(criterion => criterion.verificationMethod === "manual_review");
+      const behavioral = active.filter(criterion => ["unit_test", "integration_test", "e2e_test"].includes(criterion.verificationMethod));
+      if (manual.length && behavioral.length) throw new WorkflowProposalRejected({ code: "task_evidence_mixed",
+        reason: `Task ${task.id} mixes manual_review criteria (${manual.map(item => item.id).join(", ")}) with behavioral criteria (${behavioral.map(item => item.id).join(", ")}). Move the manual_review criteria into a separate task that owns documentation files.`,
+        criteria: [...manual, ...behavioral].map(item => item.id), options: [] });
+    }
+    for (const task of definition.tasks) {
+      const ownedPaths = strings(record(task.metadata).ownedPaths);
+      const ids = new Set(task.acceptanceCriteria.map(id => id.normalize("NFC")));
+      const criteria = specification.acceptanceCriteria.filter(criterion => ids.has(criterion.id.normalize("NFC")));
+      if (!criteria.length) continue;
+      const projected = projectDagTask(specification, task, criteria, digest(task.id).slice(0, 12), ownedPaths);
+      const strategy = resolveStrategy(projected);
+      this.assertTaskSupported(projected, strategy, ownedPaths);
+      taskMethods.push(strings(record(strategy.metadata?.conditionalTdd).requiredVerificationMethods));
+      const wholeRisk = String(record(specification.metadata?.conditionalTdd).riskClassification ?? "low");
+      const taskRisk = String(record(projected.metadata?.conditionalTdd).riskClassification ?? "low");
+      const order = ["low", "medium", "high", "critical"];
+      const docsOnly = projected.affectedPaths.length > 0 && projected.affectedPaths.every(path => /\.(md|mdx|txt|rst|adoc)$/i.test(path));
+      if (task.metadata?.conditionalTdd !== undefined && !docsOnly && order.indexOf(taskRisk) < order.indexOf(wholeRisk))
+        throw new WorkflowProposalRejected({ code: "task_policy_gap", methods: [],
+          reason: `Task ${task.id} assesses risk ${taskRisk}, lower than the specification risk ${wholeRisk}. A task may raise its assessment but not lower it; keep the specification risk or move the lower-risk files into a documentation-only task.`, options: [] });
+    }
+    const required = strings(record(wholeStrategy?.metadata?.conditionalTdd).requiredVerificationMethods);
+    const covered = new Set(taskMethods.flat());
+    const gap = required.filter(method => !covered.has(method));
+    if (gap.length) throw new WorkflowProposalRejected({ code: "task_policy_gap", methods: gap,
+      reason: `The specification policy requires ${gap.join(", ")} but no task carries that method. Give the task that owns the matching files an assessment or criterion for ${gap.join(", ")}.`, options: [] });
   }
   assertTaskSupported(taskSpecInput: Specification, strategyInput: TestStrategy, ownedPaths: readonly string[]) {
     this.assertSupported(taskSpecInput, strategyInput);

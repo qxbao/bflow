@@ -267,6 +267,13 @@ describe("bounded automatic resume", () => {
     expect((await f.record()).lastWorkflowRejection?.code).toBe("missing_test_mapping");
   });
 
+  it.each(["task_evidence_mixed", "task_policy_gap", "static_analyzer_missing"] as const)("round-trips the %s rejection code through the durable journal after restart", async code => {
+    const f = await fixture();
+    await f.runtime.recordWorkflowRejected("run-1", { code, reason: "Fix the task split exactly as described", options: [] });
+    f.restart();
+    expect((await f.record()).lastWorkflowRejection?.code).toBe(code);
+  });
+
   it.each(["native", "sending", "unknown_delivery", "approval", "decision", "cancelled", "unrelated_blocker"] as const)(
     "does not replace a %s fence with proposal recovery state", async fence => {
       const f = await fixture();
