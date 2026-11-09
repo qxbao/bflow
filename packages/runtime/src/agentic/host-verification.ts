@@ -15,7 +15,7 @@ import { digest, json, record, strings, textField } from "./journal.js";
 import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, reworkVerificationBinding, parseRequiredFindingVerdicts, requiredReworkFindingIdsForGate, hasReworkAssignment, type ReworkResolutionDossier } from "./rework-causality.js";
 import { unwrap } from "./outbox.js";
 import { BehavioralMeasurementError, behavioralChecks, bindRegressionProfile, verificationGit, measureBehavior, measureRegression, parseBehavioralCommands, testFilePattern,
-  type BehavioralCommand, type BoundBehavioralCommand, type RegressionFailure, type RegressionMeasurement, type RtkOutputIntegration, type RunnerProfile } from "./behavioral-runner.js";
+  type BehavioralCommand, type BehavioralMeasurement, type BoundBehavioralCommand, type RegressionFailure, type RegressionMeasurement, type RtkOutputIntegration, type RunnerProfile } from "./behavioral-runner.js";
 import { RtkRequiredToolUnavailable } from "./behavioral-runner.js";
 import { assessMutation, createMutatedRevision, measureMutation, mutationChecks as mutationCheckDefinitions, type MutationCheck } from "./mutation-check.js";
 import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, automaticCheckMethod, isAutomaticStaticCommand, regressionChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
@@ -120,6 +120,20 @@ const includesTestIdentity = (names: readonly string[], target: string): boolean
   const normalizedTarget = target.normalize("NFC");
   return names.some(item => item.normalize("NFC") === normalizedTarget);
 };
+const plannedTestDirectory = (path: string): boolean =>
+  /(^|\/)(?:test|tests|__tests__|spec|Specs|Tests)$/.test(path);
+const profilePathInProject = (profile: import("./behavioral-runner.js").RunnerProfile, path: string): boolean =>
+  profile.adapter?.projectDirectory === undefined || profile.adapter.projectDirectory === "." ||
+  path.startsWith(`${profile.adapter.projectDirectory}/`);
+const inPlannedScope = (path: string, ownedPaths?: readonly string[]): boolean =>
+  (testFilePattern.test(path) || plannedTestDirectory(path)) &&
+  (ownedPaths === undefined || ownedPaths.some(prefix => path === prefix || path.startsWith(`${prefix}/`)));
+function uncoveredCriteria(specification: Specification, strategy: TestStrategy, method: string,
+  testResults: readonly { name: string; passed: boolean }[]): string[] {
+  return specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" &&
+    criterion.verificationMethod === method && !strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.some(name =>
+      testResults.some(result => includesTestIdentity([result.name], name)))).map(criterion => criterion.id);
+}
 
 export class HostVerification {
   private readonly gateReceipts = new Map<string, string>();
@@ -212,11 +226,18 @@ export class HostVerification {
     if (taskId !== undefined && !task) throw new Error("Unknown task");
     const dossier = record(task ? task.spec : run.workflowSpec);
     // Keep the initial trusted task baseline across rework attempts so rejected attempt-1 commits never become the baseline.
-    return { run, specification: SpecificationSchema.parse(dossier.specification), strategy: TestStrategySchema.parse(dossier.strategy), ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: task && Array.isArray(task.worktrees) && task.worktrees.length > 0 ? textField(record(task.worktrees[0]).baseCommitHash) : textField(run.baseRevision) };
+    return { run, specification: SpecificationSchema.parse(dossier.specification), strategy: TestStrategySchema.parse(dossier.strategy), ownedPaths: this.ownedPathsOf(run, taskId),
+      hasTaskWorktree: Boolean(task && Array.isArray(task.worktrees) && task.worktrees.length > 0),
+      originalRevision: task && Array.isArray(task.worktrees) && task.worktrees.length > 0 ? textField(record(task.worktrees[0]).baseCommitHash) : textField(run.baseRevision) };
   }
-  private resolve(input: { specification: Specification; strategy: TestStrategy; ownedPaths?: readonly string[] | undefined; originalRevision?: string }): BoundBehavioralCommand[] {
+  private resolve(input: { specification: Specification; strategy: TestStrategy; ownedPaths?: readonly string[] | undefined; originalRevision?: string;
+    changedPaths?: readonly string[] }): BoundBehavioralCommand[] {
     const rest = this.splitApp(input.specification, input.strategy);
-    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profilesForRevision(input.originalRevision), ...input, specification: rest.specification, strategy: rest.strategy }).map(command => input.originalRevision && command.checkoutDependencyRoots !== undefined ? { ...command, originalRevision: input.originalRevision } : command);
+    const common = { owner: this.runners.owner, profiles: this.runners.profilesForRevision(input.originalRevision), specification: rest.specification,
+      strategy: rest.strategy, ownedPaths: input.ownedPaths };
+    const commands = input.changedPaths === undefined ? resolveTaskCommands(common)
+      : resolveTaskCommands({ ...common, changedPaths: input.changedPaths }).commands;
+    return commands.map(command => input.originalRevision && command.checkoutDependencyRoots !== undefined ? { ...command, originalRevision: input.originalRevision } : command);
   }
   async authenticateGate(result: QualityGateResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateGate(result) : this.gateReceipts.get(result.evaluationId) === digest(result); }
   async authenticateEvidence(result: VerificationResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateEvidence(result) : this.evidenceReceipts.get(result.verificationId) === digest(result); }
@@ -236,6 +257,14 @@ export class HostVerification {
       exitCode = failure.code; output = (failure.stdout ?? "") + (failure.stderr ?? ""); }
     if ((await this.git(cwd, ["rev-parse", "HEAD"])).trim() !== revision || await this.git(cwd, ["status", "--porcelain=v1", "-z"])) throw new Error("Verification revision changed during capture");
     return { cwd, base, revision, command: whitespaceCommand, exitCode, output, diff };
+  }
+  private async observedChangedPaths(cwd: string, base: string, revision: string): Promise<string[]> {
+    await this.capture(cwd, base, revision);
+    const paths = (await this.git(cwd, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=ACMR", "-z", base, revision, "--"]))
+      .split("\0").filter(Boolean);
+    if ((await this.git(cwd, ["rev-parse", "HEAD"])).trim() !== revision || await this.git(cwd, ["status", "--porcelain=v1", "-z"]))
+      throw new Error("Verification revision changed while selecting committed test paths");
+    return paths;
   }
   /**
    * `auto:static` is only a syntax check: `git diff --check`, `node --check` for changed JavaScript and JSON parsing.
@@ -409,11 +438,33 @@ export class HostVerification {
       : [];
     if (!specification || !strategy) return [...owner, ...automaticChecks(this.runners.availableProfiles), ...regression];
     const runnerRest = this.splitApp(specification, strategy);
-    const commands = resolveTaskCommands({ owner: [], profiles, specification: runnerRest.specification, strategy: runnerRest.strategy });
-    const boundChecks = automaticChecks(commands).map(check => {
-      const command = commands.find(item => `host-behavioral-${item.id}` === check.id)!;
-      return { ...check, metadata: { ...check.metadata, boundRunnerIdentities: true },
-        configuration: json({ ...record(check.configuration), testNames: command.testNames }) };
+    const selectedProfiles = profiles.filter(profile => runnerRest.strategy.targetCommands.includes(profile.command) &&
+      runnerRest.specification.acceptanceCriteria.some(criterion => criterion.required !== false && criterion.status !== "waived" &&
+        criterion.verificationMethod === profile.method));
+    // Names stay per runner: Runtime later assigns each criterion to the gate whose names cover its mapping, so merging
+    // names across runners would make every runner claim every criterion. Prefer the plan-time binding by declared paths;
+    // a directory-only plan binds nothing, so a runner then owns only criteria it is the single matching runner for.
+    let pathBound: BoundBehavioralCommand[] = [];
+    try { pathBound = resolveTaskCommands({ owner: [], profiles, specification: runnerRest.specification, strategy: runnerRest.strategy }); }
+    catch { pathBound = []; }
+    const plannedDirectories = runnerRest.specification.affectedPaths.filter(plannedTestDirectory);
+    const claimedBy = (profile: RunnerProfile, criterion: Specification["acceptanceCriteria"][number]): boolean => {
+      const matching = selectedProfiles.filter(item => item.method === criterion.verificationMethod &&
+        plannedDirectories.some(path => profilePathInProject(item, path)));
+      return matching.length === 1 && matching[0] === profile;
+    };
+    const boundChecks = automaticChecks(selectedProfiles).map(check => {
+      const profile = selectedProfiles.find(item => `host-behavioral-${item.id}` === check.id)!;
+      const command = pathBound.find(item => `host-behavioral-${item.id}` === check.id);
+      const claimed = command ? [] : runnerRest.specification.acceptanceCriteria.filter(criterion => criterion.required !== false &&
+        criterion.status !== "waived" && criterion.verificationMethod === profile.method && claimedBy(profile, criterion)).map(criterion => criterion.id);
+      const names = command ? command.testNames : runnerRest.strategy.criterionMappings.filter(mapping => claimed.includes(mapping.criterionId))
+        .flatMap(mapping => mapping.testNames);
+      const criterionIds = command ? runnerRest.specification.acceptanceCriteria.filter(criterion => criterion.required !== false &&
+        criterion.status !== "waived" && criterion.verificationMethod === profile.method && runnerRest.strategy.criterionMappings.some(mapping =>
+          mapping.criterionId === criterion.id && mapping.testNames.length > 0 && mapping.testNames.every(name => command.testNames.includes(name)))).map(criterion => criterion.id) : claimed;
+      return { ...check, metadata: { ...check.metadata, boundRunnerIdentities: true, observedDiffIdentity: true },
+        configuration: json({ ...record(check.configuration), criterionIds, testNames: [...new Set(names)] }) };
     });
     const policyChecks = strategy.targetCommands.filter(isAutomaticStaticCommand).map(command => {
       const check = staticAnalysisCheckDefinition(command), method = automaticCheckMethod(command);
@@ -483,6 +534,19 @@ export class HostVerification {
       !(this.runners.automatic && ["typecheck", "static_analysis"].includes(c.verificationMethod)));
     if (!automated.length) return;
     const profiles = this.runners.automatic ? (this.runners.current?.status === "detected" ? this.runners.current.profiles : []) : [];
+    const onlyPlannedDirectory = this.runners.automatic && taskSpec.affectedPaths.some(path => plannedTestDirectory(path) && inPlannedScope(path, ownedPaths)) &&
+      !taskSpec.affectedPaths.some(path => testFilePattern.test(path) && !plannedTestDirectory(path));
+    if (onlyPlannedDirectory) {
+      for (const criterion of automated) {
+        const mapping = strategy.criterionMappings.find(item => item.criterionId === criterion.id);
+        const matched = profiles.filter(profile => strategy.targetCommands.includes(profile.command) && profile.method === criterion.verificationMethod &&
+          taskSpec.affectedPaths.some(path => plannedTestDirectory(path) && inPlannedScope(path, ownedPaths) &&
+            (profile.adapter?.projectDirectory === undefined || profile.adapter.projectDirectory === "." || path.startsWith(`${profile.adapter.projectDirectory}/`))));
+        if (!mapping?.testNames.length || matched.length !== 1) throw new WorkflowProposalRejected({ code: "missing_test_mapping",
+          reason: `Criterion ${criterion.id} needs mapped test names and one runner within its planned owned test directory`, options: [] });
+      }
+      return;
+    }
     let commands: BoundBehavioralCommand[];
     try {
       commands = resolveTaskCommands({
@@ -577,9 +641,9 @@ export class HostVerification {
     }
     const reject = (code: WorkflowRejectionCode, reason: string): never => { throw new WorkflowProposalRejected({ code, reason, options: [] }); };
     const profiles = detection.profiles, labels = [...profiles.map(profile => profile.command), ...AUTOMATIC_STATIC_COMMANDS].join(", ");
-    const testPaths = spec.affectedPaths.filter(path => testFilePattern.test(path));
+    const testPaths = spec.affectedPaths.filter(path => inPlannedScope(path));
     const ids = automated.map(criterion => criterion.id).join(", ");
-    if (!testPaths.length) reject("missing_test_paths", `Automated acceptance criteria (${ids}) need their committed test files listed in specification.affectedPaths. Add the exact test file paths (for example packages/x/test/feature.test.ts) to affectedPaths and propose again.`);
+    if (!testPaths.length) reject("missing_test_paths", `Automated acceptance criteria (${ids}) need planned test files or directories in specification.affectedPaths. Add a test directory or expected test file path and propose again.`);
     if (strategy) this.assertPolicyMethods(strategy, spec, realAppMethods);
     for (const criterion of automated) {
       const candidates = profiles.filter(item => item.method === criterion.verificationMethod);
@@ -588,12 +652,17 @@ export class HostVerification {
       if (!strategy) continue;
       const mapping = strategy.criterionMappings.find(item => item.criterionId === criterion.id);
       if (!mapping?.testNames.length) reject("missing_test_mapping", `Criterion ${criterion.id} has no criterionMappings entry with test names. Set criterionMappings to [{"criterionId":"${criterion.id}","testNames":[...]}] using the exact names the runner reports (vitest: describe titles plus the test title joined by one space; node --test: the test title).`);
+      if (testPaths.some(plannedTestDirectory)) {
+        const matches = candidates.filter(item => strategy.targetCommands.includes(item.command) && testPaths.some(path =>
+          profilePathInProject(item, path)));
+        if (matches.length !== 1) reject("missing_test_mapping", `Criterion ${criterion.id} needs one unambiguous selected runner for its planned test directory`);
+      }
       if (!strategy.targetCommands.includes(profile!.command)) reject("unknown_test_command", `Criterion ${criterion.id} needs ${profile!.command} among the strategy targetCommands. Add {"method":"${profile!.method}","command":"${profile!.command}","level":"${profile!.levels[0]}"} to the specification infrastructure.commands and propose again.`);
     }
     if (strategy) {
       for (const command of strategy.targetCommands) if (!isAutomaticStaticCommand(command) && !profiles.some(profile => profile.command === command)) reject("unknown_test_command", `targetCommands contains '${command}', which is not a detected runner label (${labels}). Use only detected labels, or remove the command, and propose again.`);
       if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
-      try { resolveTaskCommands({ owner: [], profiles, strategy, specification: spec }); }
+      try { if (!testPaths.some(plannedTestDirectory)) resolveTaskCommands({ owner: [], profiles, strategy, specification: spec }); }
       catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("runner_identity_unselectable")) {
@@ -611,8 +680,11 @@ export class HostVerification {
   private automaticGate(runner: AutomaticRunner): QualityGate {
     return this.gate(`host-behavioral-${runner.id}`, async context => {
       const dossier = await this.dossierFor(context.runId, context.taskId);
-      const bound = this.resolve(dossier).find(command => command.command === runner.command);
-      if (!bound) throw new TaskBlocker("no_test_identities", `${runner.command} has no test identities for this task: check criterion mappings, affectedPaths test files and ownership`);
+      const input = record(QualityGateContextSchema.parse(context).input);
+      const changedPaths = dossier.hasTaskWorktree ? await this.observedChangedPaths(textField(input.sourceWorktreePath), dossier.originalRevision,
+        textField(input.sourceRevision)) : undefined;
+      const bound = this.resolve({ ...dossier, ...(changedPaths ? { changedPaths } : {}) }).find(command => command.command === runner.command);
+      if (!bound && !dossier.hasTaskWorktree) throw new TaskBlocker("no_test_identities", `${runner.command} has no test identities for this task: check criterion mappings, affectedPaths test files and ownership`);
       return bound;
     });
   }
@@ -1093,21 +1165,39 @@ export class HostVerification {
       }
     };
   }
-  private gate(id: string, resolveCommand: (context: { runId: string; taskId?: string | undefined }) => Promise<BoundBehavioralCommand>): QualityGate {
+  private gate(id: string, resolveCommand: (context: { runId: string; taskId?: string | undefined }) => Promise<BoundBehavioralCommand | undefined>): QualityGate {
     return { id, evaluate: async raw => {
       try {
         const context = QualityGateContextSchema.parse(raw), config = record(context.definition.configuration), input = record(context.input);
         if (context.definition.id !== id) throw new Error("Behavioral check does not match owner configuration");
         const command = await resolveCommand(context);
+        if (!command) {
+          const dossier = await this.dossierFor(context.runId, context.taskId);
+          const uncovered = dossier.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" &&
+            criterion.verificationMethod === config.method);
+          const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId,
+            evaluationId: randomUUID(), status: "failed", findings: uncovered.map(criterion => QualityFindingSchema.parse({
+              code: "criterion_without_test", severity: "error", message: `Required criterion ${criterion.id} has no committed test in the task diff`,
+              details: { criterionId: criterion.id, fixableBy: "developer", observedNames: [] } })),
+            producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+            metadata: { testSelection: { sourceRevision: input.sourceRevision, baseRevision: dossier.originalRevision, observedTestPaths: [] } } });
+          await this.trustGate(result);
+          return { ok: true, value: result };
+        }
         if (config.command !== command.command || config.method !== command.method ||
             !Array.isArray(config.testNames) || config.testNames.some(name => !includesTestIdentity(command.testNames, String(name)))) throw new Error("Behavioral check does not match owner configuration");
         const measured = await measureBehavior(command, textField(input.sourceWorktreePath), textField(input.sourceRevision));
+        const dossier = command.checkoutDependencyRoots !== undefined ? await this.dossierFor(context.runId, context.taskId) : undefined;
+        const uncovered = dossier ? uncoveredCriteria(dossier.specification, dossier.strategy, command.method, measured.testResults) : [];
+        const findings = uncovered.map(criterionId => QualityFindingSchema.parse({ code: "criterion_without_test", severity: "error",
+          message: `Required criterion ${criterionId} has no executed mapped test in the host runner report`,
+          details: { criterionId, fixableBy: "developer", observedNames: measured.testNames } }));
         const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId, evaluationId: randomUUID(),
-          status: measured.failed ? "failed" : "passed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+          status: measured.failed || uncovered.length ? "failed" : "passed", findings, producedArtifacts: [], evaluatedAt: new Date().toISOString(),
           metadata: { verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
             sourceRevision: measured.sourceRevision, specFingerprint: input.specFingerprint, scope: input.scope, independentExecution: true, isolated: true,
             executorId: "bflow-host-behavioral-check", role: "quality_gate", method: command.method, command: command.command, exitCode: measured.outcome.exitCode,
-            testNames: measured.testNames, criteria: (config.criterionIds as string[]).map(criterionId => ({ criterionId, passed: measured.failed === 0, summary: `${measured.passed}/${measured.tests} observed tests passed` })),
+            testNames: measured.testNames, criteria: (config.criterionIds as string[]).map(criterionId => ({ criterionId, passed: measured.failed === 0 && !uncovered.includes(criterionId), summary: `${measured.passed}/${measured.tests} observed tests passed` })),
             summary: `${measured.passed}/${measured.tests} observed tests passed at ${measured.sourceRevision}` }, hostExecution: json(measured) } });
         await this.trustGate(result);
         return { ok: true, value: result };
@@ -1158,10 +1248,16 @@ export class HostVerification {
       String(record(task.worktrees[0]).baseCommitHash).trim().length > 0
         ? textField(record(task.worktrees[0]).baseCommitHash)
         : textField(run.baseRevision);
-    const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: taskBase });
+    const changedPaths = this.runners.automatic && Array.isArray(task.worktrees) && task.worktrees.length > 0
+      ? await this.observedChangedPaths(cwd, taskBase, revision) : undefined;
+    const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: taskBase,
+      ...(changedPaths ? { changedPaths } : {}) });
     // Real-app criteria need no runner command; a runner-verified criterion still does.
     const compilerCriteria = this.runners.automatic ? criteria.filter(criterion => ["typecheck", "static_analysis"].includes(criterion.verificationMethod)) : [];
-    if (criteria.some(criterion => criterion.verificationMethod === "manual_review") || (!commands.length && (criteria.length > 0 || appBindings.length === 0))) throw new Error("This strategy requires independent alternative evidence");
+    const runnerCriteria = criteria.filter(criterion => ["unit_test", "integration_test", "e2e_test"].includes(criterion.verificationMethod));
+    if (criteria.some(criterion => criterion.verificationMethod === "manual_review") ||
+        (!commands.length && (criteria.length > 0 || appBindings.length === 0) && !(this.runners.automatic && runnerCriteria.length)))
+      throw new Error("This strategy requires independent alternative evidence");
     const verificationId = `host-behavioral-${digest([runId, taskId, strategy.tddDecision.decisionId, phase, revision, commands, ...(reviewAssignment ? [reviewAssignment.stamp] : [])])}`;
     const replay = this.receipts ? await this.receipts.getEvidence(verificationId) : this.evidenceRecords.get(verificationId);
     if (replay) {
@@ -1189,7 +1285,7 @@ export class HostVerification {
       }
       manual = { captured, criteria: judgments };
     }
-    const measured = [];
+    const measured: BehavioralMeasurement[] = [];
     for (const command of commands) {
       try {
         const rtk = await this.rtk?.resolve({ role: binding.role, runId, taskId,
@@ -1218,6 +1314,20 @@ export class HostVerification {
     }
     const observation = await this.capture(cwd, taskBase, revision);
     if (observation.exitCode !== 0) throw new Error("Committed diff integrity check failed");
+    const uncovered = runnerCriteria.filter(criterion => {
+      const mapping = strategy.criterionMappings.find(item => item.criterionId === criterion.id);
+      return !mapping?.testNames.some(name => measured.some(item => item.method === criterion.verificationMethod &&
+        item.testResults.some(result => includesTestIdentity([result.name], name))));
+    });
+    if (uncovered.length) {
+      const findings = uncovered.map(criterion => ({ code: "criterion_without_test", criterionId: criterion.id, fixableBy: "developer" as const }));
+      const evidence = await this.artifact(runId, taskId, { runId, taskId, attemptId: record(assignment.handle).attemptId,
+        sourceRevision: revision, phase, observation, measurements: measured,
+        criteria: uncovered.map(criterion => ({ criterionId: criterion.id, passed: false,
+          summary: "No mapped test was executed by the independent runner" })), findings, verifiedBy: binding.agentId, accepted: false });
+      throw new HostBehavioralFailure(`Required criteria have no executed mapped test: ${uncovered.map(item => item.id).join(", ")}`,
+        evidence);
+    }
     // Real-app criteria are measured on the same committed revision. A blocked prerequisite throws before any evidence is recorded.
     const appSuites: Extract<AppSuiteOutcome, { status: "completed" }>[] = [];
     for (const suite of this.appSuites.filter(item => appBindings.some(binding => binding.suiteId === item.id))) {

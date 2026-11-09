@@ -9,6 +9,12 @@ const junit = (leaf = "", attrs = 'tests="1" failures="0" errors="0" skipped="0"
 const parse = (xml: string, exit = 0, names = ["tests.Calculator.adds"]) => parseRunnerResult("junit", outcome("build log", exit), names, [xml]);
 
 describe("strict shared JUnit ingress", () => {
+  it("accepts a missing planned name only when automatic selection requested partial coverage", () => {
+    const names = ["tests.Calculator.adds", "tests.Calculator.future"];
+    expect(parseRunnerResult("junit", outcome("build log"), names, [junit()], undefined, [], true).testNames)
+      .toEqual(["tests.Calculator.adds"]);
+    expect(() => parseRunnerResult("junit", outcome("build log"), names, [junit()])).toThrow();
+  });
   it("records exact class-qualified names and assertion Red", () => {
     expect(parse(junit())).toMatchObject({ tests: 1, passed: 1, targetFailure: false });
     expect(parse(junit('<failure type="AssertionError" message="expected 2">assert 1 == 2</failure>', 'tests="1" failures="1" errors="0"'), 1)).toMatchObject({ failed: 1, targetFailure: true });

@@ -366,31 +366,84 @@ Không chạm `task-commands.ts` hay `behavioral-runner.ts`. Nhánh: `fix/runtim
 
 ### GĐ2: Lấy danh tính test từ diff [∥ với GĐ1], khoảng 1–1,5 tuần
 
-1. Viết hàm `observedTestPaths(profile, changedPaths, ownedPaths)` trong `task-commands.ts`. Đầu vào là diff `baseCommit..HEAD` của task. Lọc giữ tệp đúng `testFilePattern`, đúng ngôn ngữ của runner (`matchesRunnerFile`), nằm trong project của runner và trong ownership. Giữ nguyên các quy tắc riêng cho Rust/Cargo.
-2. `resolveTaskCommands` nhận thêm input optional `changedPaths`:
-   - Có `changedPaths`: `testPaths` = tập quan sát được. Tệp khai mà thiếu được trả về `coverageGaps` (chỉ để thông tin), không ném lỗi.
-   - Không có (giai đoạn đề xuất, chưa có commit): giữ hành vi cũ, chỉ dùng để thẩm định kế hoạch.
-3. Truyền diff ở các bên gọi:
-   - `host-development.ts` (`commandsFor` trong `check_work`).
-   - `host-verification.ts` (`automaticGate`, phần đo Red độc lập).
-4. Kiểm độ phủ tiêu chí sau khi chạy test:
-   - Mỗi tiêu chí bắt buộc phải có ít nhất một tên trong `criterionMappings.testNames` xuất hiện trong báo cáo runner (`runner-results.ts`, `vitest-json.ts`, `node-tap.ts`).
-   - Thiếu thì sinh finding `criterion_without_test` (`fixableBy=developer`) và đi theo rework thường.
-5. Lúc đề xuất workflow (`host-verification.ts`, `assertDetectedSupported`, mã `missing_test_paths`):
-   - Kế hoạch vẫn phải có `criterionMappings` và runner hợp lệ.
-   - Đường dẫn test chỉ cần khai thư mục, hoặc khai tệp dự kiến. Không yêu cầu tệp đã tồn tại.
-6. Rà nơi tiêu thụ `testPaths` để giữ nhất quán:
-   - Đóng băng tệp test sau Red: tập bị đóng băng = tập đã đo Red.
-   - `host-test-integrity.ts`, `mutation-check.ts`, `review-candidate-evidence.ts`, `rework-causality.ts`, `app-check-selection.ts`, `execution-binding.ts`.
-7. Test:
-   - Khai 4 tệp, commit 2 tệp đủ tên test: đạt.
-   - Commit thêm một tệp test ngoài kế hoạch nhưng trong ownership: được chạy.
-   - Tiêu chí không có test: ra finding, không ném exception.
-   - Tệp test ngoài ownership: không được chọn.
-   - **Chống gian lận vẫn giữ** (điều kiện để merge): sửa test sau Red bị chặn; test yếu đi bị `host-test-integrity` bắt; test không bao giờ đỏ bị bắt; blob vẫn bị ghim.
-8. Cập nhật docs theo D1: `docs/sdlc-policies.md`, `docs/verification-runners.md`.
+**Bước 1 (plan, chưa code):** các điểm dưới đây đã đối chiếu với mã tại `origin/main` = `e7d55827` ngày 2026-11-09. Bước 2 chỉ bắt đầu sau khi chủ dự án duyệt phần chi tiết này. Tệp triển khai được phép: `packages/runtime/src/agentic/task-commands.ts`, `behavioral-runner.ts`, `host-verification.ts`, `runner-results.ts`, `vitest-json.ts`, `node-tap.ts`, **chỉ hàm `commandsFor`** trong `host-development.ts`, test package-local tương ứng, `docs/sdlc-policies.md`, `docs/verification-runners.md`. Không sửa `runtime.ts`, `journal.ts`, `auto-park.ts` hay package khác. Nhánh: `fix/runtime/observed-test-identity`.
 
-Tệp sở hữu: `task-commands.ts`, `behavioral-runner.ts`, `host-verification.ts`, các tệp runner-results. Trong `host-development.ts`, chỉ sửa `commandsFor` và chỗ truyền `changedPaths`. Nhánh: `fix/runtime/observed-test-identity`.
+#### T2.0 Bản đồ mã và bất biến đã xác minh [TT, trước T2.1]
+
+- Baseline task có sẵn: `host-verification.ts:207-219` lấy `task.worktrees[0].baseCommitHash`, thiếu task worktree thì `run.baseRevision`; `behavioralEvidence` dùng lại thứ tự đó tại `:1156-1161`. `host-development.ts:108-110` đã dùng base của worktree đầu để chọn profile. `host-verification.ts:229-238` đã kiểm HEAD, worktree sạch và lấy diff; `:257` có mẫu `git diff --name-only --diff-filter=ACMR base revision`. Lệnh mới phải dùng `--no-ext-diff --no-textconv --name-only --diff-filter=ACMR -z <base> <head> --`, kiểm lại HEAD trước/sau, không dùng working tree hoặc `A..B` ngược chiều; rename chọn đường dẫn đích. Đối với workflow không có task, dùng `run.baseRevision`.
+- Mọi caller sản phẩm của `resolveTaskCommands`: `host-development.ts:109`; `host-verification.ts:219` (mọi đường đo), `:412` (đóng băng gate plan), `:488` (thẩm định task), `:596` (thẩm định proposal); `host.ts:1384` (preflight). Các caller test nằm trong `auto-runner.test.ts`, `flow06-developer-tdd-loop.test.ts`, `polyglot-measure.test.ts`, `runner-proposal-remediation.test.ts`, `manual-review-policy.test.ts`. `automaticTestPaths` chỉ được gọi trong `task-commands.ts:182,187,194` và các test Rust `flow06-developer-tdd-loop.test.ts:541,557,561`. Giữ overload không có `changedPaths` để `host.ts` và thẩm định đề xuất không vỡ kiểu.
+- `host-development.ts:211-249` kiểm edit theo `configuredTests`, definition blobs và supplemental tests; `:241-243` chặn test đã đo Red. `host-verification.ts:1230-1235` so digest `{commandId,testNames,testBlobs}` giữa Red và Green/Refactor; `:1237-1250` đòi assertion failure Red, bác lỗi không liên quan; `behavioral-runner.ts:395-408` ghim blob `100644/100755` từng test được chọn ở revision đã commit. T2.x không bỏ phép kiểm nào.
+- `host-test-integrity.ts:30-61` tự diff base/candidate và đọc blob; `host-verification.ts:374-380` giữ base đầu tiên. `mutation-check.ts:38-75,88-109` dùng owner command cố định và commit đột biến, không nhận `testPaths` từ resolver. `review-candidate-evidence.ts:18-24,38-81` so `testNames` trong receipt với toàn bộ mapping; `rework-causality.ts` không đọc `testPaths`, giữ receipt/finding theo generation; `app-check-selection.ts:28-74` tách danh tính `app:` trước khi bind runner; `execution-binding.ts:83-125,322-350` chụp snapshot/approval, không lấy `testPaths`. Vì vậy không sửa các tệp này; test hồi quy phải chứng minh các consumer vẫn dùng đúng bằng chứng và thẩm quyền.
+- `runner-results.ts:27-39,315-334`, `vitest-json.ts:87-118`, `node-tap.ts:440-478` đều trả `testNames`/`testResults` từ leaf có cấu trúc, nhưng hiện gọi `resolveExpectedIdentities` (`node-tap.ts:94-175`) với bijection **mọi** tên khai ↔ mọi leaf chạy. Để đạt D1 (mỗi tiêu chí cần *ít nhất một* tên đã chạy), chỉ nhánh automatic được nhận tập con có ánh xạ duy nhất; owner command vẫn bijection cũ. Zero test, skipped mapped test, output thiếu/truncated, lỗi runner và exit mâu thuẫn vẫn bị chặn.
+- Test cũ cần xem lại: `auto-runner.test.ts:90-99` và `runner-proposal-remediation.test.ts:62-67` vẫn phải kỳ vọng `missing_test_paths` khi **không khai cả tệp lẫn thư mục test**; không được nới kỳ vọng này. Các test owner identity trong `behavioral-runner-output.test.ts:248-279`, Red freeze trong `behavioral-runner-phases.test.ts:120-147`, `integration-connected-tdd-cycle.test.ts:21-24`, Rust chọn tệp trong `flow06-developer-tdd-loop.test.ts:483-561`, integrity trong `test-integrity.test.ts:56` vẫn phải xanh không sửa kỳ vọng. Nếu test cũ đỏ vì đổi semantics, dừng và báo, không sửa cho xanh.
+
+**Ranh giới phải quyết định trước Bước 2:** D1 cho phép `affectedPaths` chỉ khai thư mục test. Nhưng `host.ts:1384-1388` gọi `resolveTaskCommands` **không truyền diff** và chặn khi `commands.length === 0`; `host-verification.ts:412-424` cũng hiện chỉ đăng ký gate từ command đã bind lúc lập plan. Nếu thư mục chưa chứa test literal, việc đổi riêng `assertDetectedSupported` không đủ để run đi tới Red. Không tạo `BoundBehavioralCommand` rỗng/giả cho preflight. Cần chủ dự án cho phép chỉnh đúng preflight tại `host.ts:1384-1388` (và chỉ chỗ đó), hoặc thu hẹp tiêu chí GĐ2 thành "ít nhất một tệp dự kiến"; nếu giữ cả hai điều kiện hiện tại, Bước 2 dừng ở ranh giới này. Thêm nữa, `commandsFor` hiện đồng bộ (`host-development.ts:108`) nhưng diff Git qua `this.git` là bất đồng bộ (`:112-116`); hai caller ở `:218` và `:481` phải thêm `await`, nằm ngoài chính hàm mà phạm vi mới nhất cho phép. Không dùng lệnh Git đồng bộ riêng để lách giới hạn; cần cho phép đổi đúng hai caller. `review-candidate-evidence.ts:41-42` còn đòi **mọi** mapped name; với D1 tập con, nhánh no-change dispute sẽ không tái dùng receipt nếu không được phép sửa consumer này. Ghi rõ hạn chế đó, không lách qua việc đổi strategy đã duyệt.
+
+#### T2.1 Chọn đường dẫn từ diff commit [TT, test trước]
+
+Tệp: `task-commands.ts:117-159,161-207`, test mới `packages/runtime/test/agentic/observed-test-paths.test.ts`; đối chiếu Rust với `flow06-developer-tdd-loop.test.ts:483-561`.
+
+1. Viết test cho `observedTestPaths(profile, changedPaths, ownedPaths, specification)`: chọn hai tệp trong bốn tệp dự kiến; chọn thêm tệp test mới **không khai** nhưng trong ownership; loại tệp ngoài ownership/project/ngôn ngữ; loại path không khớp `testFilePattern`, path xấu và bản sao; Rust integration `tests/*.rs` ưu tiên đúng method, dedicated unit `src/tests.rs` được chọn, `src/lib.rs` không bị đông cứng khi đã có dedicated unit test. Chạy test để thấy **đỏ**.
+2. Tách bộ lọc path của `automaticTestPaths` để cả chế độ đề xuất và quan sát dùng cùng `testFilePattern`, `matchesRunnerFile`, project boundary và ownership literal. Chế độ quan sát lấy **chỉ** `changedPaths` đã xác thực từ Git, giữ thứ tự ổn định, không giao nhau với `affectedPaths`. Giữ luật Rust/Cargo hiện có tại `:132-157`, dùng tập quan sát thay cho `specification.affectedPaths` khi có diff.
+3. Thêm overload không phá caller cũ:
+
+```ts
+resolveTaskCommands(input: TaskCommandInput & { changedPaths: readonly string[] }):
+  { commands: BoundBehavioralCommand[]; coverageGaps: string[] };
+resolveTaskCommands(input: TaskCommandInput): BoundBehavioralCommand[];
+```
+
+`coverageGaps` chỉ liệt kê tệp literal khai trong `affectedPaths` nhưng không thấy trong diff; thư mục dự kiến và test ngoài khai báo không tạo lỗi. Owner command luôn giữ `testPaths`/`testNames` owner cấu hình. Test riêng kiểm overload cũ và owner không đổi; chạy xanh rồi commit `test(runtime): cover observed test path selection` + `fix(runtime): select committed task test paths` theo đúng Red/Green thực tế.
+
+Mẫu lọc (luật Rust/Cargo chạy sau bộ lọc này):
+
+```ts
+const observed = unique(changedPaths).filter(path =>
+  testFilePattern.test(path) && matchesRunnerFile(profile, path) &&
+  inProject(profile, path) && inOwnedScope(ownedPaths, path));
+```
+
+#### T2.2 Nối diff đã ghim vào Developer và Verification [sau T2.1]
+
+Tệp: `host-development.ts:108-110` (chỉ `commandsFor`; đổi caller `:218,481` phụ thuộc duyệt ranh giới T2.0), `host-verification.ts:207-220,229-238,383-389,610-617,1136-1165,1452-1463`, `behavioral-runner.ts:395-408`; test mới `packages/runtime/test/agentic/observed-test-measurement.test.ts`.
+
+1. Viết test tạo repo thật: `base`, Red commit chỉ hai trong bốn test khai, gọi `check_work`/Red và kiểm argv/testBlobs chỉ có hai blob tại HEAD; test thêm tệp ngoài kế hoạch nhưng trong ownership thì được đo; ngoài ownership không vào argv. Test bắt dirty HEAD, HEAD đổi giữa hai lần đọc diff, diff không hợp lệ và test được chọn nhưng không phải blob regular đều phải chặn. Chạy đỏ.
+2. Thêm helper trong `host-verification.ts` lấy diff `base..revision` với `-z`, kiểm HEAD sạch và bất biến trước/sau; truyền `changedPaths` qua `resolve` cho `automaticGate`, `behavioralEvidence`, static-analysis exception và QA đo lại khi có task. Không truyền diff cho owner command. Sau khi ranh giới T2.0 được duyệt, đổi `commandsFor` thành async, nhận `cwd/head` từ hai caller hiện có, lấy base của `task.worktrees[0]`, kiểm HEAD sạch, đọc diff bằng `this.git`, truyền `changedPaths`. Sau Red, dùng receipt Red đã được policy ghi để giữ **chính tập test đã đo Red** trong command; test mới không thuộc tập đó vẫn là supplemental theo `authorizeTddPaths:236-245`. `behavioral-runner.ts:400-408` giữ kiểm blob và xác nhận **đúng path** của entry `ls-tree`, tránh nhận prefix path. Chạy test xanh.
+
+   Mẫu lệnh/kiểm: `const before = await git(cwd, ["rev-parse", "HEAD"]); const paths = (await git(cwd, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=ACMR", "-z", base, revision, "--"])).split("\0").filter(Boolean); const after = await git(cwd, ["rev-parse", "HEAD"]);` yêu cầu `before.trim() === revision === after.trim()` và status sạch. Test chọn path sau khi xác nhận HEAD, rồi `measureBehavior` vẫn kiểm lại revision và blob.
+3. Test Red→Green/Refactor kiểm sửa blob Red hoặc thêm test vào **tập đo mapped** sau Red bị từ chối bởi phép so `host-verification.ts:1233-1234`; test supplemental mới sau Red vẫn được phép viết như `flow06-developer-tdd-loop.test.ts:425-428` và không tham gia command mapped. Kiểm edit hook chặn chính các tệp trong receipt Red. Giữ gate `host-test-integrity`; commit sau khi test xanh.
+
+#### T2.3 Đối chiếu tên test với tiêu chí [sau T2.2]
+
+Tệp: `node-tap.ts:94-175,440-478`, `vitest-json.ts:87-118`, `runner-results.ts:27-39,315-334`, `behavioral-runner.ts:598-620`, `host-verification.ts:295-320,1096-1118,1192-1300`; test mới `packages/runtime/test/agentic/observed-criterion-coverage.test.ts` và bổ sung ca vào `node-tap-selection.test.ts`, `runner-results.test.ts`.
+
+1. Viết test parser: automatic có hai tên dự kiến nhưng chỉ một leaf đúng tên → trả một tên/leaf quan sát; leaf trùng/không khai, selected skipped, zero leaf, exit sai vẫn bị bác; owner vẫn bijection chính xác. Mỗi format TAP, Vitest, JUnit (qua `runner-results`) có ca thiếu một tên và ca sai giao thức. Chạy đỏ.
+2. Thêm chế độ `allowMissingExpected` chỉ cho automatic (`checkoutDependencyRoots !== undefined`), dựa trên matcher của `node-tap.ts` để ánh xạ **mỗi leaf đã chạy** vào đúng một tên dự kiến, loại trùng/nhập nhằng; không dùng exit code hoặc tên agent khai làm bằng chứng. Giữ `testResults.name` là tên chuẩn đã khớp. Không sửa chính sách owner; chạy xanh.
+
+   Mẫu quyết định độ phủ: `const covered = mapping.testNames.some(name => measurement.testResults.some(test => includesTestIdentity([test.name], name)));` áp dụng trên measurement đã parse và được host thực thi; không dùng `command.testNames` vì đó chỉ là lời khai. Kiểm mọi tiêu chí required, chưa waived.
+3. Viết test hai tiêu chí: C1 có ít nhất một tên trong `testResults`, C2 không có tên nào. C2 phải tạo finding `criterion_without_test` với `fixableBy=developer`, artifact của đo độc lập và đi đường `HostBehavioralFailure`/rework hiện có; không tạo receipt `passed` cho C2. Trường hợp không chọn được command hoặc runner báo zero leaf cũng phải đi đường finding có chẩn đoán, không biến thành passing evidence hay lỗi chọn runner không có hướng sửa. Không ném `Error` chọn runner cho thiếu tên. Ca bốn tệp khai, hai tệp commit và đủ tên cho **mọi** tiêu chí phải đạt. Với Red, chỉ assertion failure của tên đã khớp criterion mới được chấp nhận; Red không bao giờ đỏ vẫn bị bắt. Chạy đỏ → sửa `host-verification.ts` → chạy xanh. `coverageGaps` không phải finding và không tự động giảm yêu cầu criterion.
+4. Chạy lại test `review-candidate-evidence`/rework hiện có như compatibility check: receipt tập con vẫn phải có tiêu chí thật trong `evaluatedCriteria`; nếu no-change dispute cần tái dùng receipt tập con, **dừng và xin mở phạm vi** cho `review-candidate-evidence.ts`, không sửa tệp ngoài GĐ2. Commit rõ scope.
+
+#### T2.4 Proposal, docs và hồi quy chống gian lận [sau T2.1; docs có thể làm ∥ với T2.2/T2.3]
+
+Tệp: `host-verification.ts:478-540,571-604,403-424`, `task-commands.ts:210-212`, `docs/sdlc-policies.md:86,344`, `docs/verification-runners.md:10-35,120-142`; test `auto-runner.test.ts`, `runner-proposal-remediation.test.ts`, `behavioral-runner-phases.test.ts`, `integration-connected-tdd-cycle.test.ts`, `host-test-integrity.test.ts`, `test-integrity.test.ts`.
+
+1. Viết test proposal có thư mục test dự kiến hoặc tên tệp chưa tồn tại: runner hợp lệ + mapping bắt buộc → qua thẩm định; thiếu cả phạm vi test vẫn `missing_test_paths`; mapping thiếu/runner mơ hồ vẫn bị bác. Chạy đỏ. **Chưa coi thư mục-only đã chạy được** cho tới khi ranh giới `host.ts` ở T2.0 được giải quyết.
+2. Sửa `assertDetectedSupported` và `assertTaskSupported` để chỉ xác nhận phạm vi dự kiến và khả năng runner tại proposal, không kiểm blob tồn tại. Đăng ký automatic gate theo runner được chọn ngay cả khi chưa có tệp được bind; lúc đo mới dùng diff thật. Cập nhật `TEST_PATH_RULE` và hai docs theo D1: `affectedPaths` dự kiến, test identity từ diff ∩ ownership ∩ runner project/ngôn ngữ, tên tiêu chí cần ít nhất một leaf chạy, owner override không đổi, Red blob/freeze và test-integrity vẫn bắt buộc.
+3. Chạy bộ chống gian lận: edit test sau Red bị chặn; sửa/yếu đi test hoặc config có finding `host-test-integrity`; Red không có assertion failure bị chặn; test path không phải blob regular bị chặn; lease/fence và approval không đổi. Không nới test cũ để qua. Commit docs + code sau Red/Green.
+
+#### T2.5 Kiểm tra và bàn giao [TT, cuối GĐ2, sau khi giải quyết ranh giới T2.0]
+
+```bash
+pnpm run build
+pnpm exec vitest run packages/runtime/test/agentic/observed-test-paths.test.ts packages/runtime/test/agentic/observed-test-measurement.test.ts packages/runtime/test/agentic/observed-criterion-coverage.test.ts packages/runtime/test/agentic/auto-runner.test.ts packages/runtime/test/agentic/runner-proposal-remediation.test.ts packages/runtime/test/agentic/behavioral-runner-phases.test.ts packages/runtime/test/agentic/integration-connected-tdd-cycle.test.ts packages/runtime/test/agentic/host-test-integrity.test.ts packages/runtime/test/agentic/test-integrity.test.ts packages/runtime/test/agentic/flow06-developer-tdd-loop.test.ts packages/runtime/test/agentic/node-tap-selection.test.ts packages/runtime/test/agentic/runner-results.test.ts
+pnpm check:deps
+pnpm typecheck
+pnpm test:affected --base origin/main --run
+git diff --check
+```
+
+Tiêu chí xong: mọi test mới từng đỏ rồi xanh; bộ cũ xanh **nguyên kỳ vọng**; 4 tệp khai/2 tệp commit/đủ tên đạt; test thêm trong ownership được chọn; test ngoài ownership không chọn; thiếu tiêu chí thành finding; test đã chọn ghim blob và Red/Green giữ nguyên identity; chống gian lận, lease/fence, approval không suy yếu. Báo cáo HEAD đã test, selection `test:affected`, exit code và pass/fail/skip của từng lệnh. Mức bằng chứng chỉ là mã nguồn + test cục bộ, không gọi là live.
 
 ### GĐ3: Sửa phạm vi trong run [TT sau GĐ1], khoảng 1–1,5 tuần
 

@@ -120,14 +120,18 @@ function matchesRunnerFile(profile: RunnerProfile, path: string): boolean {
     python: /\.py$/, pytest: /\.py$/, go: /_test\.go$/, rust: /\.rs$/, cargo: /\.rs$/, maven: /\.(?:java|kt)$/, gradle: /\.(?:java|kt)$/, dotnet: /\.(?:cs|fs|vb)$/, rspec: /\.rb$/, minitest: /\.rb$/, phpunit: /\.php$/, ctest: /\.(?:c|cc|cpp|cxx|cmake)$/ };
   return patterns[adapter]?.test(path) ?? true;
 }
-export function automaticTestPaths(profile: RunnerProfile, specification: Specification, ownedPaths?: readonly string[]) {
+function safeTestPath(path: string): boolean {
+  return !path.startsWith("/") && !path.includes("\\") && !path.includes(":") &&
+    path.split("/").every(part => part.length > 0 && part !== "." && part !== "..");
+}
+function selectTestPaths(profile: RunnerProfile, candidatePaths: readonly string[], specification: Specification, ownedPaths?: readonly string[]) {
   const project = profile.adapter?.projectDirectory;
   const inProjectScope = (path: string) =>
-    testFilePattern.test(path) && matchesRunnerFile(profile, path) &&
+    safeTestPath(path) && testFilePattern.test(path) && matchesRunnerFile(profile, path) &&
     (project === undefined || project === "." || path.startsWith(project + "/"));
   const inOwnedScope = (path: string) =>
     ownedPaths === undefined || ownedPaths.some(prefix => path === prefix || path.startsWith(`${prefix}/`));
-  const scoped = unique(specification.affectedPaths.filter(path => inProjectScope(path) && inOwnedScope(path)));
+  const scoped = unique(candidatePaths.filter(path => inProjectScope(path) && inOwnedScope(path)));
   const adapter = profile.adapter?.adapterId;
   if ((adapter === "rust" || adapter === "cargo") && scoped.length > 0) {
     const relativeToProject = (path: string) =>
@@ -135,7 +139,7 @@ export function automaticTestPaths(profile: RunnerProfile, specification: Specif
     const isCargoIntegrationTest = (path: string) => /^tests\/[^/]+\.rs$/.test(relativeToProject(path));
     const isDedicatedRustUnitTest = (path: string) =>
       !isCargoIntegrationTest(path) && /(?:^|\/)tests\.rs$|_tests?\.rs$|(?:^|\/)tests\/.*\.rs$/.test(relativeToProject(path));
-    const allProjectPaths = unique(specification.affectedPaths.filter(inProjectScope));
+    const allProjectPaths = unique(candidatePaths.filter(inProjectScope));
     const specHasIntegrationCriterion = specification.acceptanceCriteria.some(
       item => item.required !== false && item.status !== "waived" && item.verificationMethod === "integration_test"
     );
@@ -157,17 +161,33 @@ export function automaticTestPaths(profile: RunnerProfile, specification: Specif
   }
   return scoped;
 }
+export function automaticTestPaths(profile: RunnerProfile, specification: Specification, ownedPaths?: readonly string[]) {
+  return selectTestPaths(profile, specification.affectedPaths, specification, ownedPaths);
+}
+export function observedTestPaths(profile: RunnerProfile, changedPaths: readonly string[], ownedPaths: readonly string[] | undefined, specification: Specification) {
+  return selectTestPaths(profile, changedPaths, specification, ownedPaths);
+}
 
 export interface TaskCommandInput {
   owner: readonly BehavioralCommand[]; profiles: readonly RunnerProfile[];
   strategy: TestStrategy; specification: Specification; ownedPaths?: readonly string[] | undefined;
+}
+export interface ObservedTaskCommandSelection {
+  commands: BoundBehavioralCommand[];
+  coverageGaps: string[];
 }
 
 /**
  * The single resolver for Verification and Development: owner commands selected by the strategy, plus every selected
  * automatic profile that has test identities. Profiles without identities are omitted; assertSupported reports why.
  */
-export function resolveTaskCommands(input: TaskCommandInput): BoundBehavioralCommand[] {
+export function resolveTaskCommands(input: TaskCommandInput & { changedPaths: readonly string[] }): ObservedTaskCommandSelection;
+export function resolveTaskCommands(input: TaskCommandInput): BoundBehavioralCommand[];
+export function resolveTaskCommands(input: TaskCommandInput & { changedPaths?: readonly string[] }): BoundBehavioralCommand[] | ObservedTaskCommandSelection {
+  const observed = input.changedPaths !== undefined;
+  const selectedPaths = (profile: RunnerProfile, ownedPaths?: readonly string[]) =>
+    observed ? observedTestPaths(profile, input.changedPaths!, ownedPaths, input.specification)
+      : automaticTestPaths(profile, input.specification, ownedPaths);
   const targets = new Set(input.strategy.targetCommands);
   const owner: BoundBehavioralCommand[] = input.owner.filter(command => targets.has(command.command));
   const selected = input.profiles.filter(profile => targets.has(profile.command));
@@ -179,22 +199,23 @@ export function resolveTaskCommands(input: TaskCommandInput): BoundBehavioralCom
     }
     const matches = selected.filter(profile => {
       if (profile.method !== criterion.verificationMethod) return false;
-      const testPaths = automaticTestPaths(profile, input.specification);
+      const testPaths = selectedPaths(profile, observed ? input.ownedPaths : undefined);
       if (!testPaths.length) return false;
       try { bindRunnerProfile(profile, { testNames: unique(mapping.testNames), testPaths }); return true; } catch { return false; }
     });
+    if (matches.length === 0 && observed) continue;
     if (matches.length !== 1) throw new TaskBlocker("runner_identity_unselectable", `runner_identity_unselectable: criterion ${criterion.id} needs one unambiguous selected runner; split ambiguous criterion mappings`);
-    const profile = matches[0]!, testPaths = automaticTestPaths(profile, input.specification, input.ownedPaths);
+    const profile = matches[0]!, testPaths = selectedPaths(profile, input.ownedPaths);
     if (!testPaths.length) continue;
     try { bindRunnerProfile(profile, { testNames: unique(mapping.testNames), testPaths }); }
     catch (error) { if (input.ownedPaths !== undefined) continue; throw error; }
     namesByProfile.set(profile, unique([...(namesByProfile.get(profile) ?? []), ...mapping.testNames]));
   }
   const bound = [...namesByProfile].map(([profile, testNames]) => bindRunnerProfile(profile, {
-    testNames, testPaths: automaticTestPaths(profile, input.specification, input.ownedPaths)
+    testNames, testPaths: selectedPaths(profile, input.ownedPaths)
   }));
   const commands = [...owner, ...bound];
-  if (!commands.length && input.ownedPaths === undefined && input.specification.acceptanceCriteria.some(item => item.required !== false && item.status !== "waived" && item.verificationMethod !== "manual_review")) {
+  if (!commands.length && !observed && input.ownedPaths === undefined && input.specification.acceptanceCriteria.some(item => item.required !== false && item.status !== "waived" && item.verificationMethod !== "manual_review")) {
     throw new TaskBlocker("runner_identity_unselectable", "runner_identity_unselectable: no behavioral runner command could be bound for required criteria; verify test files and criterion mappings");
   }
   const commandBudget = (command: BoundBehavioralCommand) =>
@@ -204,7 +225,10 @@ export function resolveTaskCommands(input: TaskCommandInput): BoundBehavioralCom
     : commands.some(command => commandBudget(command) > 540000);
   if (bound.length && budgetExceeded)
     throw new Error("runner_identity_unselectable: split selected runners into tasks within the independent execution deadline");
-  return commands;
+  if (!observed) return commands;
+  const changed = new Set(input.changedPaths);
+  return { commands, coverageGaps: unique(input.specification.affectedPaths.filter(path =>
+    safeTestPath(path) && testFilePattern.test(path) && !changed.has(path))) };
 }
 
 const TEST_PATH_RULE = "Test files must be listed in specification.affectedPaths, use the selected adapter language and its project directory, be committed, and belong to the task ownership. Split tasks whose criterion identities cannot be selected unambiguously.";

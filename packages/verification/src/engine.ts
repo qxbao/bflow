@@ -168,9 +168,40 @@ export class VerificationEngine {
       const canonical = target.trim().normalize("NFC");
       return obs.testNames.some(candidate => candidate.trim().normalize("NFC") === canonical);
     };
-    if (new Set(ids).size !== ids.length || digest([...ids].sort()) !== digest([...config.criterionIds].sort()) ||
-        config.testNames.some(name => !hasObservedTestName(name))) throw new Error("Missing or conflicting criterion/test evidence");
-    if (config.kind === "deterministic" && (obs.command !== config.command || obs.exitCode === undefined))
+    const observedDiffIdentity = plan.checks.find(check => check.id === gate.gateId)?.metadata?.observedDiffIdentity === true &&
+      gate.gateId.startsWith("host-behavioral-") && config.kind === "deterministic" && config.role === "quality_gate";
+    if (new Set(ids).size !== ids.length || digest([...ids].sort()) !== digest([...config.criterionIds].sort()))
+      throw new Error("Missing or conflicting criterion/test evidence");
+    if (observedDiffIdentity) {
+      const report = z.object({ sourceRevision: z.string(), testNames: z.array(z.string()),
+        testResults: z.array(z.object({ name: z.string(), passed: z.boolean() }).passthrough()),
+        testBlobs: z.record(z.string()) }).passthrough().parse(gate.metadata?.hostExecution);
+      const canonical = (values: readonly string[]) => values.map(value => value.trim().normalize("NFC")).sort();
+      if (report.sourceRevision !== obs.sourceRevision ||
+          digest(canonical(report.testNames)) !== digest(canonical(obs.testNames)) ||
+          digest(canonical(report.testResults.map(result => result.name))) !== digest(canonical(obs.testNames)) ||
+          new Set(canonical(obs.testNames)).size !== obs.testNames.length ||
+          obs.testNames.some(name => !config.testNames.some(expected => expected.trim().normalize("NFC") === name.trim().normalize("NFC"))))
+        throw new Error("Observed task-diff test identities contradict the host runner report");
+      for (const criterionId of config.criterionIds) {
+        const criterion = plan.specification.acceptanceCriteria.find(item => item.id === criterionId);
+        if (!criterion || criterion.required === false || criterion.status === "waived") continue;
+        const mapping = plan.strategy.criterionMappings.find(item => item.criterionId === criterionId);
+        if (mapping?.testNames.some(hasObservedTestName)) continue;
+        const failedCriterion = obs.criteria.find(item => item.criterionId === criterionId)?.passed === false;
+        const finding = gate.findings.some(item => item.code === "criterion_without_test" &&
+          item.details !== null && typeof item.details === "object" && !Array.isArray(item.details) && item.details.criterionId === criterionId);
+        if (gate.status !== "failed" || !failedCriterion || !finding)
+          throw new Error("Required criterion lacks an executed mapped test and a host coverage finding");
+      }
+    } else if (config.testNames.some(name => !hasObservedTestName(name))) {
+      throw new Error("Missing or conflicting criterion/test evidence");
+    }
+    // A host-observed gate that selected no test never launched a runner: it is a failed gate with
+    // a coverage finding (checked above), never a pass, so it may omit the command and exit code.
+    const noRunnerLaunched = observedDiffIdentity && gate.status === "failed" && obs.command === undefined &&
+      obs.exitCode === undefined && obs.testNames.length === 0;
+    if (config.kind === "deterministic" && !noRunnerLaunched && (obs.command !== config.command || obs.exitCode === undefined))
       throw new Error("Automated evidence requires exact command and integer exit code");
     if (config.measuresCoverage && plan.strategy.coverageThresholdPercent !== undefined && obs.coveragePercent === undefined)
       throw new Error("Aggregate coverage measurement is missing");
