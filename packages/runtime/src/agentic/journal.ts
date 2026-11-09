@@ -26,6 +26,7 @@ import { ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./r
 import { CancellationStopProofSchema, NamespaceExitProofSchema, ownsCancelledAllocation, type CancellationStopProof, type NamespaceExitProof } from "./cancellation-stop.js";
 import { PrototypeRecordSchema, type PrototypeRecord } from "./prototype-review.js";
 import { TaskFailoverSchema, type TaskFailover } from "./provider-failover-state.js";
+import { BLOCKERS, type BlockerCode, type BlockerFixableBy } from "./blockers.js";
 
 export function json(value: unknown): JsonValue {
   const serialized = JSON.stringify(value);
@@ -310,7 +311,9 @@ export interface Outbound {
     contextDigest: string; replacementMessageId: string; disposition: "replaced_without_verdict_claim" };
   phaseFailureEvidence?: ArtifactReference;
   /** `retryAuthorized`: an explicit resume allows re-measuring the same revision after a non-repairable (infrastructure) failure. */
-  phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean; leaseRecoveryRequired?: boolean };
+  phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean; leaseRecoveryRequired?: boolean;
+    blocker?: { code: BlockerCode; fixableBy: BlockerFixableBy; fingerprint: string; specDigest: string; strategyDigest: string;
+      sourceRevision: string; details?: Record<string, JsonValue> } };
   /** A control notice borrows its task assignment's lease; it never owns capacity. */
   parentAssignmentId?: string;
   /** Private outbox position captured before this Coordinator turn is physically dispatched. */
@@ -323,7 +326,7 @@ export interface Outbound {
   leaseRelease?: ReleaseAgentLeaseRequest;
 }
 export interface JournalState {
-  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8; repository: string; runs: RunRecord[]; outbound: Outbound[];
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9; repository: string; runs: RunRecord[]; outbound: Outbound[];
   /** "rejected" is terminal and carries Runtime's reason: the message was refused by admission and must never be retried. */
   inbox: { message: RoleMessage; status: "received" | "applied" | "rejected"; reason?: string }[];
   pendingCore: AppendEventsRequest[];
@@ -344,10 +347,15 @@ export function requiresDirectorJournal(state: Pick<JournalState, "runs" | "outb
     state.runs.some(run => run.delegation.requestedBy === "director" || run.delegationHistory?.some(item => item.requestedBy === "director") ||
       run.status === "completed_with_parked" || run.tasks.some(task => task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined || task.parkedVerifications !== undefined));
 }
+export function requiresBlockerJournal(state: Pick<JournalState, "runs" | "outbound">): boolean {
+  return state.outbound.some(out => out.phaseFailure?.blocker !== undefined) ||
+    state.runs.some(run => run.tasks.some(task => task.parked?.kind === "plan_mismatch" ||
+      task.parkHistory?.some(entry => entry.kind === "plan_mismatch")));
+}
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 export function parseAgenticJournalState(input: unknown, repository: string, baseline?: JournalState): JournalState {
   const root = record(input);
-  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7, 8].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
+  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
   const state = root as unknown as JournalState;
   const trustedBaseline = baseline && baseline.repository === repository && baseline.version <= state.version ? baseline : undefined;
@@ -495,6 +503,8 @@ export function parseAgenticJournalState(input: unknown, repository: string, bas
         if (task.parkedVerifications !== undefined) task.parkedVerifications = z.array(ParkedVerificationSchema).max(20).parse(task.parkedVerifications);
         if (task.parked !== undefined) task.parked = TaskParkSchema.parse(task.parked);
         if (task.parkHistory !== undefined) task.parkHistory = z.array(TaskParkSchema).max(20).parse(task.parkHistory);
+        if (state.version < 9 && (task.parked?.kind === "plan_mismatch" || task.parkHistory?.some(entry => entry.kind === "plan_mismatch")))
+          throw new Error("Task parking plan mismatch requires private journal v9");
         if (task.parkSettlement !== undefined) task.parkSettlement = TaskParkSettlementSchema.parse(task.parkSettlement);
         if (task.parked && task.parkSettlement) throw new Error("Task park and allocation settlement cannot coexist");
         const pendingPark = task.parked ?? task.parkSettlement?.park;
@@ -641,6 +651,19 @@ export function parseAgenticJournalState(input: unknown, repository: string, bas
           out.phaseFailure.leaseRecoveryRequired !== undefined && (out.phaseFailure.leaseRecoveryRequired !== true || !out.phaseFailure.repairable || !out.phaseFailure.applied) ||
           out.message.type !== "verification.requested" || record(out.message.payload).kind !== "conditional_evidence")
         throw new Error("Invalid private policy failure outcome");
+      if (out.phaseFailure.blocker !== undefined) {
+        const blocker = out.phaseFailure.blocker;
+        const details = blocker?.details;
+        const paths = details?.paths;
+        if (state.version < 9 || !blocker || !Object.hasOwn(BLOCKERS, blocker.code) ||
+            blocker.fixableBy !== BLOCKERS[blocker.code]?.fixableBy ||
+            ![blocker.fingerprint, blocker.specDigest, blocker.strategyDigest].every(value => /^[a-f0-9]{64}$/.test(value)) ||
+            !/^[a-f0-9]{40}$/.test(blocker.sourceRevision) ||
+            details !== undefined && (!z.record(z.string(), JsonValueSchema).safeParse(details).success ||
+              JSON.stringify(details).length > 52_000 || paths !== undefined &&
+              (!Array.isArray(paths) || paths.length > 50 || paths.some(path => typeof path !== "string" || path.length > 1024))))
+          throw new Error("Invalid private policy failure outcome");
+      }
     }
     if (out.leaseHistory) {
       if (!Array.isArray(out.leaseHistory) || !out.leaseHistory.length || out.leaseHistory.length > 3 ||
@@ -861,6 +884,7 @@ export class AgenticJournal {
         if (state.version < 7 && (state.runs.some(run => run.roleProfiles?.length || Object.keys(run.roleProfileDefaults ?? {}).length) ||
             state.outbound.some(out => out.roleProfile || out.executorLineage || out.profileAllocationTaskId))) state.version = 7;
         if (state.version < 8 && requiresDirectorJournal(state)) state.version = 8;
+        if (state.version < 9 && requiresBlockerJournal(state)) state.version = 9;
         // Equality covers invalid values that JSON.stringify would omit. Re-read under flock before acknowledging unchanged durable bytes.
         if (baseline && durableBytes && journalStatesEqual(state, baseline)) {
           try { if ((await readRegularJournalFile(statePath)).equals(durableBytes)) return; }

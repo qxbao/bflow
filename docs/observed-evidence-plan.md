@@ -322,12 +322,16 @@ Nối vào kịch bản (f) của `no-progress-breaker.test.ts`: Director mode v
 - Xem `host-director-mode.ts` và `mcp-output-views.ts`, nơi đã nhắc `resume_run` và `retry_verification`. Nếu có đoạn hướng dẫn trả cho model thì cập nhật cùng nội dung.
 - Lưu ý quy tắc skill: đường dẫn trong backtick trở thành ref bắt buộc, nên viết tên tệp bằng văn xuôi. Nếu sửa nội dung skill thì phải bump version.
 - **Còn phải xác minh khi làm:** sau khi run đã `escalated`, Director có giao rework cho Developer trên cùng task được không, và qua tool nào. Nếu không có đường hợp lệ thì phương án (1) bị loại; hướng dẫn chỉ còn `park_task` cho tới khi GĐ3 xong.
+
+  **Kết quả xác minh GĐ1 (2026-11-09, mã nguồn):** Chưa có đường hợp lệ. `AgenticWorkflowRuntime.proposeWorkflow` từ chối đề xuất khác khi `run.definition` đã tồn tại (`Workflow already proposed; requirement changes need a newly approved delegation`); `authorizeImplementation` chỉ xác nhận điều kiện TDD, không tạo assignment; `requestSpecialist` là nhánh specialist, còn `retryVerification` là workflow verification. `resumeBlockedRun` có thể đánh thức Coordinator nhưng không cấp `retryAuthorized` cho blocker không resumable khi spec/strategy giữ nguyên, nên Developer không có đường đo lại phase trên cùng task. Vì vậy prompt GĐ1 chỉ hướng dẫn `park_task` với kind `plan_mismatch` và báo người dùng; giao rework/sửa scope chờ GĐ3.
 - Test: chạy lại test hành vi của `agents/**`; tìm bằng `command grep -rln "system-prompt.md" packages/*/test agents`.
 
 #### T1.8 Telemetry [∥ với T1.7, sau T1.5]
 
 - `packages/runtime/src/telemetry/report.ts` (`readWorkflowTelemetry`, được `runtime.ts:1721` dùng trong `telemetryReport`): thêm `blockers: { code, fixableBy, count, lastAt, resumeSkipped }[]`, tổng hợp từ `phaseFailure.blocker` trong outbound của run.
 - Cập nhật formatter của `bflow status --telemetry` trong `apps/cli/src/formatters.ts`.
+
+  **Vị trí xác minh GĐ1:** `formatters.ts` chỉ import `formatTelemetryReport`; hàm dựng chuỗi thực tế nằm trong `apps/cli/src/telemetry.ts`, nên phần hiển thị blocker được sửa tại đó.
 - Test: test có sẵn của telemetry report thêm ca có blocker.
 
 #### T1.9 Kiểm tra và bàn giao [TT, cuối GĐ1]

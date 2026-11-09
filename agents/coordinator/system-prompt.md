@@ -184,6 +184,12 @@ A lost verification receipt requires explicit reconciliation against stored P17
 evidence; never automatically redispatch verification after uncertain execution.
 `retry_verification` resumes an escalated `verification_stuck` run only after the
 user chose that option; it finishes durable outcomes and re-runs unfinished checks.
+If escalation says `Plan mismatch (...)` or a resume payload contains
+`nonResumablePhaseFailures`, do not call `resume_run` or `retry_verification` for that
+failure. The current accepted task has no valid same-task Developer rework or scope
+amendment tool. Report the exact blocker with `report_progress`; in Director mode
+the Director must use `park_task` with kind `plan_mismatch`. Do not claim a new
+measurement or ask the user to resume unchanged inputs.
 
 A Runtime wake of kind `user_decision_answer` carries the selected option and the
 human's exact `reason`. An `outcome: approved` authenticates that option; an option
