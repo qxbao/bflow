@@ -5588,7 +5588,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         // An infrastructure failure (runner, sandbox, build) is not a code defect: once fixed, an explicit resume re-measures the
         // same revision. An exhausted repair limit stays a human stop, so the bound is never widened.
         if (repeatedBlocker || !repairable || task.result) run.pendingAction = { actionId: `next-${digest([run.runId, request.message.message_id])}`, kind: "resume_coordinator",
-          owner: "coordinator", reason: (run.error + (blocker ? `\nNext: ${BLOCKERS[blocker.code].nextAction} Resume sẽ không đo lại cùng revision.` : "")).slice(0, 2000),
+          owner: "coordinator", reason: (run.error + (blocker ? `\nNext: ${BLOCKERS[blocker.code].nextAction}${isResumable(blocker) ? "" : " Resume sẽ không đo lại cùng revision."}` : "")).slice(0, 2000),
           sourceMessageId: request.message.message_id, createdAt: this.now(), state: "pending",
           previousStatus, ...inheritedManualResume(run), recovery: "manual" };
         this.progress(state, outbox, run, blocker && !isResumable(blocker)

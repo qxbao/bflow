@@ -32,12 +32,6 @@
       "\"Unsupported behavioral reporter\"); const args = strings(profile.args, \"argv\", false); con": 2,
       "\"Unsupported behavioral reporter\"); const args = strings(value.args, \"argv\", false), testN": 1,
       "\"Verification needs a clean worktree at the pinned revision\"); } export { parseNodeTap } f": 1,
-      "`Behavioral command invocation failed: ${result.error.message}`); outcome = result.value a": 1,
-      "`Behavioral runner infrastructure failure (prepare): ${failure}${outputTail(prepareOutcome": 1,
-      "`Behavioral runner infrastructure failure (prepare): ${prepared.error.message}`); const pr": 1,
-      "`Behavioral runner infrastructure failure (prepare): ${String(error)}`, { cause: error });": 1,
-      "`Behavioral runner infrastructure failure (sandbox preparation): ${String(error)}`, { caus": 1,
-      "`Behavioral sandbox failed: ${outcome.stderr.trim()}`); if (options.rtk && rtkContext) { c": 1,
       "`Invalid behavioral ${name}`); return [...value]; }": 1,
       "`Typecheck infrastructure failure: ${outcome.spawnError ?? outcome.signal ?? (outcome.time": 1
     },

@@ -65,6 +65,13 @@ describe("execution-path throw guard", () => {
     ).toEqual([]);
   });
 
+  it.each(GUARDED_FILES)("%s allowlist has no stale entries once a guard is converted", (file) => {
+    const allowed = loadAllowlist().files[file] ?? {};
+    const actual = count(throwKeys(readFileSync(join(agenticDir, file), "utf8")));
+    const stale = Object.entries(allowed).filter(([key, n]) => (actual[key] ?? 0) < n).map(([key]) => key);
+    expect(stale, `Converted throws must be removed from fixtures/execution-throw-allowlist.json (${file}).`).toEqual([]);
+  });
+
   it("keeps the allowlist limited to guarded files and non-empty keys", () => {
     const allowlist = loadAllowlist();
     expect(allowlist.version).toBe(1);

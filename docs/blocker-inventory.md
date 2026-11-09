@@ -85,6 +85,15 @@ Gần như toàn bộ nằm trong `this.transaction` của Runtime và là guard
 
 Số lượng: `behavioral-runner.ts` 43, `task-commands.ts` 1, `host-verification.ts` 108 (tổng 152). Một số `throw new Error(` nằm trên cùng dòng với `throw` khác nên số dòng và số chỗ có thể chênh khi tệp được định dạng lại.
 
+## 8. Trạng thái GĐ4c
+
+Mức bằng chứng: mã nguồn và test cục bộ, không phải kiểm chứng live.
+
+| # | Trạng thái | Ghi chú (đã xác minh trong mã) |
+|---|---|---|
+| 3 | **Đã chuyển** (nhánh `fix/runtime/guard-runner-infra`) | 6 chỗ trong `runMeasurementCommand` (prepare ×3, sandbox preparation, command invocation, sandbox `bwrap:`/`sandbox-exec:`) giờ là `TaskBlocker("runner_infrastructure")`, `fixableBy: environment`, resumable. Thông điệp không đổi, vì `measureRegression` dựa vào chuỗi `deadline exceeded` (`regression_budget_exceeded`). `details` = `{stage, commandId, revision}`, không chứa tail đầu ra, để lặp trên cùng đầu vào vẫn bị cầu dao GĐ1 nhận ra. Đường phục hồi: `check_work` trả `classification: "infrastructure"` kèm `nextAction`, thay vì lỗi tool thô. Phase failure cho run `escalated` (`Policy measurement blocked`). Resume tay vẫn đo lại cùng revision (`retryAuthorized`, `nonResumablePhaseFailures` rỗng). `runtime.ts` chỉ nối câu "Resume sẽ không đo lại cùng revision." khi blocker không resumable. Các guard bảo mật bên trong `sandboxBehavior` (credential, đường dẫn unsafe, special file) vẫn từ chối mỗi lần đo: đổi lớp lỗi không nới chặn. Guard "clean worktree"/prepare sửa tệp tracked vẫn là `Error` thô (chống gian lận, GIỮ). |
+| 5 | **Không chuyển: danh mục xếp sai nhóm** | `bindRunnerProfile` (`behavioral-runner.ts:115`) chỉ nhận đường dẫn đã qua `selectTestPaths`, mà hàm này đã lọc `testFilePattern` (`task-commands.ts:136`). Các lần gọi ở `task-commands.ts:210,216` còn nuốt lỗi bằng `try/catch`, nên Runtime không chạm được guard này. Đây là bất biến lập trình nội bộ, không phải lệch kế hoạch. `declared_test_missing`/`runner_identity_unselectable` sẽ cho `nextAction` sai. `bindRegressionProfile` (`:147`) đã có kênh có cấu trúc: `handleInfraFailure` đổi lỗi thành finding `regression_infrastructure` (`host-verification.ts:1037`). Đề xuất: xếp lại #5 thành GIỮ (bất biến nội bộ). |
+
 ## Phụ lục A. Từng chỗ `throw` trên đường thực thi
 
 Cột cuối: GIỮ = giữ chặn cứng; FINDING = chuyển thành finding/cảnh báo; THIẾU PHỤC HỒI; có kênh = đã dùng lớp lỗi có cấu trúc. Phân loại bán tự động (mục 1).
