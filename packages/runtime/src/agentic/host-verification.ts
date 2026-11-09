@@ -18,7 +18,7 @@ import { BehavioralMeasurementError, behavioralChecks, bindRegressionProfile, ve
   type BehavioralCommand, type BehavioralMeasurement, type BoundBehavioralCommand, type RegressionFailure, type RegressionMeasurement, type RtkOutputIntegration, type RunnerProfile } from "./behavioral-runner.js";
 import { RtkRequiredToolUnavailable } from "./behavioral-runner.js";
 import { assessMutation, createMutatedRevision, measureMutation, mutationChecks as mutationCheckDefinitions, type MutationCheck } from "./mutation-check.js";
-import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, automaticCheckMethod, isAutomaticStaticCommand, regressionChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
+import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, plannedTestDirectory, plannedTestDirectoryOnly, automaticChecks, automaticCheckMethod, isAutomaticStaticCommand, regressionChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
 import { captureTypecheck, captureTypeScriptSyntax } from "./typecheck.js";
 import { PolicyReviewPages, PolicyReviewPageInputSchema } from "./policy-review-pages.js";
 import { compactPolicyReviewDossier } from "./mcp-output-views.js";
@@ -120,11 +120,7 @@ const includesTestIdentity = (names: readonly string[], target: string): boolean
   const normalizedTarget = target.normalize("NFC");
   return names.some(item => item.normalize("NFC") === normalizedTarget);
 };
-export const plannedTestDirectory = (path: string): boolean =>
-  /(^|\/)(?:test|tests|__tests__|spec|Specs|Tests)$/.test(path);
-/** True when the plan names test directories but no literal test file, so identities can only come from the committed diff. */
-export const plannedTestDirectoryOnly = (affectedPaths: readonly string[]): boolean =>
-  affectedPaths.some(plannedTestDirectory) && !affectedPaths.some(path => testFilePattern.test(path) && !plannedTestDirectory(path));
+export { plannedTestDirectory, plannedTestDirectoryOnly };
 const profilePathInProject = (profile: import("./behavioral-runner.js").RunnerProfile, path: string): boolean =>
   profile.adapter?.projectDirectory === undefined || profile.adapter.projectDirectory === "." ||
   path.startsWith(`${profile.adapter.projectDirectory}/`);
@@ -1251,8 +1247,13 @@ export class HostVerification {
       String(record(task.worktrees[0]).baseCommitHash).trim().length > 0
         ? textField(record(task.worktrees[0]).baseCommitHash)
         : textField(run.baseRevision);
-    const changedPaths = this.runners.automatic && Array.isArray(task.worktrees) && task.worktrees.length > 0
+    const diffPaths = this.runners.automatic && Array.isArray(task.worktrees) && task.worktrees.length > 0
       ? await this.observedChangedPaths(cwd, taskBase, revision) : undefined;
+    // After Red the measured set is frozen: a supplemental test added later must not change the Green/Refactor identities.
+    // A changed, removed or reverted Red file still changes the blobs or names, so the Red comparison below rejects it.
+    const redPaths = new Set(prior.length === 0 ? [] : (Array.isArray(prior[0]!.metadata?.hostBehavioralMeasurements)
+      ? (prior[0]!.metadata!.hostBehavioralMeasurements as unknown[]) : []).flatMap(value => Object.keys(record(record(value).testBlobs))));
+    const changedPaths = diffPaths && redPaths.size > 0 ? diffPaths.filter(path => redPaths.has(path)) : diffPaths;
     const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: taskBase,
       ...(changedPaths ? { changedPaths } : {}) });
     // Real-app criteria need no runner command; a runner-verified criterion still does.

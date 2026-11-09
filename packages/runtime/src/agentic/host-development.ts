@@ -7,10 +7,10 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { AgentExecutionHandleSchema, ArtifactReferenceSchema, ArtifactWriteOptionsSchema, PaneBindingSchema, RoleMessageSchema, type PaneBinding } from "@bflow/contracts";
-import { measureBehavior, parseBehavioralCommands, type BehavioralCommand, type RtkOutputIntegration } from "./behavioral-runner.js";
+import { measureBehavior, parseBehavioralCommands, testFilePattern, type BehavioralCommand, type BoundBehavioralCommand, type RtkOutputIntegration } from "./behavioral-runner.js";
 import { runtimeGitDirectoryFlags } from "./patch-paths.js";
 import { runnerDefinitionPattern } from "./runner-provenance.js";
-import { TestRunnerSource, resolveTaskCommands } from "./task-commands.js";
+import { TestRunnerSource, plannedTestDirectory, resolveTaskCommands } from "./task-commands.js";
 import { isConflictResolverAssignment, type AgenticWorkflowRuntime } from "./runtime.js";
 import { digest, json, record, strings, textField } from "./journal.js";
 import type { JsonValue, Specification, TestStrategy } from "@bflow/contracts";
@@ -104,10 +104,19 @@ export class HostDevelopment {
     private readonly candidateEvidence?: (context:{runId:string;taskId:string;attemptId:string;sourceRevision:string})=>Promise<JsonValue>) {
     this.runners = runners instanceof TestRunnerSource ? runners : new TestRunnerSource(parseBehavioralCommands(runners));
   }
-  /** The same resolver as Verification: owner commands and automatic profiles, bound to this task's identities and ownership. */
-  private commandsFor(task: { spec: { specification: Specification; strategy: TestStrategy }; worktrees?: { baseCommitHash: string }[] }, ownedPaths: string[]) {
-    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profilesForRevision(task.worktrees?.[0]?.baseCommitHash), strategy: task.spec.strategy,
-      specification: task.spec.specification, ownedPaths });
+  /**
+   * The same resolver as Verification: owner commands and automatic profiles, bound to this task's identities and ownership.
+   * With an automatic runner and a worktree (`cwd`), the tests are the ones the committed task diff changed, not the planned list.
+   */
+  private async commandsFor(task: { spec: { specification: Specification; strategy: TestStrategy }; worktrees?: { baseCommitHash: string }[] }, ownedPaths: string[],
+    cwd?: string): Promise<BoundBehavioralCommand[]> {
+    const input = { owner: this.runners.owner, profiles: this.runners.profilesForRevision(task.worktrees?.[0]?.baseCommitHash), strategy: task.spec.strategy,
+      specification: task.spec.specification, ownedPaths };
+    if (!this.runners.automatic || cwd === undefined || !task.worktrees?.length) return resolveTaskCommands(input);
+    const head = (await this.git(cwd, ["rev-parse", "HEAD"])).trim();
+    const changedPaths = (await this.git(cwd, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=ACMR", "-z", task.worktrees[0]!.baseCommitHash, head, "--"]))
+      .split("\0").filter(Boolean);
+    return resolveTaskCommands({ ...input, changedPaths }).commands;
   }
   private async git(cwd: string, args: string[]) {
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_") && !key.startsWith("NODE_")));
@@ -215,11 +224,21 @@ export class HostDevelopment {
       this.runtime().ports.policies.assertReadyToImplement(strategy);
       return;
     }
-    const commands = this.commandsFor(task, ownedPaths);
-    const configuredTests = commands.flatMap(command => command.testPaths);
-    const definitionPaths = commands.flatMap(command => Object.keys(command.definitionBlobs ?? {}))
+    // Planned paths still protect declared test files; the committed diff adds the tests actually written. A plan that names
+    // only test directories cannot bind planned paths, so it falls back to the directory and the diff.
+    let declared: BoundBehavioralCommand[] = [];
+    try { declared = await this.commandsFor(task, ownedPaths); }
+    catch (error) { if (!this.runners.automatic || !task.spec.specification.affectedPaths.some(plannedTestDirectory)) throw error; }
+    const observed = this.runners.automatic ? await this.commandsFor(task, ownedPaths, cwd) : [];
+    const commands = [...declared, ...observed];
+    const configuredTests = [...new Set(commands.flatMap(command => command.testPaths))];
+    const profileDefinitions = this.runners.automatic
+      ? this.runners.profilesForRevision(task.worktrees?.[0]?.baseCommitHash).filter(profile => strategy.targetCommands.includes(profile.command))
+        .flatMap(profile => Object.keys(profile.definitionBlobs ?? {})) : [];
+    const definitionPaths = [...new Set([...commands.flatMap(command => Object.keys(command.definitionBlobs ?? {})), ...profileDefinitions])]
       .filter(candidate => !configuredTests.includes(candidate));
-    const hasAutomaticRunner = commands.some(command => command.checkoutDependencyRoots !== undefined);
+    const hasAutomaticRunner = this.runners.automatic || commands.some(command => command.checkoutDependencyRoots !== undefined);
+    const plannedDirectories = this.runners.automatic ? task.spec.specification.affectedPaths.filter(plannedTestDirectory) : [];
     const evidence = strategy.metadata?.tddEvidence;
     const hasRedEvidence = Array.isArray(evidence) && evidence.length > 0;
     const firstReceipt = hasRedEvidence && evidence[0] !== null && typeof evidence[0] === "object" && !Array.isArray(evidence[0])
@@ -231,7 +250,9 @@ export class HostDevelopment {
     const redSourceRevision = typeof redDetails?.sourceRevision === "string" ? redDetails.sourceRevision : undefined;
     let requiresImplementationAuth = false;
     for (const path of paths) {
-      const isConfiguredTest = await this.isTestPath(cwd, path, configuredTests);
+      // Before Red a test file under a planned test directory is the Red test the Developer is expected to write.
+      const isConfiguredTest = await this.isTestPath(cwd, path, configuredTests) ||
+        (!hasRedEvidence && testFilePattern.test(path) && plannedDirectories.some(directory => path.startsWith(`${directory}/`)));
       const isDefinition = await this.isTestPath(cwd, path, definitionPaths);
       const isSupplementalTest = !isConfiguredTest && !isDefinition &&
         SUPPLEMENTAL_RED_TEST_OR_FIXTURE_PATTERN.test(path) &&
@@ -478,9 +499,11 @@ export class HostDevelopment {
     await this.runners.refresh();
     const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => {
       let commands;
-      try { commands = this.commandsFor(task, strings(record(definition.metadata).ownedPaths)); }
+      try { commands = await this.commandsFor(task, strings(record(definition.metadata).ownedPaths), context.cwd); }
       catch (error) { return { blocked: `Host runner readiness is unavailable: ${String(error).slice(0, 800)}`, blocker: blockerOf(error) }; }
-      if (!commands.length) return { blocked: "No automated checks are currently ready for this accepted task." };
+      if (!commands.length) return { blocked: this.runners.automatic && task.worktrees?.length
+        ? "No test file is committed in the task diff yet. Commit the test files that cover the accepted criteria, then call check_work again."
+        : "No automated checks are currently ready for this accepted task." };
       let environmentReadiness;
       try {
         environmentReadiness = await this.runtime().ports.preflightTaskEnvironment?.({ runId: context.runId, taskId: context.taskId,

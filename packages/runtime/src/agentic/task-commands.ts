@@ -111,6 +111,12 @@ export class TestRunnerSource {
   }
 }
 
+export const plannedTestDirectory = (path: string): boolean =>
+  /(^|\/)(?:test|tests|__tests__|spec|Specs|Tests)$/.test(path);
+/** True when the plan names test directories but no literal test file, so identities can only come from the committed diff. */
+export const plannedTestDirectoryOnly = (affectedPaths: readonly string[]): boolean =>
+  affectedPaths.some(plannedTestDirectory) && !affectedPaths.some(path => testFilePattern.test(path) && !plannedTestDirectory(path));
+
 export function unique<T>(values: readonly T[]): T[] { return [...new Set(values)]; }
 
 /** Test identities for one automatic profile: mapped names of the active criteria with its method, and the test files in scope. */
@@ -262,4 +268,15 @@ export function describeTestRunners(source: TestRunnerSource) {
       : detection?.status === "unsupported" ? { status: "unsupported", reason: detection.reason, remediation: detection.remediation }
       : { status: "unsupported", reason: "Test runner detection has not run yet", remediation: [] }
   };
+}
+
+/**
+ * Plan-time readiness of the behavioral runner. A plan that names only test directories has no committed test identities
+ * yet (they come from the task diff), so it needs a selected runner profile, never an invented bound command. Any other
+ * plan is bound through the normal resolver and keeps its blockers.
+ */
+export function plannedRunnerCommands(input: TaskCommandInput): readonly unknown[] {
+  if (input.owner.length === 0 && plannedTestDirectoryOnly(input.specification.affectedPaths))
+    return input.profiles.filter(profile => input.strategy.targetCommands.includes(profile.command));
+  return resolveTaskCommands(input);
 }

@@ -352,6 +352,25 @@ describe("task review candidate behavioral evidence",()=>{
     const completed=await f.restore().completeReview(f.binding,{reviewId:view.reviewId,criteria:[{criterionId:"ac-1",passed:true,summary:"Independently assessed exact receipt and diff"}],summary:"Independent verdict remains required"});
     expect(await f.host.authenticateGate(completed.result)).toBe(true);
   });
+  it("presents a receipt whose executed names are a subset when every criterion has an executed mapped test",async()=>{
+    const f=await candidateEvidenceFixture();
+    const mapped=["criterion","future behavior"];
+    f.strategy.criterionMappings=[{criterionId:"ac-1",testNames:mapped}];
+    (f.context.definition.configuration as any).testNames=mapped;
+    const view=await f.host.inspectReview(f.binding,{messageId:"request"}) as any;
+    expect(view.candidateBehavioralEvidence.status).toBe("available");
+    expect(view.candidateBehavioralEvidence.entries).toHaveLength(1);
+    expect(view.candidateBehavioralEvidence.entries[0].testNames).toEqual(["criterion"]);
+  });
+  it("does not present a receipt when none of a criterion's mapped names was executed",async()=>{
+    const f=await candidateEvidenceFixture();
+    const mapped=["never ran","also never ran"];
+    f.strategy.criterionMappings=[{criterionId:"ac-1",testNames:mapped}];
+    (f.context.definition.configuration as any).testNames=mapped;
+    const view=await f.host.inspectReview(f.binding,{messageId:"request"}) as any;
+    expect(view.candidateBehavioralEvidence.entries).toEqual([]);
+    expect(view.candidateBehavioralEvidence.status).toBe("missing");
+  });
   it.each(["foreign-task","stale-revision","self-check","missing-artifact","unauthenticated","wrong-spec"])("does not present %s as trusted candidate measurement",async mode=>{
     const f=await candidateEvidenceFixture();const result=structuredClone(f.result);
     if(mode==="foreign-task")result.taskId="foreign";
