@@ -431,7 +431,7 @@ Nhánh: `fix/runtime/blocker-audit`.
 
 | GĐ | Tệp chính | Nhánh |
 |---|---|---|
-| 0 | `blockers.ts` (mới), `behavioral-runner.ts:401`, `task-commands.ts` (chỗ ném lỗi), `host-development.ts` (tách `blockedReply`) | `fix/runtime/blocker-taxonomy` |
+| 0 | `blockers.ts` (mới), `behavioral-runner.ts:401`, `task-commands.ts` (chỗ ném lỗi), `host-verification.ts` (chỉ T0.4: `automaticGate` và `catch` của `gate()`), `host-development.ts` (tách `blockedReply`) | `fix/runtime/blocker-taxonomy` |
 | 1 | `contracts/src/director.ts`, `no-progress.ts` (mới), `runtime.ts` (phase failure, resume), `auto-park.ts`, `journal.ts` (v9), `host.ts:2494`, `blockedReply`, telemetry, `agents/director/**`, `agents/coordinator/**` | `fix/runtime/no-progress-breaker` |
 | 2 | `task-commands.ts`, `behavioral-runner.ts`, `host-verification.ts`, runner-results, `commandsFor` | `fix/runtime/observed-test-identity` |
 | 3 | contracts, `runtime.ts` (tool mới), `tools.ts`, `agents/coordinator/**` | `fix/runtime/in-run-scope-amend` |
@@ -439,6 +439,7 @@ Nhánh: `fix/runtime/blocker-audit`.
 
 - GĐ1 và GĐ3 cùng sửa `runtime.ts`, nên không làm song song.
 - GĐ1 và GĐ2 cùng chạm `host-development.ts`, nhưng ở hai hàm khác nhau. Việc tách `blockedReply` ở GĐ0 là ranh giới giữa hai bên.
+- GĐ0 và GĐ2 cùng sửa `task-commands.ts`, `behavioral-runner.ts` và `host-verification.ts`. Không xung đột, vì GĐ0 tuần tự và phải merge vào `main` trước khi GĐ2 tạo nhánh. Sau GĐ0, các tệp này thuộc GĐ2.
 - Mỗi nhánh tạo từ baseline đã chứa GĐ0, dùng một worktree riêng (theo `AGENTS.md`).
 
 ## 7. Effort ước lượng
