@@ -242,14 +242,18 @@ export async function launchDirectorPlan(plan: DirectorLaunchPlan, options: {
       if(JSON.stringify(current.identity)!==JSON.stringify(plan.profile.identity)||current.executable!==plan.profile.executable)throw new DirectorProfileError('Profile đã đổi sau khi kiểm tra; mở lại lựa chọn trước khi chạy.');
     }catch(error){throw new DirectorLaunchError('profile_unavailable',error instanceof DirectorProfileError?error.message:'Không kiểm tra lại được profile đã chọn.');}
   }
+  const terminal = plan.terminal;
   // Opening the Director (CLI `bflow open` or the Web button) is the user's decision to work in this session again:
   // the user-stop intent no longer applies, so /bflow-start may bring the session up without `--restart`.
-  await clearUserStopIntent(plan.cwd);
-  const terminal = plan.terminal;
-  if (!terminal) return { mode: "manual_command", manualCommand: plan.manualCommand, launchedAt: now().toISOString(), reason: plan.terminalUnavailableReason };
+  // The in-flight check and claim stay synchronous; the intent is cleared only after this launch owns the slot.
+  if (!terminal) {
+    await clearUserStopIntent(plan.cwd);
+    return { mode: "manual_command", manualCommand: plan.manualCommand, launchedAt: now().toISOString(), reason: plan.terminalUnavailableReason };
+  }
   if (inFlight.has(plan.cwd)) throw new DirectorLaunchError("launch_in_progress", "Đang mở một phiên Director cho kho này.");
   inFlight.add(plan.cwd);
   try {
+    await clearUserStopIntent(plan.cwd);
     const outcome = await spawnTerminal(terminal, plan, deps.spawn ?? nodeSpawn, deps.earlyExitWindowMs ?? EARLY_EXIT_WINDOW_MS);
     if (outcome === "not_started") {
       return { mode: "manual_command", manualCommand: plan.manualCommand, launchedAt: now().toISOString(), reason: "Không khởi chạy được trình mở terminal." };
