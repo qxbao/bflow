@@ -99,9 +99,11 @@ export function matchesExpectedIdentity(leaf: ObservedIdentityLeaf, expectedName
  */
 export function resolveExpectedIdentities(
   leaves: readonly ObservedIdentityLeaf[],
-  expectedNames: readonly string[]
+  expectedNames: readonly string[],
+  allowMissingExpected = false
 ): { matched: true; canonicalNames: string[] } | { matched: false } {
-  if (new Set(expectedNames).size !== expectedNames.length || leaves.length !== expectedNames.length) {
+  if (new Set(expectedNames).size !== expectedNames.length ||
+      (allowMissingExpected ? leaves.length > expectedNames.length : leaves.length !== expectedNames.length)) {
     return { matched: false };
   }
   const normExpected = expectedNames.map(normalizeTestIdentity);
@@ -153,6 +155,7 @@ export function resolveExpectedIdentities(
     for (let i = 0; i < leafForms.length; i++) {
       if (matchesSuffix(leafForms[i]!, target)) allMatches.push(i);
     }
+    if (allMatches.length === 0 && allowMissingExpected) continue;
     if (allMatches.length !== 1) return { matched: false };
     const i = allMatches[0]!;
     if (leafToExpected[i] !== undefined) return { matched: false };
@@ -299,7 +302,8 @@ interface TapLeafEntry extends ObservedIdentityLeaf {
 }
 
 /** Supported measurement protocol: complete Node test-runner TAP (flat or `describe`-nested suites) with assertion diagnostics. */
-export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: readonly string[], nameSelection = false, selectedPaths: readonly string[] = []) {
+export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: readonly string[], nameSelection = false,
+  selectedPaths: readonly string[] = [], allowMissingExpected = false) {
   if (outcome.spawnError || outcome.timedOut || outcome.aborted || outcome.outputTruncated || outcome.signal || outcome.exitCode === null) throw new Error("Behavioral runner infrastructure failure (spawn, deadline, signal or truncated output)");
   const output = outcome.stdout.replace(/\r\n/g, "\n");
   if (!output.startsWith("TAP version 13\n") || /^Bail out!/m.test(output)) throw new Error("Behavioral runner requires complete Node TAP output");
@@ -451,7 +455,7 @@ export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: read
   if (!tests || cancelled || skipped !== filteredSkipped.length || todo !== filteredTodo.length || total !== allLeaves.length || passed + failed !== tests) {
     throw new Error("Zero, nested, skipped or incomplete tests cannot prove behavior");
   }
-  const resolved = resolveExpectedIdentities(results, expectedNames);
+  const resolved = resolveExpectedIdentities(results, expectedNames, allowMissingExpected);
   if (!resolved.matched) {
     throw new BehavioralIdentityMismatch(expectedNames, results.map(result => result.rawName));
   }

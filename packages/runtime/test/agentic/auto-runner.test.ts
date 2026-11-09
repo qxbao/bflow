@@ -87,6 +87,32 @@ describe("automatic test runner proposals (no owner configuration)", () => {
     expect(verification.configuredMethods()).toEqual(["unit_test", "integration_test", "e2e_test"]);
   });
 
+  it("accepts a planned test directory before its tests exist and registers its independent gate", async () => {
+    const root = await repository(vitestRepository);
+    const runners = new TestRunnerSource([], root);
+    await runners.refresh();
+    const { specification, strategy } = proposal(["packages/example/src/logic.ts", "packages/example/test"]);
+    const verification = verificationWith(runners);
+
+    expect(() => verification.assertSupported(specification, strategy)).not.toThrow();
+    expect(() => verification.assertTaskSupported(specification, strategy, ["packages/example"])).not.toThrow();
+    const check = verification.behavioralChecks(specification, strategy).find(item => item.id === "host-behavioral-auto-unit");
+    expect(check?.metadata).toMatchObject({ observedDiffIdentity: true });
+  });
+
+  it("rejects a planned directory when two selected runners could claim the same criterion", async () => {
+    const root = await repository(vitestRepository);
+    const detected = await detectTestRunners(root);
+    if (detected.status !== "detected") throw new Error("Expected detected test runners");
+    const unit = detected.profiles.find(profile => profile.command === "auto:unit")!;
+    const runners = new TestRunnerSource([], root, async () => ({ ...detected,
+      profiles: [...detected.profiles, { ...unit, id: "other-unit" }] }));
+    await runners.refresh();
+    const { specification, strategy } = proposal(["packages/example/src/logic.ts", "packages/example/test"]);
+
+    expect(rejectionOf(() => verificationWith(runners).assertSupported(specification, strategy)).rejection.code).toBe("missing_test_mapping");
+  });
+
   it("refuses a proposal whose affectedPaths lack test files with a Coordinator-fixable code that is never reported to the user", async () => {
     const root = await repository(vitestRepository);
     const runners = new TestRunnerSource([], root);

@@ -600,9 +600,10 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
   const { outcome, testBlobs, reports, rtk: rtkResult } = await runMeasurementCommand(command, cwd, revision, options);
   let parsed: ReturnType<typeof parseNodeTap> | ReturnType<typeof parseVitestJson>;
   try {
-    parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames, reports, command.adapter.failureExitCodes, command.testPaths)
-      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined || command.testNames.length > 0)
-      : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined || command.args.some(arg => arg.startsWith("--test-name-pattern")), command.testPaths);
+    const automatic = command.checkoutDependencyRoots !== undefined;
+    parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames, reports, command.adapter.failureExitCodes, command.testPaths, automatic)
+      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, automatic || command.testNames.length > 0, automatic)
+      : parseNodeTap(outcome, command.testNames, automatic || command.args.some(arg => arg.startsWith("--test-name-pattern")), command.testPaths, automatic);
   } catch (error) {
     if (error instanceof NodeTapTestCodeFailure) {
       if (rtkResult) {

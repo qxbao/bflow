@@ -42,6 +42,14 @@ describe("Node TAP name selection across several selected files", () => {
       .toEqual(["alpha one"]);
   });
 
+  it("keeps the executed mapped name when another planned automatic name was not run", () => {
+    const parsed = parseNodeTap(outcome(unmatchedFile), ["alpha one", "future behavior"], true,
+      ["test/a.test.mjs", "test/b.test.mjs"], true);
+    expect(parsed).toMatchObject({ testNames: ["alpha one"], testResults: [{ name: "alpha one", passed: true }], tests: 1 });
+    expect(() => parseNodeTap(outcome(unmatchedFile), ["alpha one", "future behavior"], true,
+      ["test/a.test.mjs", "test/b.test.mjs"])).toThrow();
+  });
+
   it("still refuses a file entry that is not one of the selected files", () => {
     expect(() => parseNodeTap(outcome(unmatchedFile), ["alpha one"], true, ["test/a.test.mjs"]))
       .toThrow("Observed test names differ from owner-configured identities");
