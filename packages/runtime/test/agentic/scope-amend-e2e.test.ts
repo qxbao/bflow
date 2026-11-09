@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgenticJournal, digest } from "../../src/agentic/journal.js";
 import { blockerOf } from "../../src/agentic/blockers.js";
 import { HostVerification, DEFAULT_HOST_CHECKS } from "../../src/agentic/host-verification.js";
@@ -118,7 +118,10 @@ describe("scope amendment: plan digest, Core consistency and tool wiring", () =>
     expect((await f.inspect()).status).toBe("completed_with_parked");
     expect(await f.runtime.amendTaskScope(drop, { source: "director" })).toMatchObject({ amended: true, nextStep: expect.stringContaining("set_issue_status retrying") });
     expect((await f.inspect()).status).toBe("completed_with_parked");
+    const tick = vi.spyOn(f.runtime, "tick");
     expect(await f.runtime.unparkTask({ runId: "run-1", taskId: "implement", source: "director" })).toMatchObject({ unparked: true, runStatus: "implementing" });
+    // unpark schedules a background tick; let it finish before the fixture removes the journal directory.
+    await Promise.all(tick.mock.results.map(result => result.value));
     const state = await read(f);
     expect(state.runs).toHaveLength(1);
     expect(state.runs[0]!.tasks[0]!.scopeAmendments).toMatchObject([{ source: "director" }]);
