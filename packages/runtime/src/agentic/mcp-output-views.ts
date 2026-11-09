@@ -493,6 +493,7 @@ function summarizeTaskRecord(taskInput: unknown): Record<string, unknown> {
     ...(task.result !== undefined ? { result: task.result } : {}),
     ...(task.changeSet !== undefined ? { changeSet: task.changeSet } : {}),
     ...(task.reworkResolutions !== undefined ? { reworkResolutions: task.reworkResolutions } : {}),
+    ...(task.scopeAmendments !== undefined ? { scopeAmendments: task.scopeAmendments } : {}),
     spec: {
       request: requestRest,
       ...(spec.decision !== undefined ? { decision: spec.decision } : {}),

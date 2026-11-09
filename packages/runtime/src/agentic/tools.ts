@@ -35,6 +35,7 @@ export const COORDINATOR_TOOLS = [
   { name: "reconcile_cancellation", description: "Re-observe an already cancelled run. A Developer at rest has its pane closed and its worktree kept, then the run finishes cancelling; the result lists anything still blocking. Parameters: runId." },
   { name: "repository_setup", description: "Set up the repository yourself before implementation starts; never ask the user to run these. operation: git_status, git_log(limit?), npm_init, npm_install_dev(packages; lifecycle scripts are disabled and node_modules/ is ignored first), gitignore_add(patterns), create_directories(paths; adds .gitkeep), git_add(paths), git_commit(message). No shell. Each change is logged against runId; protected paths and hooks are refused." },
   { name: "reresolve_execution_plan", description: "After a commit moved the repository under an accepted run: rebind its pinned repository snapshot, move an unstarted run to the new HEAD, and clear a plan-drift blocker. Other changed inputs stay blocked. Grants no approval. Parameters: runId." },
+  { name: "amend_task_scope", description: "Fix a plan mismatch inside the run instead of starting a new one. Only for a task stopped by a Plan mismatch escalation / nonResumablePhaseFailures, or parked as plan_mismatch. Parameters: runId, taskId, reason (min 10 chars), changes[] of {kind: drop_planned_paths|add_paths_within_ownership|set_test_names}. drop_planned_paths removes only test files the Runtime recorded as missing from the commit; add_paths_within_ownership stays inside current ownership; set_test_names edits the mapped test names of one existing criterion. Acceptance criteria are never changed or waived and the TDD decision cannot weaken. Ownership cannot be widened or narrowed here (that is a requirement revision). It never re-measures: afterwards call resume_run (escalated run) or, for a parked task, the Director reopens it with set_issue_status retrying." },
   { name: "withdraw_workflow_proposal", description: "Withdraw a design proposal still awaiting human approval so you can run repository_setup and call propose_workflow again; the new proposal gets a new approval card and the user is told which card replaced which. Parameters: runId, reason." }
 ] as const;
 
@@ -123,13 +124,16 @@ export class CoordinatorTools {
       case "park_task": {
         if (principal.principal !== "director") throw new Error("Chỉ Director được treo task qua tool này");
         return JsonValueSchema.parse(await this.runtime.parkTask({ runId: textField(args.runId ?? args.run_id),
-          taskId: textField(args.taskId ?? args.task_id), reason: textField(args.reason), kind: "other", source: "director" }));
+          taskId: textField(args.taskId ?? args.task_id), reason: textField(args.reason),
+          kind: args.kind === "plan_mismatch" ? "plan_mismatch" : "other", source: "director" }));
       }
       case "unpark_task": {
         if (principal.principal !== "director") throw new Error("Chỉ Director được mở lại task qua tool này");
         return JsonValueSchema.parse(await this.runtime.unparkTask({ runId: textField(args.runId ?? args.run_id),
           taskId: textField(args.taskId ?? args.task_id), source: "director" }));
       }
+      case "amend_task_scope": return this.runtime.amendTaskScope({ ...args, runId: textField(args.runId ?? args.run_id), taskId: textField(args.taskId ?? args.task_id) },
+        { source: principal.principal === "director" ? "director" : "coordinator" });
       case "reconcile_cancellation": return JsonValueSchema.parse(await this.runtime.reconcileCancellation(textField(args.runId ?? args.run_id)));
       case "repository_setup": {
         const { runId, run_id: runIdAlias, ...setup } = args;

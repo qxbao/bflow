@@ -30,7 +30,7 @@ import {
   type ArtifactReference, type CancellationRequest, type GitChangeSet, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification, type AcceptanceCriterion,
   type PaneBinding, type TaskDefinition, type AgentRole, type VerificationCycle, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
-import { AgenticJournal, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, isInProcessDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
+import { AgenticJournal, ScopeAmendmentRecordSchema, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, isInProcessDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
   type ConflictResolverAttempt, type IngressDiagnostic, type Outbound, type ReviewTiming, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
 import { evaluateFastPath } from "./fast-path.js";
 import {
@@ -71,6 +71,7 @@ import { InspectInputSchema, summarizeInspectRun, summarizeInspectState, type In
 import { parseAppCheckIdentity } from "./app-check-config.js";
 import { BLOCKERS, isResumable, type TaskBlocker } from "./blockers.js";
 import { blockerFingerprint, inputsChanged, priorSameFingerprint } from "./no-progress.js";
+import { AmendTaskScopeInputSchema, ScopeAmendmentRefusal, assertScopeInvariants, planScopeAmendment } from "./scope-amendment.js";
 import {
   PROTOTYPE_TASK, PrototypeSubmissionSchema, acceptPrototypeScope, admitPrototypeVersion, assertPrototypeDecision, closePrototype, currentScope,
   pendingPrototypeApprovals, prototypeApproval, prototypeDecisionRefusal, prototypeDesignInput, prototypeManifest, prototypeView, settlePrototypeDecision,
@@ -3582,6 +3583,83 @@ export class AgenticWorkflowRuntime {
       if (outcome.rebound) this.progress(state, outbox, run, `Đã cập nhật công việc theo commit mới trên kho mã (${(outcome.previousRevision ?? "?").slice(0, 7)} → ${(outcome.revision ?? "?").slice(0, 7)}); thiết kế đã duyệt không đổi`);
       await save();
       return json({ ...outcome, unblocked, status: run.status });
+    });
+  }
+  /**
+   * In-run scope amendment (GĐ3, D3). Narrows a task's planned paths or edits its test names inside its current ownership.
+   * Ownership is never changed: Core persists the definition and rejects a different digest.
+   * Runtime re-derives every invariant. It never re-measures: the phase failure stays as evidence and the changed spec/strategy digests
+   * are what let the existing resume/unpark paths measure again (`inputsChanged`).
+   */
+  async amendTaskScope(inputRaw: unknown, context: { source: "coordinator" | "director" }): Promise<JsonValue> {
+    const input = AmendTaskScopeInputSchema.parse(inputRaw);
+    await this.initialize();
+    return this.transaction(async (state, save, core, outbox) => {
+      if (this.quiesced) throw new Error("Runtime is quiesced");
+      const run = this.run(state, input.runId);
+      await this.assertDirectorWritable(run);
+      if (context.source === "director" && run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+      if (run.supersededBy) throw new AdmissionRejectedError(`Run ${run.runId} continued as follow-up run ${run.supersededBy}`);
+      const refuse = (code: ConstructorParameters<typeof ScopeAmendmentRefusal>[0], message: string): never => { throw new ScopeAmendmentRefusal(code, message); };
+      if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) refuse("not_amendable", `Run is ${run.status}`);
+      const task = run.tasks.find(item => item.taskId === input.taskId);
+      if (!task || !run.coreCreated || !run.definition || !run.workflowSpec) return refuse("not_amendable", "Task has no accepted plan to amend");
+      const definitionTask = run.definition.tasks.find(item => item.id === task.taskId);
+      if (!definitionTask) return refuse("not_amendable", "Task is not part of the accepted workflow");
+      const current = (await core.snapshot(run.runId)).tasks.find(item => item.taskId === task.taskId);
+      if (!current) return refuse("not_amendable", "Task is unknown to Core");
+      const related = state.outbound.filter(out => out.message.run_id === run.runId && (out.taskId === task.taskId || taskLogBusinessTaskId(out) === task.taskId));
+      const failures = state.outbound.filter(out => out.message.run_id === run.runId && out.phaseFailure?.applied && out.phaseFailure.blocker &&
+        !isResumable(out.phaseFailure.blocker) && record(out.message.payload).taskId === task.taskId);
+      const duplicate = task.scopeAmendments?.find(item => item.amendmentId === digest([run.runId, task.taskId, item.fromSpecDigest, input.changes]));
+      if (duplicate) return json({ amended: false, duplicate: true, amendmentId: duplicate.amendmentId, specVersion: duplicate.toSpecVersion });
+      const parkedPlan = current.status === "parked" && task.parked?.kind === "plan_mismatch";
+      const stuck = failures.some(out => !inputsChanged(out.phaseFailure!.blocker!, task));
+      if (!parkedPlan && !stuck) refuse("not_amendable", "Only a task stopped by a plan mismatch (an escalated non-resumable phase failure, or parked as plan_mismatch) can be amended");
+      if (run.nativeDeliveries?.length || related.some(out => ["sending", "unknown_delivery"].includes(out.status)))
+        throw new Error("Unknown delivery must be reconciled before amending the task scope");
+      const owned = strings(record(definitionTask.metadata).ownedPaths);
+      const spec = task.spec.specification;
+      const specDigestBefore = digest(spec), strategyDigestBefore = digest(task.spec.strategy);
+      const missingPaths = failures.flatMap(out => strings(record(out.phaseFailure!.blocker!.details).paths));
+      const plan = planScopeAmendment({ specification: spec, strategy: task.spec.strategy, ownedPaths: owned }, input.changes, { missingPaths });
+      if (!plan.diff.droppedAffectedPaths.length && !plan.diff.addedAffectedPaths.length && !plan.diff.testNamesChanged.length)
+        return refuse("empty_amendment", "The amendment changes nothing; it cannot be used to clear a stop");
+      const now = this.now();
+      const { artifactRef: _ref, approvedBy: _approved, testStrategy: _strategy, tddDecision: _tdd, ...rest } = spec;
+      const next = await this.reviewSpec({ ...rest, status: "draft", version: (spec.version ?? 1) + 1, affectedPaths: plan.affectedPaths, updatedAt: now,
+        testStrategy: { ...task.spec.strategy, criterionMappings: plan.criterionMappings },
+        metadata: { ...spec.metadata, sdd: { ...record(spec.metadata?.sdd), revisionReason: input.reason } } }, true);
+      assertScopeInvariants({ specification: spec, strategy: task.spec.strategy }, { specification: next.specification, strategy: next.strategy });
+      if (this.ports.validateTaskCommands) {
+        try { this.ports.validateTaskCommands(next.specification, next.strategy, plan.ownedPaths); }
+        catch (error) { throw new Error(`Amended task command validation failed: ${redactString(String(error))}`); }
+      }
+      const amendmentId = digest([run.runId, task.taskId, specDigestBefore, input.changes]);
+      const decision = ApprovalDecisionSchema.parse({ ...this.decisionFields(next.request), decision: "approved", decidedBy: "coordinator",
+        decidedAt: new Date(Math.max(Date.parse(this.now()), Date.parse(next.request.requestedAt))).toISOString(),
+        feedbackArtifacts: [], idempotencyKey: `scope-amend:${amendmentId}`, metadata: { autoApproved: "scope-amend", amendmentId } });
+      const approved = SpecificationSchema.parse(await this.ports.policies.specification.approve(next.specification, next.request, decision));
+      await this.ports.policies.specification.supersede?.(spec, approved);
+      const projected = { ...run.definition, tasks: run.definition.tasks.filter(item => item.id === task.taskId), dependencies: [] };
+      await this.ports.policies.specification.assertImplementationReady(approved, next.request, decision, projected);
+      task.spec = { specification: approved, request: next.request, decision, strategy: next.strategy };
+      const record_ = { amendmentId, at: now, source: context.source, reason: input.reason, fromSpecVersion: spec.version ?? 1, toSpecVersion: approved.version ?? 1,
+        fromSpecDigest: specDigestBefore, toSpecDigest: digest(approved), fromStrategyDigest: strategyDigestBefore, toStrategyDigest: digest(next.strategy),
+        diff: plan.diff };
+      task.scopeAmendments = [...(task.scopeAmendments ?? []), ScopeAmendmentRecordSchema.parse(record_)].slice(-20);
+      // An earlier resume with unchanged inputs consumed the action and left the run idle. Re-offer that same action so the normal
+      // resume path (which alone authorizes a re-measurement, via the changed digests) can run; the manual resume count is kept.
+      const action = run.pendingAction;
+      if (action?.state === "queued" && run.status !== "escalated" && failures.some(out => out.message.message_id === action.sourceMessageId)) {
+        action.previousStatus = run.status; action.state = "pending"; run.status = "escalated";
+      }
+      await this.activityLog.record({ kind: "recovery", role: "runtime", action: "task_scope_amended", runId: run.runId, outcome: `${task.taskId}:${amendmentId.slice(0, 12)}` });
+      this.progress(state, outbox, run, `Đã chỉnh phạm vi của task ${task.taskId}: bỏ ${plan.diff.droppedAffectedPaths.length} tệp chưa có, thêm ${plan.diff.addedAffectedPaths.length}; tiêu chí nghiệm thu giữ nguyên`);
+      await save();
+      return json({ amended: true, amendmentId, specVersion: approved.version ?? 1, ownedPaths: plan.ownedPaths, affectedPaths: plan.affectedPaths,
+        nextStep: parkedPlan ? "Reopen the parked task (Director: set_issue_status retrying); Runtime re-measures because the specification digest changed"
+          : "Call resume_run; Runtime re-measures the stopped phase because the specification digest changed" });
     });
   }
   /** Withdraws a design proposal the human has not decided, so Coordinator can plan again. The next proposal needs its own approval. */

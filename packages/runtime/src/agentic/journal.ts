@@ -61,6 +61,20 @@ const TaskParkSchema = z.object({
   episodeKey: z.string().min(1).optional()
 }).strict();
 export type TaskPark = z.infer<typeof TaskParkSchema>;
+const Hex64 = z.string().regex(/^[a-f0-9]{64}$/);
+const PathListSchema = z.array(z.string().min(1).max(1024)).max(50);
+/** Audit of one in-run scope amendment (private journal v10); the old spec and phase failures stay as evidence. */
+export const ScopeAmendmentRecordSchema = z.object({
+  amendmentId: Hex64, at: IsoDateTimeSchema, source: z.enum(["coordinator", "director"]),
+  reason: z.string().trim().min(1).max(1000),
+  fromSpecVersion: z.number().int().positive(), toSpecVersion: z.number().int().positive(),
+  fromSpecDigest: Hex64, toSpecDigest: Hex64, fromStrategyDigest: Hex64, toStrategyDigest: Hex64,
+  diff: z.object({ droppedAffectedPaths: PathListSchema, addedAffectedPaths: PathListSchema,
+    ownedPathsBefore: PathListSchema, ownedPathsAfter: PathListSchema,
+    testNamesChanged: z.array(z.object({ criterionId: z.string().min(1), before: z.array(z.string()).max(20), after: z.array(z.string()).max(20) }).strict()).max(20) }).strict(),
+  ownerApprovalId: z.string().min(1).max(200).optional()
+}).strict();
+export type ScopeAmendmentRecord = z.infer<typeof ScopeAmendmentRecordSchema>;
 const TaskParkSettlementSchema = z.object({
   attemptId: z.string().min(1), binding: PaneBindingSchema, park: TaskParkSchema
 }).strict();
@@ -73,6 +87,8 @@ export interface TaskRecord {
   parkedVerifications?: z.infer<typeof ParkedVerificationSchema>[];
   parked?: TaskPark;
   parkHistory?: TaskPark[];
+  /** Private v10 audit of scope amendments, oldest first. */
+  scopeAmendments?: ScopeAmendmentRecord[];
   /** Private v8 write-ahead authority to settle an unsent allocation; dispatch stays fenced until park commits. */
   parkSettlement?: z.infer<typeof TaskParkSettlementSchema>;
   failovers?: TaskFailover[];
@@ -326,7 +342,7 @@ export interface Outbound {
   leaseRelease?: ReleaseAgentLeaseRequest;
 }
 export interface JournalState {
-  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9; repository: string; runs: RunRecord[]; outbound: Outbound[];
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10; repository: string; runs: RunRecord[]; outbound: Outbound[];
   /** "rejected" is terminal and carries Runtime's reason: the message was refused by admission and must never be retried. */
   inbox: { message: RoleMessage; status: "received" | "applied" | "rejected"; reason?: string }[];
   pendingCore: AppendEventsRequest[];
@@ -352,10 +368,13 @@ export function requiresBlockerJournal(state: Pick<JournalState, "runs" | "outbo
     state.runs.some(run => run.tasks.some(task => task.parked?.kind === "plan_mismatch" ||
       task.parkHistory?.some(entry => entry.kind === "plan_mismatch")));
 }
+export function requiresScopeAmendmentJournal(state: Pick<JournalState, "runs">): boolean {
+  return state.runs.some(run => run.tasks.some(task => task.scopeAmendments !== undefined));
+}
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 export function parseAgenticJournalState(input: unknown, repository: string, baseline?: JournalState): JournalState {
   const root = record(input);
-  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
+  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
   const state = root as unknown as JournalState;
   const trustedBaseline = baseline && baseline.repository === repository && baseline.version <= state.version ? baseline : undefined;
@@ -498,6 +517,10 @@ export function parseAgenticJournalState(input: unknown, repository: string, bas
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {
+      if (task.scopeAmendments !== undefined) {
+        if (state.version < 10) throw new Error("Task scope amendments require private journal v10");
+        task.scopeAmendments = z.array(ScopeAmendmentRecordSchema).max(20).parse(task.scopeAmendments);
+      }
       if (task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined || task.parkedVerifications !== undefined) {
         if (state.version < 8) throw new Error("Task parking requires private journal v8");
         if (task.parkedVerifications !== undefined) task.parkedVerifications = z.array(ParkedVerificationSchema).max(20).parse(task.parkedVerifications);
@@ -885,6 +908,7 @@ export class AgenticJournal {
             state.outbound.some(out => out.roleProfile || out.executorLineage || out.profileAllocationTaskId))) state.version = 7;
         if (state.version < 8 && requiresDirectorJournal(state)) state.version = 8;
         if (state.version < 9 && requiresBlockerJournal(state)) state.version = 9;
+        if (state.version < 10 && requiresScopeAmendmentJournal(state)) state.version = 10;
         // Equality covers invalid values that JSON.stringify would omit. Re-read under flock before acknowledging unchanged durable bytes.
         if (baseline && durableBytes && journalStatesEqual(state, baseline)) {
           try { if ((await readRegularJournalFile(statePath)).equals(durableBytes)) return; }

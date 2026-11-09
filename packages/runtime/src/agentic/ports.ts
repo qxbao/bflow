@@ -30,6 +30,8 @@ export interface SpecificationPolicy {
   requestApproval(input: unknown, options: unknown): Promise<ApprovalRequest>;
   approve(input: unknown, request: unknown, decision: unknown): Promise<Specification>;
   assertImplementationReady(input: unknown, request: unknown, decision: unknown, workflow: unknown): Promise<void>;
+  /** Marks an approved specification replaced by its approved next version (scope amendment); the real engine provides it. */
+  supersede?(previousApproved: unknown, nextApproved: unknown): Promise<Specification>;
 }
 export interface StrategyPolicy {
   resolve(input: unknown): TestStrategy;

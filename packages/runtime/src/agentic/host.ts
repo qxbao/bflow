@@ -3567,6 +3567,12 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     repository_setup:{properties:{runId:string,operation:{type:"string",enum:["git_status","git_log","npm_init","npm_install_dev","gitignore_add","create_directories","git_add","git_commit"]},limit:{type:"integer",minimum:1,maximum:100},packages:array,patterns:array,paths:array,message:string},required:["runId","operation"]},
     reresolve_execution_plan:{properties:{runId:string},required:["runId"]},
     withdraw_workflow_proposal:{properties:{runId:string,reason:string},required:["runId","reason"]},
+    amend_task_scope:{properties:{runId:string,taskId:string,reason:{type:"string",minLength:10,maxLength:1000},
+      changes:{type:"array",minItems:1,maxItems:20,items:{oneOf:[
+        strictObject({kind:{type:"string",const:"drop_planned_paths"},paths:array},["kind","paths"]),
+        strictObject({kind:{type:"string",const:"add_paths_within_ownership"},paths:array},["kind","paths"]),
+        strictObject({kind:{type:"string",const:"set_test_names"},criterionId:string,testNames:array},["kind","criterionId","testNames"])]}}},
+      required:["runId","taskId","reason","changes"]},
     read_role_pane:{properties:{role:string,paneId:string,lines:{type:"integer",minimum:1,maximum:200}},required:["role"]},
     assignment_context:{properties:{view:{type:"string",enum:["full","compact","active_only"]},surveyView:{type:"string",enum:["full","summary","anchors_only","omit"]},includeReleased:{type:"boolean"}},required:[]},
     read_task_log:{properties:{runId:string,taskId:string,lines:{type:"integer",minimum:1,maximum:100},maxBytes:{type:"integer",minimum:256,maximum:16384},cursor:{type:"string",minLength:1,maxLength:128},view:{type:"string",enum:["full","compact"]}},required:[]},
