@@ -84,6 +84,7 @@ import { CONVERSATION_CONTEXT_BUDGET, boundConversationContext } from "./convers
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, defaultHostChecks } from "./host-verification.js";
+import { blockerOf } from "./blockers.js";
 import { AgyNativeAnchorSchema, HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, parseConversationResumeRequest, isCoordinatorTrigger, type AgyNativeTurn, type CoordinatorTurnObservation, type HumanPromptHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands, RtkRequiredToolUnavailable, type RtkOutputIntegration } from "./behavioral-runner.js";
 import { parseMutationChecks } from "./mutation-check.js";
@@ -2492,7 +2493,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         clearInterval(heartbeat);
         await renewInFlight;
         const failed = await host.runtime.recordPhaseFailure(binding, source.message_id, redactString(String(error)), error instanceof HostBehavioralFailure,
-          error instanceof HostBehavioralFailure ? error.evidence : undefined);
+          error instanceof HostBehavioralFailure ? error.evidence : undefined, blockerOf(error));
         return error instanceof HostBehavioralFailure && error.rtkOutputs.length
           ? json({ phaseFailure: failed, rtkOutputs: error.rtkOutputs }) : failed;
       }

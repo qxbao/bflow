@@ -62,6 +62,7 @@ export const ParkedIssueKindSchema = z.enum([
   "provider_failure",
   "verification_exhausted",
   "rework_exhausted",
+  "plan_mismatch",
   "user_decision_pending",
   "environment",
   "other"

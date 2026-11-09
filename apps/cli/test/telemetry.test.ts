@@ -13,6 +13,12 @@ const report = () => buildWorkflowTelemetry({ runId: "run-1", asOf: "2026-10-27T
 const io = { stdout: vi.fn(), stderr: vi.fn() };
 afterEach(() => { process.exitCode = 0; vi.clearAllMocks(); });
 describe("status telemetry", () => {
+  it("renders blocker counts and skipped resume totals", async () => {
+    const withBlocker = { ...report(), blockers: [{ code: "declared_test_missing", fixableBy: "director", count: 2,
+      lastAt: "2026-10-27T00:00:00Z", resumeSkipped: 3 }] };
+    const result = await runCli(["status", "run-1", "--telemetry"], { io, telemetry: async () => withBlocker as any });
+    expect(result.stdout).toContain("Blocker declared_test_missing / director: 2 failures, 3 resumes skipped");
+  });
   it("accepts opt-in run telemetry and rejects absent run/list filters", () => {
     expect(parseCliArgs(["status", "run-1", "--telemetry", "--json"])).toMatchObject({ ok: true, value: { telemetry: true } });
     expect(parseCliArgs(["status", "--telemetry"])).toMatchObject({ ok: false });

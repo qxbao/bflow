@@ -64,6 +64,11 @@ describe("director contracts", () => {
     expect(contracts.ParkedIssueSchema.safeParse({ ...issue, attempts: -1 }).success).toBe(false);
   });
 
+  it("accepts plan_mismatch as a parked issue kind and rejects unknown kinds", () => {
+    expect(contracts.ParkedIssueSchema.safeParse({ ...issue, kind: "plan_mismatch" }).success).toBe(true);
+    expect(contracts.ParkedIssueSchema.safeParse({ ...issue, kind: "invented" }).success).toBe(false);
+  });
+
   it("accepts an empty wait result", () => {
     const empty = { cursor: "m0.i0.r", timedOut: true, messages: [], issues: [], runtimeEvents: [] };
     expect(contracts.DirectorWaitResultSchema.safeParse(empty).success).toBe(true);
