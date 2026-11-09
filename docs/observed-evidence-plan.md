@@ -65,7 +65,9 @@ GĐ0  Phân loại lỗi chặn ────────────────
    GĐ1 xong ──► GĐ3  Sửa phạm vi trong run
                (thiết kế và contract của GĐ3 [∥] với GĐ1 và GĐ2; phần cài đặt chờ GĐ1)
    GĐ1 và GĐ2 xong ──► GĐ4c Chuyển các guard ưu tiên (làm dần)
-   GĐ0–GĐ3 xong ──► GĐ5  Kiểm chứng live (tuần tự)
+   GĐ0 xong ──► GĐ6  Cổng nhận theo task + analyzer cho mọi loại tệp
+               (∥ với GĐ4c; nhánh cổng nhận merge trước nhánh analyzer)
+   GĐ0–GĐ3 và GĐ6 xong ──► GĐ5  Kiểm chứng live (tuần tự)
 ```
 
 Ký hiệu: **[TT]** = tuần tự, nằm trên đường găng. **[∥]** = làm song song được.
@@ -634,6 +636,257 @@ Nhánh: `fix/runtime/blocker-audit`.
 2. Chạy lại các kịch bản chống gian lận đã có (e2e và acceptance).
 3. Báo cáo theo mức bằng chứng tách riêng: mã nguồn, test cục bộ, live. Không gộp các mức.
 
+### GĐ6: Cổng nhận kế hoạch xét theo task, phân tích tĩnh phủ mọi loại tệp [sau GĐ0, ∥ với GĐ4c], khoảng 1,5–2 tuần
+
+- Trạng thái: **kế hoạch, chờ duyệt D4–D8**. Chưa có mã nguồn, chưa có test.
+- Nguồn: run `run-director-0c0c6957e5d223d9a30c1388`. Repo Maven, 5 tiêu chí: hai `static_analysis` (`ci-triggers` và tiêu chí báo lỗi CI), một `integration_test` (shard), một `unit_test`, một `manual_review` (hướng dẫn). Kế hoạch bị từ chối trước khi giao Developer, với lỗi `unsupported_method: Criterion ci-triggers needs a detected static_analysis capability and its matching auto:typecheck or auto:static target command.`
+- Journal của run không có trên máy viết kế hoạch. Phần `assessment` của run (taskType, risk, `infrastructure.commands`) **chưa xác minh**. T6.0 phải lấy lại hoặc dựng fixture bao cả hai khả năng.
+
+Khác với GĐ0–GĐ3: các giai đoạn đó xử lý lỗi ở bước đo và thực thi, còn GĐ6 xử lý **cổng nhận kế hoạch** và **phạm vi của `auto:static`**. GĐ1 chỉ giúp Director dừng sớm. Ở bước đề xuất vốn đã có chống lặp theo dấu vân tay (`recordProposalRejection`), nhưng không mở ra đường hợp lệ. Nếu không có GĐ6, mọi repo có CI, YAML, Java hay shell, kèm một tiêu chí rà soát thủ công, đều kẹt ở cùng chỗ.
+
+#### 6.1 Chuỗi điểm chặn đã xác minh trong mã (HEAD `228b4d65`)
+
+Sửa riêng một điểm thì run chỉ trượt sang điểm tiếp theo. Các điểm xếp theo thứ tự Director sẽ gặp:
+
+| # | Chỗ | Hành vi hiện tại | Vì sao chặn |
+|---|---|---|---|
+| B1 | `host-verification.ts:497-503` (`assertSupported`) | Tiêu chí `static_analysis` phải có `auto:static` trong `targetCommands`, nếu không trả `unsupported_method` | Lỗi đã quan sát. Sửa được bằng cách khai `auto:static`, nhưng sau đó gặp B2. |
+| B2 | `host.ts:1943` → `host-verification.ts:512` | Kiểm tra trộn thủ công/tự động trên **toàn bộ đặc tả**, ném `Error` thường | Tách DAG thành task riêng vẫn bị từ chối. `guardWorkflowProposal` biến lỗi thành `unsupported_verification` (`workflow-rejection.ts:86`), loại lỗi không nằm trong `AGENT_FIXABLE_REJECTIONS`. Bước xét theo task (`runtime.ts:4006-4010`, `projectTaskSpecificationInput` → `assertTaskSupported`) không bao giờ được gọi tới. `docs/blocker-inventory.md:188` đang xếp dòng này là GIỮ. |
+| B3 | `runtime.ts:273` (`projectTaskSpecificationInput`) và `host-verification.ts:509` | Spec chiếu cho từng task lấy nguyên `draft.affectedPaths` | Task chỉ có tài liệu vẫn mang `.java`, `.yml` của task khác, nên chạm `Behavioral development requires configured independent behavioral acceptance checks`. Bị che sau B2. |
+| B4 | `runtime.ts:4007`, `runtime.ts:4267` (`reviewSpec` → `strategy.resolve`), `test-strategy/src/policy.ts:32-45` | Chính sách TDD của task dùng `assessment` của toàn đặc tả nếu Coordinator không ghi đè | `infrastructure` thêm `integration_test` và `static_analysis`. `configuration` thêm `typecheck` và `static_analysis`. Rủi ro cao thêm `manual_review`. Các method này bị gán cho **mọi** task. `assertPolicyMethods` (`host-verification.ts:611-628`) từ chối task tài liệu vì không có runner hay tiêu chí cho `integration_test`, và có thể từ chối task code vì đòi `typecheck` khi repo không có TypeScript. Bị che sau B2. |
+| B5 | `host-verification.ts:283-285` (`captureStaticAnalysis`) | `auto:static` chỉ đọc JS, TS, JSON | `.java`, `pom.xml`, `.yml`, `.sh` cho `exitCode: 1`. Lỗi xảy ra ở bước đo; Error thường, không có mã blocker. |
+| B6 | `apps/cli/src/agentic-host.ts:58-61`, `behavioral-runner.ts:84-90`, `task-commands.ts:89` | `verification.json` chỉ nhận `behavioralCommands` (unit, integration, e2e; reporter `node_tap`/`vitest_json`). Có một lệnh là tắt toàn bộ tự phát hiện. | Chủ dự án không khai được analyzer, và cũng không khai được Maven ở owner mode vì không có reporter JUnit. |
+| B7 | `repository-setup.ts:19-26`, `runner-adapters/managed.ts:304,314` | `repository_setup` chỉ có thao tác git và npm. Runner Maven chạy `--offline` với cache `~/.m2/repository`. | Thiếu dependency Maven thì Coordinator không tự tải được. |
+
+Ngoài ra còn một vấn đề về ngữ nghĩa: YAML đúng cú pháp không chứng minh CI làm đúng yêu cầu. "Chạy đúng sự kiện, concurrency, báo lỗi khi một shard fail, lưu báo cáo khi lỗi" là **hành vi** và cần test chạy được. Phân tích tĩnh chỉ là phần bổ sung (giữ luật ở `host-verification.ts:507`).
+
+#### 6.2 Bất biến của GĐ6
+
+Các bất biến ở mục 2 vẫn giữ. Thêm:
+
+- **Phủ toàn workflow:** mọi tiêu chí bắt buộc chưa waive phải thuộc ít nhất một task. Hợp `requiredVerificationMethods` của các task phải chứa mọi method mà chính sách của toàn đặc tả đòi. Task `workflow-verification` (`FINAL_TASK`, `runtime.ts:3992`) giữ nguyên chính sách toàn đặc tả.
+- **Trong một task** vẫn cấm trộn `manual_review` với tiêu chí hành vi. Ý định gốc của dòng 512 được giữ, chỉ đổi phạm vi áp dụng.
+- `static_analysis` và `typecheck` không thay được bằng chứng hành vi.
+- `auto:static` không bao giờ cho qua một tệp mà nó không phân tích. Tệp chưa có analyzer vẫn làm check thất bại, nhưng lỗi có mã và có đường sửa.
+- Cấu hình của chủ dự án chỉ **cộng thêm** analyzer, không làm yếu runner tự phát hiện.
+- Coordinator được tự **tăng** độ chặt của method (ví dụ `static_analysis` → `integration_test`). **Giảm** độ chặt (sang `manual_review` hoặc waive) vẫn phải qua thẻ quyết định của người dùng.
+
+#### 6.3 Quyết định cần duyệt
+
+| Mã | Quyết định | Ảnh hưởng |
+|---|---|---|
+| **D4** | Cổng nhận kế hoạch xét theo task, kèm bất biến phủ ở mục 6.2. | Chỉ trong `packages/runtime`. Không đổi contract. |
+| **D5** | Thêm các `WorkflowRejectionCode` mà Coordinator sửa được: `task_evidence_mixed`, `task_policy_gap`, `static_analyzer_missing`. | Enum ở `workflow-rejection.ts:8` được journal parse (`journal.ts:210`). Bản cũ đọc journal mới sẽ từ chối, không ép kiểu. Ghi vào known limitations; không cần upcaster vì chỉ thêm. |
+| **D6** | Thêm khóa `staticAnalyzers` (cộng dồn) vào `.bflow/verification.json`. Khóa này không tính là lệnh hành vi của chủ dự án, nên `TestRunnerSource.automatic` không đổi. | `apps/cli/src/agentic-host.ts` (thuộc P29) và parser trong runtime. Cập nhật `docs/verification-runners.md`. |
+| **D7** | Bộ analyzer có sẵn cho `auto:static`: YAML, GitHub Actions (kiểm cấu trúc), shell, biên dịch JVM qua runner Maven/Gradle đã phát hiện, XML qua `xmllint` khi có. | Thêm `yaml` vào dependency của `packages/runtime`. Gói đã có trong lockfile (`yaml@2.9.1`, do `apps/cli` dùng), nhưng importer đổi nên đây là thay đổi integration. |
+| **D8** | Thêm `repository_setup` cho JVM: `maven_go_offline` và `gradle_dependencies`. Có mạng, chỉ ghi vào cache dependency, không bao giờ ghi `settings.xml`. | Mở rộng bề mặt tool của Coordinator. Phải ghi rõ đây là thao tác có mạng. |
+
+Nếu D8 không được duyệt, B7 trở thành blocker `fixableBy: "user"` kèm đúng lệnh cần chạy. Không để Coordinator đoán.
+
+#### 6.4 Thứ tự
+
+```
+T6.0 Tái hiện bằng fixture [TT]
+  ├──► T6.1 → T6.2 → T6.3   Cổng nhận theo task (B2, B3, B4)        nhánh fix/runtime/task-scoped-admission
+  ├──► T6.4 → T6.5          Bộ analyzer + dự báo ở cổng nhận (B1, B5)  nhánh fix/runtime/static-analyzers
+  ├──► T6.6                 staticAnalyzers cộng dồn (B6)            ∥, sau khi duyệt D6
+  └──► T6.7                 repository_setup cho JVM (B7)            ∥, sau khi duyệt D8
+T6.1 và T6.4 xong ──► T6.8 Hướng dẫn Coordinator/Director
+Tất cả xong ──► T6.9 Kiểm tra, bàn giao, rồi chạy lại live trong GĐ5
+```
+
+Hai nhánh cùng sửa `host-verification.ts` nhưng ở hai vùng khác nhau: `assertSupported`/`assertTaskSupported` và `captureStaticAnalysis`/`policyDeterministicGate`. Merge nhánh cổng nhận trước. Riêng T6.5 phải rebase sau nhánh này vì nó gọi vào bước kiểm tra theo task.
+
+#### T6.0 Tái hiện bằng fixture [TT, viết test trước]
+
+1. Tìm journal thật của run trong `.bflow/state` của repo Maven (hoặc state dir của Bflow cho repo đó). Lấy ra proposal cuối cùng, `assessment`, `infrastructure.commands`, DAG, và chuỗi `workflowRejected`. Ghi các giá trị đó vào fixture. Nếu không tìm được, dựng hai biến thể: `taskType: "infrastructure"` với rủi ro `medium`, và một biến thể rủi ro `high`.
+2. Test mới `packages/runtime/test/agentic/mixed-evidence-admission.test.ts`:
+   - Repo git tạm gồm `pom.xml`, `src/main/java/...`, `src/test/java/...`, `.github/workflows/ci.yml`, `scripts/shard.sh`, `docs/testing.md`.
+   - Có 5 tiêu chí như run. DAG gồm `task-ci` (sở hữu `pom.xml`, `.github/workflows`, `scripts`, `src/test/java`; 4 tiêu chí tự động) và `task-docs` (sở hữu `docs/testing.md`; tiêu chí `manual_review`).
+   - Máy dev không có `mvn`. Dùng host runner giả theo khuôn `managed.test.ts` và `polyglot-measure.test.ts`, trả về các profile `auto-unit-maven…` và `auto-integration-maven…`.
+3. Assert trạng thái đích:
+   - Proposal được nhận.
+   - Mỗi task qua `validateTaskCommands`.
+   - Lỗi nào trên đường đi cũng là `WorkflowProposalRejected` với mã thuộc `AGENT_FIXABLE_REJECTIONS`.
+
+   Ở HEAD hiện tại, các assert này phải **đỏ** đúng theo chuỗi B1 → B2. Ghi lại thông điệp lỗi đỏ vào mô tả PR để đối chiếu.
+
+#### T6.1 Tách cổng toàn đặc tả và cổng theo task (B2, B3)
+
+Sửa `host-verification.ts:485-527` và lời gọi ở `host.ts:1943`:
+
+1. Chuyển `projectTaskSpecificationInput` từ `runtime.ts:273` sang một module riêng, `agentic/task-projection.ts`, để `host-verification.ts` dùng được mà không tạo vòng import. `runtime.ts` re-export lại để caller cũ không đổi.
+2. Hàm chiếu nhận thêm `ownedPaths`. `affectedPaths` của spec task = các phần tử của `draft.affectedPaths` nằm trong `ownedPaths` (dùng `inPlannedScope`). Đây là sửa B3.
+   - Kiểm lại hai chỗ dùng `affectedPaths` của spec task mà GĐ2 đã chuyển sang "dự kiến": `automaticTestPaths` và `authorizeTddPaths`.
+   - Lối sửa phạm vi trong run (`runtime.ts:3629-3636`) đang dùng `task.spec`, đã ở mức task. Thêm test cho lối này.
+3. Thêm `assertWorkflowSupported(spec, strategy, definition)` và dùng nó ở `host.ts:1943` thay cho `assertSupported`. Thứ tự kiểm:
+   1. Schema và tách tiêu chí real-app như hiện nay.
+   2. Mọi tiêu chí bắt buộc chưa waive phải thuộc ít nhất một `definition.tasks[].acceptanceCriteria`. Không đạt thì trả `invalid_specification`, nêu id tiêu chí.
+   3. Với mỗi task, phân loại tiêu chí thành ba nhóm: `manual` (`manual_review`), `behavioral` (unit, integration, e2e và real-app), `deterministic` (`static_analysis`, `typecheck`). Task có cả `manual` và `behavioral` thì trả `task_evidence_mixed`, nêu id task và id tiêu chí của từng nhóm.
+   4. Với mỗi task, chạy phần kiểm tra hiện có (B1, `assertDetectedSupported`, `assertPolicyMethods`) trên spec đã chiếu và chiến lược của task đó. Dùng lại đúng hàm mà `runtime.ts:4010` gọi, không viết luật song song.
+   5. Kiểm bất biến phủ (T6.2).
+4. Khi không có `definition` (caller cũ, chẳng hạn `host-verification.ts:1219` ở owner mode): giữ kiểm tra toàn đặc tả, nhưng ném `WorkflowProposalRejected` với mã `task_evidence_mixed` thay cho `Error`.
+5. Dòng 512 trong `assertSupported` chỉ còn chạy với spec của một task. Xóa mục `Mixed manual…` khỏi `test/agentic/fixtures/execution-throw-allowlist.json`. Ở `docs/blocker-inventory.md:188`, đổi GIỮ thành "có kênh".
+
+Test:
+- Đặc tả trộn, DAG đã tách: nhận.
+- Đặc tả trộn, một task chứa cả hai nhóm: `task_evidence_mixed`, `reportsToUser` là `false`, lý do nêu đúng task.
+- Tiêu chí không thuộc task nào: bị từ chối.
+- Task tài liệu có `draft.affectedPaths` chứa `.java`: không còn chạm dòng 509.
+- Mọi test hiện có trong `host-verification.test.ts` vẫn xanh.
+
+#### T6.2 Chính sách TDD theo task và bất biến phủ (B4)
+
+1. Ở `runtime.ts:4006-4007`: nếu task không có `metadata.conditionalTdd` riêng, Runtime vẫn dùng `assessment` của toàn đặc tả. Nhưng `evaluatePolicy` phải chạy trên **tiêu chí và đường dẫn của task** (đường dẫn đã chiếu từ T6.1). Như vậy `testOnly`, `mislabeledDocs` và method lấy từ tiêu chí đều tính theo task.
+2. Method do bề mặt sinh ra (`policy.ts:37-45`) chỉ gán cho task có đường dẫn khớp bề mặt đó:
+   - `infrastructure`, `configuration`: task sở hữu tệp không phải tài liệu.
+   - `ui_layout`: task sở hữu tệp UI.
+   - Task chỉ có tài liệu không nhận các method này.
+
+   Viết thành một hàm thuần `taskPolicyAssessment(draftAssessment, taskPaths)` trong `test-strategy`, hoặc trong runtime nếu chủ sở hữu `test-strategy` không nhận. Có test riêng.
+3. Bất biến phủ: gọi `W` là tập method của chính sách toàn đặc tả (task `FINAL_TASK`), `T_i` là tập method của task i. Phải có `W ⊆ ∪ T_i`; không đạt thì trả `task_policy_gap`, nêu các method thiếu. Ngoài ra `manual_review` nằm trong `W` thì phải có ít nhất một task chứa tiêu chí `manual_review`, hoặc chính sách task đó đòi `manual_review`.
+4. Coordinator ghi đè `assessment` theo task: được phép, nhưng vẫn phải qua bất biến phủ. Rủi ro của một task không được thấp hơn rủi ro của toàn đặc tả, trừ khi task đó chỉ chứa tài liệu.
+5. Kiểm `workflow-verification` với run trộn: `behavioralEvidence` với `taskId = FINAL_TASK` và `test-strategy/src/evidence.ts:112` phải chấp nhận khi bằng chứng `manual_review` đến từ task tài liệu và bằng chứng hành vi đến từ task code. Nếu không chấp nhận, sửa cách gom bằng chứng ở mức workflow. Không được bỏ method.
+
+Test:
+- Task tài liệu với assessment `infrastructure` không bị đòi `integration_test`.
+- Bỏ task tài liệu khỏi DAG (để mất `manual_review`) thì trả `task_policy_gap`.
+- Repo không có TypeScript và assessment `configuration`: trả `task_policy_gap` hoặc `unsupported_method`, kèm hướng sửa. Không phải `Error` thường.
+- Run trộn qua `connectedPhaseFixture` (`test/helpers/agentic-integration-fixture.ts`) tới `workflow-verification` được chấp nhận.
+
+#### T6.3 Mã từ chối và journal (D5)
+
+- Thêm ba mã vào `WorkflowRejectionCodeSchema` và `AGENT_FIXABLE_REJECTIONS`. Mỗi mã có câu hướng sửa trong `reason` và trong `options`.
+- `task_evidence_mixed`: "Tách tiêu chí `manual_review` sang task riêng sở hữu tệp tài liệu."
+- `task_policy_gap`: liệt kê method thiếu và task nên nhận method đó.
+- `static_analyzer_missing`: xem T6.5.
+- Test round-trip journal có mã mới. Test `recordProposalRejection` (`runtime.ts:2286`) vẫn gom lặp theo dấu vân tay.
+- Thêm vào `docs/known-limitations-v3.md`: binary cũ đọc journal mới sẽ dừng ở bản ghi lạ, không ép kiểu.
+
+#### T6.4 Bộ analyzer cho `auto:static` (B5, D7)
+
+Module mới `agentic/static-analyzers.ts`. Mỗi analyzer gồm:
+
+```ts
+interface StaticAnalyzer {
+  id: string;
+  matches(path: string): boolean;
+  detect(context): Promise<{ status: "available" } | { status: "missing"; reason: string }>;
+  run(input: { cwd: string; revision: string; files: string[]; deadlineAt?: number }): Promise<{ exitCode: number; output: string }>;
+}
+```
+
+Các analyzer có sẵn. Tệp luôn được đọc từ blob đã commit (`git show <revision>:<path>`); kiểm `capture()` trước và sau như hiện nay.
+
+| Analyzer | Tệp | Cách kiểm |
+|---|---|---|
+| `whitespace` | mọi tệp | `git diff --check` (giữ) |
+| `javascript`, `json`, `typescript` | như hiện nay | Chuyển nguyên mã từ `captureStaticAnalysis` sang |
+| `yaml` | `.yml`, `.yaml` | Parse bằng `yaml` (`uniqueKeys: true`). Coi mọi `errors` và `warnings` là lỗi. Giới hạn kích thước tệp. |
+| `github-actions` | `.github/workflows/*.y{a,}ml` | Sau YAML: phải có `on` và `jobs`. Mỗi job có `runs-on` hoặc `uses`. Mỗi step có `run` hoặc `uses`. Biểu thức `${{ }}` cân bằng. Có `actionlint` trên PATH thì chạy thêm trong sandbox (tìm theo khuôn `resolveSystemTool`, `declared-runner-adapter.ts:9`). |
+| `shell` | `.sh`, `.bash`, tệp có shebang `sh` hoặc `bash` | `bash -n` hoặc `sh -n` trong sandbox. Có `shellcheck` thì chạy thêm. |
+| `jvm-compile` | `.java`, `.kt`, `pom.xml`, `build.gradle*` thuộc project có profile Maven/Gradle đã phát hiện | Maven: `--offline -B -q -Dmaven.repo.local=/bflow-cache/maven test-compile`. Gradle: `--offline testClasses`. Chạy trong cùng sandbox và mount như runner (`managed.ts:291-330`): thêm một hàm bind `compile` cạnh `bind` cho test. Cách này kiểm cả `pom.xml` lẫn cú pháp và kiểu của Java. |
+| `xml` | `.xml` khác `pom.xml` | `xmllint --noout` nếu phát hiện được. Không có thì là `missing`. |
+
+Luật:
+- Mỗi tệp đã đổi (trừ tài liệu như hiện nay) phải được ít nhất một analyzer khả dụng xử lý. Còn sót tệp thì check thất bại bằng `TaskBlocker("static_analyzer_missing", …, { paths, missingAnalyzers })`, mã mới trong `BLOCKERS` (`blockers.ts`) với `fixableBy: "director"`. Nhờ vậy GĐ1 park được thay vì lặp.
+- Evidence phải liệt kê từng analyzer và các tệp nó đã kiểm. Câu tóm tắt nói rõ: "Phân tích cú pháp và cấu trúc. Không chứng minh hành vi CI."
+- `policyDeterministicGate` (`host-verification.ts:422`) giữ nguyên giao diện, chỉ gọi qua bộ analyzer.
+
+Test `static-analyzers.test.ts`, trên repo git tạm:
+- YAML hợp lệ và không hợp lệ; YAML có khóa trùng.
+- Workflow thiếu `jobs`.
+- Shell lỗi cú pháp.
+- Tệp `.toml` cho `static_analyzer_missing`, `details.paths` đúng.
+- `jvm-compile` dùng host giả: assert argv, mount, `--offline`; không cần `mvn` thật.
+
+Cập nhật test `host-verification.test.ts:122`: `.yml` giờ được phân tích, đuôi lạ vẫn thất bại.
+
+#### T6.5 Báo trước ở cổng nhận khi chưa có analyzer (B1)
+
+Bước kiểm tra theo task ở T6.1, mục 4: nếu task có tiêu chí `static_analysis`, hoặc chính sách task đòi `static_analysis`:
+
+1. Lấy mọi đường dẫn có phần mở rộng trong `affectedPaths ∩ ownedPaths` của task. Tệp nào không có analyzer `available` khớp thì trả `static_analyzer_missing`. `reason` liệt kê tệp, và `options` gồm:
+   - Coordinator đổi tiêu chí sang test hành vi (tăng độ chặt, không cần người dùng).
+   - Chủ dự án thêm `staticAnalyzers` (T6.6).
+   - Người dùng duyệt đổi sang `manual_review`.
+2. Đường dẫn là thư mục thì không dự báo được. Để T6.4 kiểm ở bước đo.
+3. Kết quả `detect` được cache theo revision gốc, như `TestRunnerSource.profilesForRevision`.
+4. Thông điệp của B1 (`host-verification.ts:502`) nói rõ `auto:static` hiện phủ những loại tệp nào, lấy từ danh mục. Không viết cứng.
+
+#### T6.6 `staticAnalyzers` cộng dồn trong `verification.json` (B6, D6)
+
+```json
+{ "schemaVersion": 1, "behavioralCommands": [],
+  "staticAnalyzers": [{ "id": "actionlint", "executable": "/usr/local/bin/actionlint", "args": [],
+    "include": [".github/workflows/*.yml"], "timeoutMs": 60000 }] }
+```
+
+- `apps/cli/src/agentic-host.ts:58`: thêm khóa vào danh sách cho phép. Gọi `runtime.parseStaticAnalyzers`, theo khuôn của `parseAppChecks`. Truyền qua `host-controller.ts`, cạnh `appChecks`.
+- `executable` phải là đường dẫn tuyệt đối, nằm ngoài repo. Tệp khớp `include` được nối vào cuối argv. Chạy trong cùng sandbox như lệnh của chủ dự án, không có mạng.
+- `staticAnalyzers` không thuộc `owner`, nên `TestRunnerSource.automatic` giữ nguyên. Chủ dự án thêm analyzer mà **không mất** runner Maven tự phát hiện.
+- Ở owner mode, analyzer của chủ dự án cũng bật được tiêu chí `static_analysis`. Hiện nhóm `deterministic` chỉ áp dụng ở automatic mode (`host-verification.ts:496`); đây là thay đổi có chủ đích, cần test riêng.
+- Ngoài phạm vi: chế độ "mở rộng" cho `behavioralCommands` (vừa lệnh của chủ dự án vừa tự phát hiện). Ca này đã có runner Maven tự phát hiện cộng với `staticAnalyzers`, nên không cần. Nếu sau này cần, ghi thành quyết định riêng.
+
+Test:
+- Parser từ chối đường dẫn tương đối, khóa lạ, `include` rỗng.
+- Có `staticAnalyzers` thì `automatic` vẫn là `true`.
+- Tệp khớp được analyzer của chủ dự án nhận, và T6.5 không còn báo thiếu.
+
+#### T6.7 `repository_setup` cho JVM (B7, D8)
+
+- `repository-setup.ts`: thêm `maven_go_offline { project }`, chạy `mvn -B -Dmaven.repo.local=<cache> dependency:go-offline`, và `gradle_dependencies { project }`.
+- Có mạng, nhưng chỉ ghi vào cache dependency mà runner đang mount. Không đọc, không ghi `settings.xml`. Không chạy plugin ngoài pha resolve.
+- Khi thiếu `mvn` (`managed.ts:293`, `missing("maven")`), thông điệp phát hiện runner nêu thao tác setup tương ứng, hoặc lệnh cài cho người dùng nếu D8 không được duyệt.
+
+Test: argv và vùng ghi của từng thao tác; schema từ chối `project` ngoài repo.
+
+#### T6.8 Hướng dẫn Coordinator và Director
+
+Sửa ở `agents/coordinator/system-prompt.md`, `packages/runtime/src/director/guide.ts` và `planning_reference`:
+
+- Tách task theo loại bằng chứng: tiêu chí `manual_review` nằm trong task riêng, sở hữu tệp tài liệu.
+- Tiêu chí về hành vi CI (sự kiện kích hoạt, phiên bản Java, cache, concurrency, báo lỗi khi shard fail, lưu báo cáo) phải là `integration_test` với test thật, ví dụ:
+  - test đọc tệp workflow rồi assert cấu trúc;
+  - test chạy script chia shard rồi đối chiếu hợp các shard bằng đúng tập test, không trùng.
+
+  `static_analysis` chỉ bổ sung.
+- Coordinator được tăng độ chặt của method. Giảm độ chặt phải qua quyết định của người dùng.
+- Khi DAG trộn task tài liệu và task code, ghi `metadata.conditionalTdd` riêng cho từng task nếu assessment khác nhau.
+- Nêu ba mã từ chối mới và cách sửa từng mã.
+- Chép đúng khuôn câu hiện có. Không đặt đường dẫn tệp trong backtick ở `skills/**`. Chạy test hành vi của `agents/**`.
+
+#### T6.9 Kiểm tra và bàn giao
+
+```bash
+pnpm run build
+pnpm exec vitest run packages/runtime/test/agentic/mixed-evidence-admission.test.ts packages/runtime/test/agentic/static-analyzers.test.ts packages/runtime/test/agentic/host-verification.test.ts packages/runtime/test/agentic/execution-throw-guard.test.ts
+pnpm check:deps && pnpm typecheck
+pnpm test:affected --base main --run
+```
+
+Tiêu chí xong. Mỗi điểm chặn ở 6.1 có test chứng minh đã được gỡ:
+
+| # | Test chứng minh |
+|---|---|
+| B1 | T6.5: tệp không có analyzer bị báo ở cổng nhận với mã Coordinator sửa được; tệp có analyzer thì qua |
+| B2 | T6.1: đặc tả trộn với DAG đã tách được nhận; task trộn bị trả `task_evidence_mixed` |
+| B3 | T6.1: task tài liệu không còn chạm dòng 509 |
+| B4 | T6.2: task tài liệu không bị đòi method của bề mặt code; bất biến phủ bắt được trường hợp thiếu |
+| B5 | T6.4: YAML, workflow, shell, JVM được phân tích; tệp lạ cho `TaskBlocker` có mã |
+| B6 | T6.6: analyzer của chủ dự án không tắt runner tự phát hiện |
+| B7 | T6.7: có thao tác setup hoặc blocker người dùng kèm đúng lệnh |
+
+Thêm vào đó:
+- Fixture T6.0 đi hết chuỗi: proposal được nhận, đo `auto:static` và runner Maven giả, `workflow-verification` được chấp nhận.
+- Không còn `Error` thường nào trên đường nhận kế hoạch cho các ca này. `execution-throw-guard.test.ts` xanh.
+- Bộ test chống gian lận hiện có (`host-test-integrity`, mutation, Red độc lập) xanh mà không cần sửa kỳ vọng.
+
+Live, đưa vào GĐ5:
+- Chạy lại đúng yêu cầu của run `run-director-0c0c6957e5d223d9a30c1388` trên repo Maven, với `mvn` đã cài.
+- Ghi số lần đề xuất tới khi được nhận, thời gian, và kết quả đo `auto:static` và Maven.
+- Mức bằng chứng tách riêng: mã nguồn, test cục bộ, live.
+
 ## 6. Chia tệp để chạy song song không xung đột
 
 | GĐ | Tệp chính | Nhánh |
@@ -643,6 +896,8 @@ Nhánh: `fix/runtime/blocker-audit`.
 | 2 | `task-commands.ts`, `behavioral-runner.ts`, `host-verification.ts`, runner-results, `commandsFor` | `fix/runtime/observed-test-identity` |
 | 3 | contracts, `runtime.ts` (tool mới), `tools.ts`, `agents/coordinator/**` | `fix/runtime/in-run-scope-amend` |
 | 4a/4b | Tài liệu kiểm kê, test registry, lint | `fix/runtime/blocker-audit` |
+| 6 (T6.0–T6.3, T6.8) | `host-verification.ts` (`assertSupported`, `assertTaskSupported`, `assertWorkflowSupported` mới), `task-projection.ts` (mới), `runtime.ts:273,4006`, `host.ts:1943`, `workflow-rejection.ts`, `journal.ts` (enum), `test-strategy` (assessment theo task), `agents/coordinator/**`, `director/guide.ts` | `fix/runtime/task-scoped-admission` |
+| 6 (T6.4–T6.7) | `static-analyzers.ts` (mới), `host-verification.ts` (`captureStaticAnalysis`), `runner-adapters/managed.ts` (bind `compile`), `blockers.ts`, `repository-setup.ts`, `apps/cli/src/agentic-host.ts` (cần chủ P29 cho phép), `packages/runtime/package.json` + lockfile (integration) | `fix/runtime/static-analyzers` |
 
 - GĐ1 và GĐ3 cùng sửa `runtime.ts`, nên không làm song song.
 - GĐ1 và GĐ2 cùng chạm `host-development.ts`, nhưng ở hai hàm khác nhau. Việc tách `blockedReply` ở GĐ0 là ranh giới giữa hai bên.
@@ -662,6 +917,7 @@ Nhánh: `fix/runtime/blocker-audit`.
 | 4a/4b | 2–3 ngày | Song song |
 | 4c | Làm dần | Không |
 | 5 | 1–2 ngày | Có |
+| 6 | 1,5–2 tuần (nhánh cổng nhận khoảng 1 tuần; nhánh analyzer khoảng 1 tuần, chạy song song) | Có, trước lần live cho repo JVM/CI |
 
 - Phần cốt lõi (GĐ0, 1, 2, 3, 5) mất khoảng **3–4 tuần** nếu chạy song song đúng sơ đồ.
 - Riêng GĐ0 và GĐ1 (khoảng 1 tuần) đã đủ chặn kiểu vòng lặp không tiến triển cho mọi luồng.
