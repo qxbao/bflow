@@ -15,6 +15,17 @@ Run tối ưu chat ngày 06/11 mất khoảng 95 phút mà chưa tới bước t
 - Không có cơ chế nào phát hiện "cùng lỗi, kế hoạch không đổi" trong giai đoạn thực thi. Chống lặp theo dấu vân tay chỉ có ở giai đoạn đề xuất (`runtime.ts:2286`, `recordProposalRejection`). Ở thực thi chỉ có trần số lần thử (`VERIFICATION_ATTEMPT_LIMIT = 3` trong `auto-park.ts`).
 - Khi run đã ở `completed_with_parked`, Director không có đường hợp lệ để sửa phạm vi. `reresolveExecutionPlan` chỉ tự gắn lại thay đổi thuần repository.
 
+**Cơ chế vòng lặp, đã xác minh trong mã (2026-11-09):**
+
+1. Tester/QA gọi đo phase (`HostVerification.behavioralEvidence`, `host-verification.ts:1120`). Lỗi `Behavioral test identity...` là `Error` thường, không phải `HostBehavioralFailure`.
+2. `host.ts:2494` gọi `recordPhaseFailure(..., repairable = error instanceof HostBehavioralFailure)`, nên lỗi này thành `repairable: false`.
+3. `recoverPhaseFailures` (`runtime.ts:5467-5476`) đưa run vào `escalated` với `Policy measurement blocked: …` và `pendingAction` `resume_coordinator`, `recovery: "manual"`. Thông điệp này nói đây là lỗi hạ tầng và "sửa xong thì resume để đo lại cùng revision".
+4. Khi resume thủ công (`runtime.ts:3058-3066`), mọi `phaseFailure` có `repairable === false` của run được gắn `retryAuthorized = true`. Resume cũng cấp lại ngân sách tự động mới (`action.resumeAttempts = 0`, `recovery = "auto_resume"`).
+5. Hệ quả: đo lại **cùng revision, cùng spec**, ra lại đúng lỗi cũ. Không có gì so sánh "lần này có khác lần trước không". Chỉ `MANUAL_RESUME_LIMIT = 3` (`runtime.ts:149`) chặn được, và đó là trần tính trên số lần người dùng resume.
+6. Auto-park không cứu được: `selectAutoParkCandidates` (`auto-park.ts:119-121`) chỉ nhận nguồn `verification.requested` khi `source.phaseFailure === undefined`. Task kẹt vì phase failure nên **không bao giờ được auto-park**.
+
+Kết luận: chỉ sửa cách chọn test (GĐ2) vẫn chưa đủ. Mọi lỗi đo "không sửa được bằng resume" đều có thể lặp theo đúng cơ chế trên. Vì vậy GĐ0 và GĐ1 xử lý chính cơ chế này.
+
 Bảng so sánh với ai-sdlc (`speckit/runmethod/ai-sdlc`):
 
 | Khía cạnh | bflow hiện tại | ai-sdlc |
@@ -38,7 +49,7 @@ Lỗi này không phải bug lẻ. bflow bắt kế hoạch khai chính xác t�
 | Mã | Quyết định | Ảnh hưởng |
 |---|---|---|
 | **D1** | Với tệp test, `Specification.affectedPaths` chỉ là **dự kiến**, không bắt buộc tồn tại. Danh tính test để chấm = diff `base..HEAD` của task ∩ ownership ∩ ngôn ngữ và project của runner. `criterionMappings` vẫn bắt buộc. | Schema không đổi. Cập nhật `docs/sdlc-policies.md`, `docs/verification-runners.md`. |
-| **D2** | Thêm `ParkedIssueKind = "plan_mismatch"` vào contracts. | `packages/contracts`. Phải đi kèm compatibility plan: reader cũ gặp kind lạ thì từ chối, không ép kiểu. |
+| **D2** | Thêm `ParkedIssueKind = "plan_mismatch"` vào contracts. Làm trong **GĐ1**, vì cầu dao cần kind này để park. | `packages/contracts/src/director.ts:60`. Phải đi kèm compatibility plan: reader cũ gặp kind lạ thì từ chối, không ép kiểu. |
 | **D3** | Tạo tool mới `amend_task_scope` cho Coordinator. Thu hẹp phạm vi (hoặc sửa bên trong ownership hiện có) thì Runtime tự duyệt. Mở rộng ownership thì phải qua thẻ quyết định của người dùng. | Contracts của MCP tool, prompt Coordinator, coordinator guide. |
 
 ## 4. Thứ tự và khả năng song song
@@ -61,47 +72,291 @@ Ký hiệu: **[TT]** = tuần tự, nằm trên đường găng. **[∥]** = là
 
 ## 5. Chi tiết từng giai đoạn
 
-### GĐ0: Phân loại lỗi chặn [TT], khoảng 1–2 ngày
+### GĐ0: Phân loại lỗi chặn [TT], khoảng 1,5–2 ngày
 
-Mục tiêu: mọi lỗi chặn trên đường thực thi có mã định danh, có bên sửa được và có hành động kế tiếp. Giai đoạn này **không đổi hành vi chặn**, chỉ đổi phân loại và thông điệp.
+Mục tiêu: lỗi chặn trên đường đo test có mã định danh, có bên sửa được và có hành động kế tiếp. Giai đoạn này **không đổi trạng thái run hay luồng resume**. Chỉ đổi kiểu lỗi, thông điệp và phản hồi `check_work`. Không đụng journal hay contract.
 
-1. Tạo tệp mới `packages/runtime/src/agentic/blockers.ts`, private trong runtime, không thuộc contract:
-   - `type BlockerCode`: `declared_test_missing`, `runner_identity_unselectable`, `criterion_without_test`, `runner_unavailable`, `environment_blocked`, … (mở rộng dần).
-   - `type BlockerFixableBy = "developer" | "director" | "user" | "environment" | "runtime"`.
-   - `class TaskBlocker extends Error { code; fixableBy; nextAction; details }`.
-   - Registry `BLOCKERS: Record<BlockerCode, { fixableBy; nextAction }>`, được kiểm tra đủ mọi mã lúc compile.
-2. Thay các chỗ ném lỗi chuỗi:
-   - `behavioral-runner.ts:401`: gom **mọi** tệp thiếu rồi mới ném `TaskBlocker("declared_test_missing", fixableBy: "director")`, thay vì dừng ở tệp đầu tiên.
-   - `task-commands.ts`: các chỗ ném `runner_identity_unselectable`.
-   - `host-verification.ts` (`automaticGate`): lỗi "has no test identities for this task".
-3. Ở `host-development.ts` (`check_work`), tách phần dựng phản hồi `blocked` thành một hàm riêng (ví dụ `blockedReply(context, blocker)`). Hàm này đọc `fixableBy` để trả về `classification` và `recovery` cho đúng. Với nhóm `director`, thông điệp phải nói rõ: "kế hoạch khai X, Y nhưng commit không có; Developer không sửa được, hãy báo Coordinator".
-   - Việc tách hàm này là ranh giới để GĐ1 và GĐ2 không cùng sửa một đoạn mã.
-4. Test:
-   - Unit test cho registry.
-   - Fixture "khai 4 tệp, commit 2 tệp": kết quả phải là `declared_test_missing`, `fixableBy=director`, kèm đủ 2 tệp thiếu.
+Tương thích ngược: chỉ lỗi thuộc kiểu `TaskBlocker` mới mang phân loại mới. Mọi `Error` thường giữ nguyên hành vi, nên các test hạ tầng hiện có vẫn đúng, ví dụ `integration-connected-phases.test.ts:158` kỳ vọng `classification: "infrastructure"` cho lỗi môi trường.
 
-Bàn giao: merge riêng được, rủi ro thấp. Nhánh: `fix/runtime/blocker-taxonomy`.
+Ghi chú về công cụ trong repo: `grep` và `rg` trong shell có thể bị hook bọc lại; dùng `command grep` khi cần cú pháp gốc.
 
-### GĐ1: Cầu dao không tiến triển [TT, ∥ với GĐ2], khoảng 3–5 ngày
+#### T0.1 Tạo `blockers.ts` (viết test trước)
 
-1. Tạo tệp mới `packages/runtime/src/agentic/no-progress.ts`:
-   - `blockerFingerprint = digest(code, taskId, specDigest, strategyDigest, tree hash của ownedPaths tại HEAD)`.
-   - Cùng dấu vân tay nghĩa là cả kế hoạch lẫn mã đều chưa đổi.
-2. Thêm `TaskRecord.blockerHistory: { fingerprint, code, at, attemptId }[]` vào journal, giữ tối đa 10 mục.
-   - **Phải xác minh trước khi cài:** field optional có cần nâng version journal (hiện là v7) và viết upcaster không. Không được tự dựng trạng thái recovery bị thiếu.
-3. Chèn điểm kiểm tra vào các đường giao lại: rework dispatch, verification retry trong `runtime.ts`, và `auto-park.ts`. Khi gặp **cùng dấu vân tay lần thứ 2**, không giao lại cho Developer mà định tuyến theo `fixableBy`:
-   - `director`: gửi Coordinator thông báo `plan_mismatch` kèm danh sách tệp và tiêu chí liên quan, cùng gợi ý gọi `amend_task_scope`. Trước khi GĐ3 xong, park task với kind `plan_mismatch`.
-   - `environment`: park `environment` ngay, không đợi hết 3 lần.
-   - `user`: tạo thẻ quyết định.
-   - `developer`: vẫn rework, nhưng lần tiếp theo cùng dấu vân tay thì park `rework_exhausted`.
-4. Dùng lại khuôn của `recordProposalRejection` (`runtime.ts:2286`) cho thống nhất. Nếu tách được thì gom hai chỗ vào một helper.
-5. Telemetry trong `bflow status --telemetry`: số lần cầu dao ngắt, phân theo mã.
-6. Test:
-   - Kịch bản dựng lại lỗi 06/11 bằng fake runner: lần chặn thứ 2 không tạo assignment Developer thứ 3; Coordinator nhận `plan_mismatch`.
-   - Commit mới làm đổi tree thì dấu vân tay đổi theo, và vẫn được thử lại.
-   - Restart host giữa hai lần chặn: lịch sử dấu vân tay vẫn còn.
+Test mới `packages/runtime/test/agentic/blockers.test.ts`:
+- Mọi mã trong `BLOCKERS` có `fixableBy` hợp lệ và `nextAction` không rỗng.
+- `new TaskBlocker(code, msg, details)` có `instanceof Error`; `code`, `fixableBy` và `nextAction` lấy từ registry.
+- `blockerOf(error)` trả về blocker với `TaskBlocker`, trả `undefined` với `Error` thường.
+- `isResumable(blocker)` chỉ trả `true` khi `fixableBy` là `environment` hoặc `runtime`.
 
-Tệp sở hữu: `no-progress.ts` (mới), `runtime.ts` (đường giao lại), `auto-park.ts`, journal, hàm `blockedReply`. Không chạm `task-commands.ts` hay `behavioral-runner.ts`. Nhánh: `fix/runtime/no-progress-breaker`.
+Mã tệp `packages/runtime/src/agentic/blockers.ts`:
+
+```ts
+import type { JsonValue } from "@bflow/contracts";
+
+export type BlockerFixableBy = "developer" | "director" | "user" | "environment" | "runtime";
+
+export const BLOCKERS = {
+  declared_test_missing: { fixableBy: "director",
+    nextAction: "Kế hoạch khai tệp test chưa có trong commit. Resume không sửa được: hoặc giao Developer viết đúng các tệp đó, hoặc thu hẹp phạm vi test." },
+  runner_identity_unselectable: { fixableBy: "director",
+    nextAction: "Không gắn được tên test của tiêu chí vào đúng một runner. Sửa criterionMappings hoặc tách tiêu chí." },
+  no_test_identities: { fixableBy: "director",
+    nextAction: "Task không có danh tính test nào khớp runner. Kiểm criterionMappings, đường dẫn test và ownership." },
+} as const satisfies Record<string, { fixableBy: BlockerFixableBy; nextAction: string }>;
+
+export type BlockerCode = keyof typeof BLOCKERS;
+
+export class TaskBlocker extends Error {
+  readonly fixableBy: BlockerFixableBy;
+  readonly nextAction: string;
+  constructor(readonly code: BlockerCode, message: string, readonly details: Readonly<Record<string, JsonValue>> = {}) {
+    super(message);
+    this.name = `TaskBlocker[${code}]`;
+    this.fixableBy = BLOCKERS[code].fixableBy;
+    this.nextAction = BLOCKERS[code].nextAction;
+  }
+}
+export function blockerOf(error: unknown): TaskBlocker | undefined { return error instanceof TaskBlocker ? error : undefined; }
+export function isResumable(blocker: { fixableBy: BlockerFixableBy }): boolean {
+  return blocker.fixableBy === "environment" || blocker.fixableBy === "runtime";
+}
+```
+
+Lưu ý:
+- Giữ `message` cũ làm phần đầu của thông điệp. Lý do: `host-verification.ts:600` nhận dạng lỗi bằng `message.includes("runner_identity_unselectable")`.
+
+#### T0.2 Gom đủ tệp thiếu trong `runMeasurementCommand`
+
+Sửa `behavioral-runner.ts:398-402`. Hiện tại vòng lặp ném lỗi ngay ở tệp thiếu đầu tiên. Sửa thành: gom mọi tệp không phải blob `100644` hoặc `100755` vào mảng `missing`. Sau vòng lặp, nếu `missing` không rỗng thì ném:
+
+```ts
+throw new TaskBlocker("declared_test_missing",
+  `Behavioral test identity must be a committed regular file: ${missing.join(", ")}`,
+  { paths: missing, revision });
+```
+
+Phần thông điệp giữ nguyên tiền tố cũ để log và tài liệu cũ vẫn tìm được.
+
+Test mới trong `packages/runtime/test/agentic/blocker-classification.test.ts`:
+- Dựng repo git tạm, commit 2 trong 4 tệp test.
+- Gọi `measureBehavior` với lệnh đã bind 4 `testPaths`.
+- Kỳ vọng `TaskBlocker` có `code = declared_test_missing` và `details.paths` đúng 2 tệp còn thiếu.
+- Lấy khuôn dựng repo từ `behavioral-runner-output.test.ts`.
+
+#### T0.3 `task-commands.ts`
+
+Đổi hai chỗ `throw new Error("runner_identity_unselectable: …")` (quanh dòng 184 và 198) thành `throw new TaskBlocker("runner_identity_unselectable", <cùng thông điệp>)`.
+
+Nhánh `catch` ở dòng 189 (`if (input.ownedPaths !== undefined) continue; throw error;`) giữ nguyên.
+
+Test: test hiện có của `resolveTaskCommands` phải vẫn xanh. Thêm một assert `instanceof TaskBlocker` cho ca mơ hồ.
+
+#### T0.4 `host-verification.ts`
+
+- `automaticGate` (khoảng dòng 611): đổi `throw new Error("… has no test identities for this task …")` thành `TaskBlocker("no_test_identities", <cùng thông điệp>)`.
+- Nhánh `catch` của `gate()` (khoảng dòng 1110): nếu `blockerOf(error)` có giá trị thì thêm `details.blocker = { code, fixableBy, nextAction, details }` vào lỗi trả về. `code: "validation"` và `retryable: false` giữ nguyên.
+
+#### T0.5 `check_work` trả đúng phân loại
+
+Sửa trong `host-development.ts`, hàm `check`, khoảng dòng 457-493:
+
+1. Tách hàm `private blockedReply(context, reason: string, blocker?: TaskBlocker)`, trả về đúng khuôn JSON hiện tại, với:
+   - `classification`: không có blocker thì `"infrastructure"` như cũ. Có blocker thì ánh xạ theo `fixableBy`: `director` → `"plan_mismatch"`, `developer` → `"code"`, `environment` → `"infrastructure"`, `runtime` hoặc `user` → `"runtime"`.
+   - `recovery`: `blocker.nextAction` nếu có, ngược lại dùng chuỗi cũ.
+   - Thêm trường `blocker: { code, fixableBy, details }` khi có blocker.
+2. Nhánh `catch` quanh `commandsFor` (dòng 471-472): trả về thêm `blocker: blockerOf(error)`.
+3. Bọc vòng đo (dòng 487-493) bằng `try/catch`. Bắt được `TaskBlocker` thì `return this.blockedReply(...)`. Lỗi khác ném tiếp như cũ.
+
+Hàm `blockedReply` là ranh giới giữa GĐ1 và GĐ2: GĐ1 chỉ sửa hàm này, còn GĐ2 chỉ sửa `commandsFor`.
+
+Test:
+- Thêm vào `integration-connected-phases.test.ts`, hoặc một tệp mới dùng `connectedPhaseFixture`.
+- Spec khai 2 tệp test, chỉ commit 1. `check_work` phải trả `status: "blocked"`, `classification: "plan_mismatch"`, kèm `blocker.details.paths` liệt kê tệp thiếu.
+- Test cũ ở dòng 158 không đổi.
+
+#### T0.6 Kiểm tra và bàn giao
+
+```bash
+pnpm run build   # test runtime import dist/, build trước
+pnpm exec vitest run packages/runtime/test/agentic/blockers.test.ts packages/runtime/test/agentic/blocker-classification.test.ts packages/runtime/test/agentic/integration-connected-phases.test.ts
+pnpm check:deps && pnpm typecheck
+pnpm test:affected --base main --run
+```
+
+`packages/runtime` không có script `test` riêng; test chạy bằng `vitest` ở thư mục gốc. Fixture `connectedPhaseFixture` nằm ở `packages/runtime/test/helpers/agentic-integration-fixture.ts:322`.
+
+Tiêu chí xong:
+- Toàn bộ test hiện có xanh.
+- Bốn test mới xanh.
+- Không có thay đổi trong `journal.ts` hay `packages/contracts`.
+
+Nhánh: `fix/runtime/blocker-taxonomy`. Merge riêng được, rủi ro thấp.
+
+### GĐ1: Cầu dao không tiến triển [TT, ∥ với GĐ2], khoảng 4–6 ngày
+
+Mục tiêu: một phase failure mà resume không sửa được thì không còn bị đo lại trên cùng đầu vào. Run phải dừng có tên rõ ràng (park `plan_mismatch`), không lặp.
+
+Quy tắc của cầu dao:
+- **Cùng đầu vào:** cùng mã blocker, cùng task, cùng phase, cùng revision đo, cùng digest spec và cùng digest strategy. Với đầu vào giống hệt, đo lại chắc chắn ra lại kết quả cũ.
+- **Blocker không resumable** (`fixableBy` khác `environment` và `runtime`): resume **không** cấp `retryAuthorized`. Phải đổi spec/strategy (GĐ3) hoặc có revision mới thì mới đo lại.
+- **Blocker resumable, hoặc `Error` thường không mang blocker:** giữ nguyên hành vi hiện tại. Lỗi hạ tầng thật vẫn sửa bằng resume được.
+
+Thứ tự task: T1.1 và T1.2 làm song song; T1.3 cần T1.2; T1.4 → T1.5 → T1.6 tuần tự; T1.7 và T1.8 làm song song sau T1.5; T1.9 cuối cùng.
+
+#### T1.1 Contract D2: thêm `plan_mismatch` [∥ với T1.2]
+
+Các chỗ phải sửa:
+- `packages/contracts/src/director.ts:60`: thêm `"plan_mismatch"` vào `ParkedIssueKindSchema`.
+- `packages/runtime/src/agentic/auto-park.ts:15-33`: hai map `summaries` và `autoParkSuggestedAction` có kiểu `Record<ParkedIssueKind, string>`, nên TypeScript sẽ bắt thêm khóa. Nội dung đề xuất:
+  - Tóm tắt: "Kế hoạch lệch với commit (ví dụ khai tệp test chưa có); resume không sửa được."
+  - Hành động: "Giao Developer viết đúng tệp đã khai, hoặc thu hẹp phạm vi test (amend_task_scope khi có), rồi retry."
+- `apps/web/src/features/issues/index.tsx:18`: thêm nhãn "Kế hoạch lệch".
+- Thêm ca `plan_mismatch` vào test schema của contracts.
+- `docs/contracts.md`: ghi enum mới kèm compatibility note. Binary cũ gặp kind mới thì Zod từ chối; journal v9 (T1.2) cũng đã chặn binary cũ đọc state mới, nên không có đường ép kiểu.
+
+Kiểm tra: `pnpm typecheck` báo thiếu khóa ở mọi `Record<ParkedIssueKind, …>` còn sót. Đó là cách tìm hết chỗ phải sửa.
+
+#### T1.2 Journal v9 cho `phaseFailure.blocker` [∥ với T1.1]
+
+Theo đúng khuôn đã dùng cho v7 và v8 trong `journal.ts`:
+
+1. Dòng 326: thêm `9` vào union `version`. Dòng 350: thêm `9` vào danh sách version được chấp nhận.
+2. Dòng 313: mở rộng kiểu `phaseFailure` thêm
+   `blocker?: { code: BlockerCode; fixableBy: BlockerFixableBy; fingerprint: string; specDigest: string; strategyDigest: string; sourceRevision: string; details?: Record<string, JsonValue> }`.
+3. Viết `requiresBlockerJournal(state)`: trả `true` khi có `out.phaseFailure?.blocker`, hoặc có task bị park với `kind === "plan_mismatch"` (trong `parked` hoặc `parkHistory`).
+4. Khi save (khoảng dòng 863), thêm dòng `if (state.version < 9 && requiresBlockerJournal(state)) state.version = 9;`. Version chỉ được nâng lên, không bao giờ hạ.
+5. Validation lúc đọc (dòng 637-643), khi có `blocker` thì kiểm:
+   - `state.version >= 9`;
+   - `code` có trong `BLOCKERS` và `fixableBy` khớp registry;
+   - `fingerprint`, `specDigest`, `strategyDigest` khớp `/^[a-f0-9]{64}$/`;
+   - `sourceRevision` khớp `/^[a-f0-9]{40}$/`;
+   - `details` là JSON và kích thước có giới hạn: tối đa 50 path, mỗi path tối đa 1024 ký tự.
+
+   Sai bất kỳ điều nào thì ném `Invalid private policy failure outcome` như hiện tại.
+6. Không viết upcaster: state v8 không có `blocker` vẫn hợp lệ nguyên trạng. Không suy ngược `blocker` từ chuỗi `summary` cũ, vì như vậy là tự dựng trạng thái recovery.
+
+Test (thêm vào test codec journal hiện có, tìm bằng `command grep -rln "parseAgenticJournalState" packages/runtime/test`):
+- v8 có `blocker`: bị từ chối.
+- v9 có `blocker`: đọc và ghi lại giữ nguyên.
+- v8 không có `blocker`: save xong vẫn là v8.
+- `fixableBy` không khớp registry: bị từ chối.
+
+#### T1.3 `no-progress.ts` [sau T1.2]
+
+Tệp mới `packages/runtime/src/agentic/no-progress.ts`:
+
+```ts
+import { digest } from "./journal.js";
+export function blockerFingerprint(input: { code: string; runId: string; taskId: string; phase: string;
+  sourceRevision: string; specDigest: string; strategyDigest: string; details: unknown }): string {
+  return digest([input.code, input.runId, input.taskId, input.phase, input.sourceRevision, input.specDigest, input.strategyDigest, input.details]);
+}
+/** Số phase failure trước đó của cùng run/task mang cùng dấu vân tay. */
+export function priorSameFingerprint(state: Pick<JournalState, "outbound">, runId: string, taskId: string, fingerprint: string, excludeMessageId: string): number;
+/** Spec hoặc strategy hiện tại có khác lúc ghi blocker không. */
+export function inputsChanged(blocker: { specDigest: string; strategyDigest: string }, task: TaskRecord): boolean; // so với digest(task.spec.specification), digest(task.spec.strategy)
+```
+
+Test unit `no-progress.test.ts`:
+- Đổi một thành phần bất kỳ thì dấu vân tay đổi.
+- Cùng đầu vào thì cùng dấu vân tay.
+- `priorSameFingerprint` không đếm chính request đang xét.
+
+#### T1.4 Ghi blocker vào phase failure [sau T1.3]
+
+1. `host.ts:2494`: truyền thêm `blockerOf(error)` vào `recordPhaseFailure`.
+2. `runtime.ts:5403`: `recordPhaseFailure(binding, requestId, summary, repairable, evidence?, blocker?: TaskBlocker)`.
+   - Lấy `sourceRevision` từ `record(request.message.payload).sourceRevision`. Lấy `phase` và `taskId` từ payload.
+   - Lấy `specDigest = digest(task.spec.specification)` và `strategyDigest = digest(task.spec.strategy)` từ `TaskRecord` của run.
+   - Tính `fingerprint` bằng T1.3 rồi lưu vào `request.phaseFailure.blocker`.
+   - Kiểm bất biến cũ (`Conflicting immutable policy failure outcome`) phải so cả `digest(blocker)`.
+3. Theo trường hợp:
+   - Blocker có `fixableBy` khác `environment`/`runtime`: luôn đặt `repairable = false`. Developer không nhận repair notice, vì không có gì trong code để Developer sửa đúng nghĩa.
+   - Không có blocker: không đổi gì.
+
+Test: phase failure do `declared_test_missing` được lưu kèm `blocker` đầy đủ, và journal tự nâng lên v9.
+
+#### T1.5 Chặn đo lại trong `recoverPhaseFailures` và đường resume [sau T1.4]
+
+1. Ở `recoverPhaseFailures` (`runtime.ts`, khoảng dòng 5467-5476), nhánh `!repairable`, khi `blocker && !isResumable(blocker)`:
+   - `run.error = \`Plan mismatch (${blocker.code}): ${summary}\``.
+   - `pendingAction.reason` = `run.error` + `\nNext: ${blocker.nextAction}`. Phải nói rõ "resume sẽ không đo lại cùng revision".
+   - Giữ `recovery: "manual"` như cũ. `this.progress(...)` gửi Conversation một thông điệp dễ hiểu, kiểu "Kế hoạch khai các tệp test … chưa có trong commit; đang dừng để sửa kế hoạch".
+2. Ở cùng hàm, bất kể `repairable`: nếu `priorSameFingerprint(...) >= 1` thì coi là không tiến triển. Không gửi `phaseNotice` cho Developer nữa; escalate với `run.error = \`No progress: same ${code} on same revision and plan\``.
+3. Ở đường resume (`runtime.ts:3058-3066`), trước khi gắn `retryAuthorized = true` cho một `phaseFailure`:
+   - `blocker` resumable, hoặc không có `blocker`: giữ hành vi cũ.
+   - `blocker` không resumable và `!inputsChanged(blocker, task)`: **không** gắn `retryAuthorized`. Ghi phase failure đó vào danh sách `skipped`.
+   - `blocker` không resumable nhưng spec/strategy đã đổi (sau này là GĐ3): cho đo lại.
+   - Đưa `skipped` vào payload `resume_run` gửi Coordinator (`nonResumablePhaseFailures: [{ requestId, code, nextAction }]`) và vào JSON trả về của lệnh resume. Thêm một câu vào trường `next`: "Các phase failure sau là lệch kế hoạch; resume không đo lại chúng."
+4. `retryVerification` (`runtime.ts:6279`): đường này phục vụ verification ở mức workflow (`VERIFICATION_RETRY_PREFIX`), không phải phase failure. **Không sửa**, chỉ thêm test khẳng định nó không cấp lại `retryAuthorized` cho phase failure mang blocker.
+
+Test trong tệp mới `packages/runtime/test/agentic/no-progress-breaker.test.ts`, dùng `connectedPhaseFixture`:
+- (a) Khai 2 tệp test, commit 1. Tester đo Red. Run thành `escalated`, có `Plan mismatch (declared_test_missing)`.
+- (b) Người dùng resume. Không có `retryAuthorized`; trong outbound **không** có `verification.requested` mới. Payload `resume_run` có `nonResumablePhaseFailures`.
+- (c) Resume 3 lần liên tiếp vẫn không có lần đo nào. Đây chính là kịch bản 06/11.
+- (d) Lỗi hạ tầng không mang blocker vẫn được đo lại sau resume. Chạy lại `verification-retry.test.ts`, `stuck-states.test.ts`, `integration-recovery.test.ts` không sửa gì.
+- (e) Mở lại journal (giả lập restart host) giữa (a) và (b): kết quả không đổi.
+
+#### T1.6 Auto-park `plan_mismatch` [sau T1.5]
+
+Hiện tại (`auto-park.ts:119-121`), nguồn `verification.requested` chỉ được nhận khi `phaseFailure === undefined`. Vì vậy task kẹt vì phase failure không bao giờ được park.
+
+Sửa trong `select()`, trước nhánh `else` chung:
+- Tìm phase failure mới nhất của task trong `related`, thỏa: `message.type === "verification.requested"`, `phaseFailure.applied`, có `phaseFailure.blocker` và `!isResumable(blocker)`, cùng `implementationAttemptId === current.attemptId`.
+- Nếu `run.status === "escalated"` và `run.pendingAction?.state === "pending"` thì đặt `kind = "plan_mismatch"`.
+- **Không** đợi `maxAutoResumesBeforePark`, vì resume đằng nào cũng không sửa được.
+- Các fence hiện có (unknown delivery, approval đang chờ, execution chưa dừng) giữ nguyên và vẫn chạy trước.
+
+Test (thêm vào `auto-park.test.ts`):
+- Director mode, có phase failure mang blocker `director`: chọn được candidate `plan_mismatch`.
+- Không có blocker: hành vi cũ, không chọn.
+- Có approval đang chờ: không chọn.
+
+Nối vào kịch bản (f) của `no-progress-breaker.test.ts`: Director mode với auto-park bật, task bị park `plan_mismatch` và run thành `completed_with_parked` khi không còn task nào khác.
+
+#### T1.7 Hướng dẫn Director và Coordinator [∥ với T1.8, sau T1.5]
+
+- `agents/director/system-prompt.md` và `agents/coordinator/system-prompt.md`: thêm quy tắc "Khi escalation có `Plan mismatch (…)` hoặc payload resume có `nonResumablePhaseFailures`: **không** gọi `resume_run` hay `retry_verification` cho lỗi đó. Chọn một trong hai: (1) nếu tệp test đã khai thuộc phạm vi hiện tại, giao Developer viết đúng các tệp đó và commit (revision mới thì được đo lại); (2) nếu không, gọi `park_task` với kind `plan_mismatch` và báo người dùng. Khi có `amend_task_scope` (GĐ3) thì dùng tool đó."
+- Xem `host-director-mode.ts` và `mcp-output-views.ts`, nơi đã nhắc `resume_run` và `retry_verification`. Nếu có đoạn hướng dẫn trả cho model thì cập nhật cùng nội dung.
+- Lưu ý quy tắc skill: đường dẫn trong backtick trở thành ref bắt buộc, nên viết tên tệp bằng văn xuôi. Nếu sửa nội dung skill thì phải bump version.
+- **Còn phải xác minh khi làm:** sau khi run đã `escalated`, Director có giao rework cho Developer trên cùng task được không, và qua tool nào. Nếu không có đường hợp lệ thì phương án (1) bị loại; hướng dẫn chỉ còn `park_task` cho tới khi GĐ3 xong.
+- Test: chạy lại test hành vi của `agents/**`; tìm bằng `command grep -rln "system-prompt.md" packages/*/test agents`.
+
+#### T1.8 Telemetry [∥ với T1.7, sau T1.5]
+
+- `packages/runtime/src/telemetry/report.ts` (`readWorkflowTelemetry`, được `runtime.ts:1721` dùng trong `telemetryReport`): thêm `blockers: { code, fixableBy, count, lastAt, resumeSkipped }[]`, tổng hợp từ `phaseFailure.blocker` trong outbound của run.
+- Cập nhật formatter của `bflow status --telemetry` trong `apps/cli/src/formatters.ts`.
+- Test: test có sẵn của telemetry report thêm ca có blocker.
+
+#### T1.9 Kiểm tra và bàn giao [TT, cuối GĐ1]
+
+```bash
+pnpm run build
+pnpm exec vitest run packages/runtime/test/agentic/no-progress-breaker.test.ts packages/runtime/test/agentic/no-progress.test.ts packages/runtime/test/agentic/auto-park.test.ts packages/runtime/test/agentic/verification-retry.test.ts packages/runtime/test/agentic/stuck-states.test.ts packages/runtime/test/agentic/integration-recovery.test.ts packages/runtime/test/agentic/park-unpark.test.ts
+pnpm check:deps && pnpm typecheck
+pnpm test:affected --base main --run   # sửa contracts ⇒ có thể bị nới rộng thành full
+pnpm test:web
+```
+
+Tiêu chí xong:
+- Kịch bản (a)–(f) xanh.
+- Toàn bộ test cũ về resume, retry và park xanh mà không phải sửa kỳ vọng. Chỉ những ca có blocker mới đổi hành vi.
+- Journal v9 có test chuyển đổi.
+- Contract có compatibility note trong `docs/contracts.md`.
+
+Rủi ro riêng của GĐ1:
+- Sửa contract làm selection test nới rộng thành full suite. Theo memory của repo, chạy full suite đồng thời trên nhiều worktree dễ gây timeout giả, nên để integrator chạy full suite một lần.
+- Thay đổi ở `recoverPhaseFailures` đụng tới luồng recovery phức tạp (writer lease, attempt bị thay thế). Chỉ thêm nhánh cho phase failure **có** blocker; không sửa nhánh cũ.
+
+Tệp sở hữu:
+- `packages/contracts/src/director.ts`
+- `no-progress.ts` (mới)
+- `runtime.ts` (`recordPhaseFailure`, `recoverPhaseFailures`, đường resume)
+- `auto-park.ts`, `journal.ts`, `host.ts:2494`
+- `blockedReply` trong `host-development.ts`
+- `telemetry/report.ts`, formatter CLI, nhãn web, `agents/director/**`, `agents/coordinator/**`
+
+Không chạm `task-commands.ts` hay `behavioral-runner.ts`. Nhánh: `fix/runtime/no-progress-breaker`.
 
 ### GĐ2: Lấy danh tính test từ diff [∥ với GĐ1], khoảng 1–1,5 tuần
 
@@ -135,10 +390,7 @@ Tệp sở hữu: `task-commands.ts`, `behavioral-runner.ts`, `host-verification
 
 Thiết kế, contract (D2, D3) và prompt có thể chuẩn bị song song với GĐ1 và GĐ2. Phần cài đặt chờ GĐ1, vì cùng sửa `runtime.ts` và cần đường định tuyến `director`.
 
-1. Contracts:
-   - Thêm `ParkedIssueKind = "plan_mismatch"` (D2).
-   - Thêm schema input/output cho `amend_task_scope` (D3).
-   - Kèm ghi chú compatibility và migration.
+1. Contracts: thêm schema input/output cho `amend_task_scope` (D3), kèm ghi chú compatibility và migration. `plan_mismatch` (D2) đã có từ GĐ1.
 2. Tool `amend_task_scope(runId, taskId, changes)` cho Coordinator. Chỉ cho phép:
    - Bỏ tệp test chưa tồn tại khỏi `affectedPaths`.
    - Thêm hoặc bỏ tệp test **bên trong** ownership hiện có.
@@ -180,7 +432,7 @@ Nhánh: `fix/runtime/blocker-audit`.
 | GĐ | Tệp chính | Nhánh |
 |---|---|---|
 | 0 | `blockers.ts` (mới), `behavioral-runner.ts:401`, `task-commands.ts` (chỗ ném lỗi), `host-development.ts` (tách `blockedReply`) | `fix/runtime/blocker-taxonomy` |
-| 1 | `no-progress.ts` (mới), `runtime.ts`, `auto-park.ts`, journal, `blockedReply` | `fix/runtime/no-progress-breaker` |
+| 1 | `contracts/src/director.ts`, `no-progress.ts` (mới), `runtime.ts` (phase failure, resume), `auto-park.ts`, `journal.ts` (v9), `host.ts:2494`, `blockedReply`, telemetry, `agents/director/**`, `agents/coordinator/**` | `fix/runtime/no-progress-breaker` |
 | 2 | `task-commands.ts`, `behavioral-runner.ts`, `host-verification.ts`, runner-results, `commandsFor` | `fix/runtime/observed-test-identity` |
 | 3 | contracts, `runtime.ts` (tool mới), `tools.ts`, `agents/coordinator/**` | `fix/runtime/in-run-scope-amend` |
 | 4a/4b | Tài liệu kiểm kê, test registry, lint | `fix/runtime/blocker-audit` |
@@ -195,8 +447,8 @@ Nhánh: `fix/runtime/blocker-audit`.
 
 | GĐ | Effort | Đường găng |
 |---|---|---|
-| 0 | 1–2 ngày | Có |
-| 1 | 3–5 ngày | Có |
+| 0 | 1,5–2 ngày | Có |
+| 1 | 4–6 ngày (gồm contract D2 và journal v9) | Có |
 | 2 | 1–1,5 tuần | Song song với 1 |
 | 3 | 1–1,5 tuần | Có, sau 1 |
 | 4a/4b | 2–3 ngày | Song song |
@@ -211,7 +463,7 @@ Nhánh: `fix/runtime/blocker-audit`.
 | Rủi ro | Biện pháp |
 |---|---|
 | GĐ2 nới lỏng làm mất khả năng chống gian lận | Giữ bất biến ở mục 2. Bộ test chống gian lận là điều kiện để merge. |
-| Thêm field journal làm vỡ recovery | Xác minh codec trước. Nâng version và viết upcaster nếu cần. Có test restart. |
+| Thêm field journal làm vỡ recovery | Đã xác minh: theo khuôn v7/v8 (version chỉ nâng, validation lúc đọc). Field mới nằm sau journal v9, không cần upcaster. Có test restart. |
 | `amend_task_scope` thành cửa sau | Chỉ cho thu hẹp hoặc sửa bên trong ownership. Mở rộng bắt buộc qua thẻ duyệt. Runtime tự kiểm bất biến. |
 | Dấu vân tay quá nhạy, ví dụ đổi tệp không liên quan cũng làm reset | Chỉ băm tree của `ownedPaths` cùng digest của spec và strategy. Test cả hai chiều. |
 | Dấu vân tay quá thô, ngắt oan | Chỉ ngắt từ lần thứ 2 và có định tuyến rõ ràng. Telemetry đếm số lần ngắt để hiệu chỉnh. |
