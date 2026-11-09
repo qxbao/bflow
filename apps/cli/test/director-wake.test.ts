@@ -224,3 +224,57 @@ describe("Codex Director event wake", () => {
     expect(message).toContain("projection.run");
   });
 });
+
+describe("Codex Director watcher and user stop intent", () => {
+  it("cancels instead of backing off when wait fails after the user stopped the session", async () => {
+    const dir = await root(); const state = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} });
+    let stopped = false; let queued = 0; let delays = 0;
+    await runCodexDirectorWatch({ root: dir, sessionName: "session", generation: state.generation,
+      stopped: async () => stopped,
+      wait: async () => { stopped = true; throw new Error("connect ENOENT /tmp/host.sock"); },
+      queue: async () => { queued++; }, delay: async () => { delays++; } });
+    expect(queued).toBe(0);
+    expect(delays).toBe(0);
+    expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("cancelled");
+  });
+
+  it("does not call wait when the stop intent exists before the first loop", async () => {
+    const dir = await root(); const state = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} });
+    let waits = 0;
+    await runCodexDirectorWatch({ root: dir, sessionName: "session", generation: state.generation,
+      stopped: async () => true,
+      wait: async () => { waits++; return event; }, queue: async () => { throw new Error("must not queue"); }, delay: async () => {} });
+    expect(waits).toBe(0);
+    expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("cancelled");
+  });
+
+  it("does not queue when the stop intent appears between wait and admission", async () => {
+    const dir = await root(); const state = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} });
+    let stopped = false; let queued = 0;
+    await runCodexDirectorWatch({ root: dir, sessionName: "session", generation: state.generation,
+      stopped: async () => stopped,
+      wait: async () => { stopped = true; return event; },
+      queue: async () => { queued++; }, delay: async () => {} });
+    expect(queued).toBe(0);
+    expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("cancelled");
+  });
+
+  it("still retries transient wait failures when the session was not stopped", async () => {
+    const dir = await root(); const state = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} });
+    let calls = 0; let queued = 0; let delays = 0;
+    await runCodexDirectorWatch({ root: dir, sessionName: "session", generation: state.generation,
+      stopped: async () => false,
+      wait: async () => { if (calls++ === 0) throw new Error("connect ECONNREFUSED"); return event; },
+      queue: async () => { queued++; }, delay: async () => { delays++; } });
+    expect(delays).toBe(1);
+    expect(queued).toBe(1);
+  });
+
+  it("refuses to arm a watcher after the user stopped the session", async () => {
+    const dir = await root(); let spawned = 0;
+    await expect(armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, stopped: async () => true,
+      spawn: async () => { spawned++; } })).rejects.toThrow(/^session_stopped_by_user:/);
+    expect(spawned).toBe(0);
+    expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("absent");
+  });
+});

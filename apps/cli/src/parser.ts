@@ -1712,10 +1712,10 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
     case "attach":
     case "recover":
     case "doctor": {
-      const booleans = new Set(["--json", "-j", "--yes", "-y", "--force", "--deep"]);
+      const booleans = new Set(["--json", "-j", "--yes", "-y", "--force", "--deep", "--restart"]);
       const allowed = new Set(["--json", "-j"]);
       if (command === "down" || command === "recover") { allowed.add("--yes"); allowed.add("-y"); }
-      if (command === "up") allowed.add("--expect-plan");
+      if (command === "up") { allowed.add("--expect-plan"); allowed.add("--restart"); }
       if (command === "down") allowed.add("--force");
       if (command === "doctor") allowed.add("--deep");
       if (command === "up" || command === "down") allowed.add("--timeout");
@@ -1727,6 +1727,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
       if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000))
         return makeValidationError("--timeout must be an integer from 1 to 600000 milliseconds.", json, command);
       return { ok: true, value: { command, json, help: false, yes: result.value.flags.has("--yes") || result.value.flags.has("-y"), timeoutMs,
+        ...(command === "up" && result.value.flags.has("--restart") ? { restart: true } : {}),
         ...(command === "up" && result.value.flags.has("--expect-plan") ? { expectPlanPath: String(result.value.flags.get("--expect-plan")) } : {}),
         ...(command === "down" ? { force: result.value.flags.has("--force") } : {}),
         ...(command === "doctor" ? { deep: result.value.flags.has("--deep") } : {}) } };
