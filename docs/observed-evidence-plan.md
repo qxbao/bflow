@@ -447,28 +447,166 @@ Tiêu chí xong: mọi test mới từng đỏ rồi xanh; bộ cũ xanh **nguy�
 
 ### GĐ3: Sửa phạm vi trong run [TT sau GĐ1], khoảng 1–1,5 tuần
 
-Thiết kế, contract (D2, D3) và prompt có thể chuẩn bị song song với GĐ1 và GĐ2. Phần cài đặt chờ GĐ1, vì cùng sửa `runtime.ts` và cần đường định tuyến `director`.
+- Trạng thái: **BƯỚC 1 (chi tiết hóa) xong ngày 2026-11-09, chờ chủ dự án duyệt. Chưa có mã.** Nhánh `fix/runtime/in-run-scope-amend`, tạo từ `origin/main` `a04ba51f` (đã có GĐ0, GĐ1 và GĐ2). Mức bằng chứng: kế hoạch + đọc mã nguồn.
 
-1. Contracts: thêm schema input/output cho `amend_task_scope` (D3), kèm ghi chú compatibility và migration. `plan_mismatch` (D2) đã có từ GĐ1.
-2. Tool `amend_task_scope(runId, taskId, changes)` cho Coordinator. Chỉ cho phép:
-   - Bỏ tệp test chưa tồn tại khỏi `affectedPaths`.
-   - Thêm hoặc bỏ tệp test **bên trong** ownership hiện có.
-   - Sửa mapping `testNames` của một tiêu chí.
-   - Mở rộng ownership: tạo thẻ quyết định cho người dùng. Chỉ áp dụng sau khi người dùng duyệt.
-3. Runtime tự kiểm bất biến, không tin Coordinator:
-   - Không đổi nội dung tiêu chí.
-   - Không waive tiêu chí.
-   - Mọi tiêu chí bắt buộc vẫn có mapping.
-   - Đường dẫn mới đúng literal và nằm trong phạm vi đã duyệt.
-4. Mỗi lần sửa nâng phiên bản spec. Ghi sự kiện journal kèm diff phạm vi để truy vết từ spec sang task. Cập nhật digest của execution plan để logic drift không coi đây là thay đổi lạ.
-5. Cho phép khi run ở `completed_with_parked` nếu task bị park với kind `plan_mismatch`: sửa xong thì unpark (dùng lại nhánh `runtime.ts:2248`), xóa `blockerHistory` của task đó, rồi giao lại.
-6. Prompt Coordinator (`agents/coordinator/**`) và coordinator guide: khi nhận `plan_mismatch` thì gọi `amend_task_scope`, không giao lại cho Developer. Lưu ý quy tắc skill: đường dẫn trong backtick trở thành ref bắt buộc, nên viết đường dẫn bằng văn xuôi và nhớ bump version.
-7. Test:
-   - Trọn vòng kịch bản 06/11: cầu dao ngắt, Coordinator sửa phạm vi, Developer chạy lại, run hoàn tất. Không tạo run mới.
-   - Đề xuất waive tiêu chí bị từ chối.
-   - Mở rộng ownership tạo thẻ duyệt.
+Mục tiêu: một run bị cầu dao GĐ1 ngắt (`Plan mismatch`, hoặc task đã bị park `plan_mismatch`) sửa được phạm vi **ngay trong run đó**, đo lại, rồi hoàn tất. Không tạo run mới. Phase failure cũ không bị xóa tay: nó được đo lại vì `inputsChanged` (GĐ1) thấy digest spec/strategy đã đổi.
 
-Nhánh: `fix/runtime/in-run-scope-amend`.
+Thứ tự task: T3.1 và T3.2 làm song song; T3.3 cần T3.1 và T3.2; T3.4 song song T3.3; T3.5 sau T3.3 và T3.4; T3.6 sau T3.5; T3.7 sau T3.5, song song T3.6; T3.8 sau T3.5; T3.9 cuối.
+
+#### T3.0 Bản đồ mã và kết quả xác minh (đã làm, 2026-11-09, đọc mã tại `a04ba51f`)
+
+1. **Tool được khai báo ở đâu, schema nằm ở đâu.** Không có schema MCP nào trong `packages/contracts`. Mỗi tool Coordinator gồm ba phần, tất cả trong `packages/runtime`:
+   - tên + mô tả: mảng `COORDINATOR_TOOLS` (`agentic/tools.ts:18-38`);
+   - JSON schema cho provider native: bảng `argumentsByName` trong `host.ts:3556-3600` (ví dụ `reresolve_execution_plan`, `withdraw_workflow_proposal`);
+   - Zod/xử lý: `case` trong `CoordinatorTools.invoke` (`tools.ts:105-139`) gọi `AgenticWorkflowRuntime`.
+
+   Director nhận tool tự động: `DIRECTOR_TOOLS` và `isDirectorCoordinatorTool` đều lấy từ `COORDINATOR_TOOLS` (`director/tools.ts:110-118`, `director/host-methods.ts:35-37`). MCP của Director dùng một `INPUT_SCHEMA` chung (`director/mcp.ts:75`), nên Zod trong Runtime là nơi duy nhất kiểm đầu vào cho Director. `mcp-output-views.ts` chỉ định dạng đầu ra của `inspect`; không phải nơi đăng ký tool.
+   **Kết luận: D3 không cần sửa `packages/contracts`.** Schema `amend_task_scope` là kiểu riêng của Runtime (`scope-amendment.ts`, mới). Điều này khác dòng "Contracts của MCP tool" trong D3; cần chủ dự án xác nhận (câu hỏi Q4).
+2. **Phiên bản spec và truy vết.** Mỗi task giữ `TaskRecord.spec: SpecRecord { specification, request, decision, strategy }` (`journal.ts:54-56`), tạo bằng `reviewSpec` (`runtime.ts:4187`). `reviewSpec(input, true)` cho phép `version > 1` nhưng bắt `metadata.sdd.revisionReason` không rỗng. `SpecificationEngine.supersede(previous, next)` (`packages/specification/src/engine.ts:137-153`) đòi cả hai ở trạng thái `approved` và `next.version === previous.version + 1`. Truy vết spec → task nằm ở `traceabilityTaskIds` và `metadata.sdd.traceability`, do `projectTaskSpecificationInput` (`runtime.ts:272`) sinh; tiêu chí của task không đổi khi chỉ sửa phạm vi nên truy vết giữ nguyên.
+   Strategy không sửa tay được: `policies.strategy.resolve(spec)` tính lại từ `spec.affectedPaths` + tiêu chí (`packages/test-strategy/src/resolver.ts:60-115`) và `validate()` tính lại chế độ TDD từ snapshot. Vì vậy **đổi `affectedPaths` có thể đổi `tddDecision.mode`**. Runtime phải so sánh và chặn nếu mode hoặc `requiresFailingTestFirst` đổi (xem T3.2). `criterionMappings.testNames` được giữ nguyên khi hợp lệ (`resolver.ts:70-90`), nên sửa mapping là sửa input spec rồi resolve lại.
+3. **Digest execution plan và drift.** `acceptedExecutionPlanInput` (`execution-binding.ts:322-373`) băm: spec của **workflow** (`run.workflowSpec`, không phải spec từng task), toàn bộ `run.definition` (`acceptedWorkflow`, có cả `metadata.ownedPaths` của task) và strategy của workflow spec. Hệ quả:
+   - sửa `task.spec` / `task.spec.strategy` **không** đổi digest plan, nên không gây drift;
+   - sửa `ownedPaths` (nằm trong `definition.tasks[].metadata`) **có** đổi `acceptedWorkflow`, nên phải gắn lại bằng `bindAcceptedExecutionPlan(run, readExecutionResolution)` trong cùng giao dịch, và chỉ khi các nguồn private khác không đổi. `rebindRepositoryDrift` (`runtime.ts:3548-3571`) đã có đúng guard này (chỉ `REPOSITORY_SNAPSHOT_COMPONENT` được phép đổi). T3.5 tái dùng guard đó, không viết lại;
+   - `workflowSpec.affectedPaths` và định nghĩa workflow nằm trong gói duyệt thiết kế của người dùng (`bundleFingerprint`). **GĐ3 không sửa chúng.** Chỉ thu hẹp ở mức task, nên ràng buộc `ownedPaths ⊆ workflowSpec.affectedPaths` (`runtime.ts:~3920`) luôn còn đúng.
+   - **Còn phải xác minh khi làm T3.5:** Core aggregate (`core.create(run)`) có giữ bản sao `definition`/`ownedPaths` riêng không. Nếu có, sửa `run.definition` phải đi kèm cập nhật Core qua `core.mutate`. T3.5 mở đầu bằng một test thăm dò nêu rõ điều này.
+4. **Đường unpark và guard `completed_with_parked`.** `unparkTask` (`runtime.ts:2243-2287`) cho `completed_with_parked → implementing`, đưa task Core `parked → ready` bằng `transitionTask(intent: "unpark")`, xóa `cycle`/`verificationPlan`/`result` của task, nên lần chạy sau lập kế hoạch mới. Guard chặn: `ENDED_RUN_STATUSES` (không gồm `completed_with_parked`, đúng ý), `assertDirectorWritable`, và `source: director` chỉ cho run do Director tạo. Ngược lại `assertCoordinatorCommunicable` (`runtime.ts:623-626`) **ném lỗi** khi run ở `completed_with_parked`, nên `amend_task_scope` không thể dùng nó mà cần guard riêng (T3.3). `parkTask` chỉ nhận task Core ở `pending|ready|blocked|waiting|running` (`runtime.ts:2063+`).
+   **Không có `blockerHistory` trong mã.** Mục 5 cũ của GĐ3 ("xóa `blockerHistory`") dựa trên giả định sai. Cơ chế thật: blocker nằm ở `phaseFailure.blocker` của outbound, so với `digest(task.spec.specification)` và `digest(task.spec.strategy)` bằng `inputsChanged` (`no-progress.ts:18`). Khi spec hoặc strategy đổi thì cả `nonResumablePhaseFailures` (`runtime.ts:102-110`) lẫn nhánh resume đều coi phase failure đó là đã đổi đầu vào và cấp lại `retryAuthorized`. Dấu vân tay cũng đổi theo `specDigest`, nên `priorSameFingerprint` không đếm vòng cũ. **Không xóa gì cả**; phase failure cũ ở lại làm vết kiểm toán.
+5. **Thẻ quyết định người dùng.** `requestUserDecision` (`runtime.ts:4229`) cần `PaneBinding` và ghi `UserDecisionRecord` có `agentId`/`paneId`; câu trả lời quay về đúng pane đó (`runtime.ts:~3275`). Tiền lệ cho "thẻ gắn một đề xuất cụ thể, áp dụng sau khi duyệt" là `requestTestIntegrityException` (`runtime.ts:4260-4310`): metadata của thẻ chứa ràng buộc, rồi `testIntegrityExceptions` xác thực lại bằng `authorizeHuman` + so khớp metadata. T3.7 theo đúng khuôn này. **Giới hạn quan trọng:** Director **không có pane** và không có `request_user_decision` (grep không thấy trong `host-director-mode.ts` hay `director/**`), nên thẻ gắn pane chỉ dùng được cho phiên Coordinator. Xem Q1.
+6. **Kết quả xác minh T1.7 (GĐ1) và hai điểm lệch phát hiện.**
+   - Xác nhận: trước GĐ3 không có đường hợp lệ để giao rework hoặc sửa phạm vi trên task đã escalated (đúng như ghi ở T1.7). Prompt GĐ1 (`agents/director/system-prompt.md` mục 7, `agents/coordinator/system-prompt.md:187-192`) đang nói "chờ release sau".
+   - **Lệch 1 (lỗi GĐ1):** prompt bảo Director gọi `park_task` với `kind "plan_mismatch"`, nhưng `ParkArgs` (`director/tools.ts:136`) là `strict()` chỉ có `runId, taskId, reason`, và `CoordinatorTools.invoke` đóng cứng `kind: "other"` (`tools.ts:126`). Park tay của Director không bao giờ mang `plan_mismatch`; chỉ auto-park (`auto-park.ts:119`) mới đặt kind này. Cần quyết định ở Q2.
+   - **Lệch 2:** `selectAutoParkCandidates` chạy trong host chỉ khi `issueQueue.autoPark` bật (`host.ts:201`); chưa xác minh nó có chạy cho run không do Director tạo hay không. T3.3 coi `plan_mismatch` park là đặc thù Director-run và kiểm bằng test; nếu sai thì mở lại phần admission.
+
+#### T3.1 Kiểu đầu vào `amend_task_scope` (`scope-amendment.ts`, mới) [∥ với T3.2]
+
+Zod `strict()`, không đụng contracts:
+
+```ts
+AmendTaskScopeInputSchema = z.object({
+  runId, taskId,
+  reason: z.string().trim().min(10).max(1000),
+  changes: z.array(z.discriminatedUnion("kind", [
+    { kind: "drop_planned_paths", paths: string[1..50] },        // bỏ tệp dự kiến chưa tồn tại khỏi task.spec.affectedPaths
+    { kind: "add_paths_within_ownership", paths: string[1..50] }, // thêm tệp vào task.spec.affectedPaths, phải nằm trong ownedPaths hiện có
+    { kind: "narrow_owned_paths", paths: string[1..50] },        // thu hẹp ownedPaths (bỏ khỏi ownership)
+    { kind: "set_test_names", criterionId, testNames: string[1..20] }, // sửa mapping của MỘT tiêu chí
+    { kind: "expand_owned_paths", paths: string[1..50] }          // chỉ qua thẻ (T3.7)
+  ]).min(1).max(20),
+  approvalId: z.string().optional()   // dùng ở lần gọi thứ hai sau khi thẻ mở rộng được duyệt
+}).strict()
+```
+
+- Đường dẫn được chuẩn hóa bằng đúng hàm `normalizeLiteralRepoPrefix` hiện là closure trong `proposeWorkflow`; T3.1 trích nó thành hàm export cùng chỗ, **không đổi logic** (test hiện có của `proposeWorkflow` chạy lại không sửa).
+- Kết quả trả về: `{ amended, specVersion, ownedPaths, affectedPaths, rebound, nextStep }` hoặc `{ pendingApproval: { approvalId } }` hoặc lỗi có mã.
+- Test: schema từ chối trường lạ, mảng rỗng, `..`, đường dẫn tuyệt đối, kind lạ.
+
+#### T3.2 Bộ kiểm bất biến thuần `validateScopeAmendment` [∥ với T3.1]
+
+Hàm thuần (không I/O), nhận trạng thái trước và đề xuất sau. Runtime tự kiểm, không tin Coordinator. Từ chối khi:
+- **Tiêu chí:** `digest(acceptanceCriteria)` của spec task khác (đổi mô tả, `required`, `verificationMethod`, thêm hoặc bớt tiêu chí). Không có chức năng waive: không có thao tác nào tác động lên `required`.
+- **Mapping:** mọi tiêu chí `required` phải còn mapping với ít nhất một `testNames` khác rỗng sau khi sửa; `set_test_names` chỉ nhắm tiêu chí có trong task.
+- **TDD:** `strategy.tddDecision.mode` và `requiresFailingTestFirst` sau khi resolve lại phải bằng trước đó; `requiredTestLevels` và `independentVerificationRequired` không yếu đi. Đây là chặn cửa sau "thu hẹp `affectedPaths` để TDD từ `required` thành `not_applicable`".
+- **Ownership:** `narrow_owned_paths` chỉ bỏ, kết quả không rỗng; `ownedPaths` sau ⊆ `ownedPaths` trước (trừ `expand_owned_paths`, vốn phải qua T3.7); `add_paths_within_ownership` không được ra ngoài `ownedPaths` sau thay đổi.
+- **Chỉ là tệp test:** `drop_planned_paths` chỉ nhận đường dẫn mà (a) không tồn tại trong commit/worktree của task và (b) được runner coi là test. Không cho bỏ tệp mã nguồn vì tiêu chí có thể dựa vào nó.
+- **Không làm yếu bất biến mục 2:** không đụng blob test đã commit, không đụng tệp test đã đóng băng sau Red, không đụng `host-test-integrity`.
+- Mọi đường dẫn đúng literal (không glob, không `..`, không tuyệt đối).
+
+Test thuần: mỗi luật một ca đỏ + một ca xanh gần ranh giới, gồm ca đổi `affectedPaths` làm TDD đổi mode, ca đổi chữ tiêu chí, ca bỏ tiêu chí cuối của task.
+
+#### T3.3 `amendTaskScope` trong Runtime: admission và áp dụng [sau T3.1, T3.2]
+
+Phương thức mới `AgenticWorkflowRuntime.amendTaskScope(input, principal)` trong một `transaction`:
+1. **Admission** (guard riêng, không dùng `assertCoordinatorCommunicable`):
+   - run chưa kết thúc theo `ENDED_RUN_STATUSES`, không `cancelled`, không `supersededBy`; Director thì gọi `assertDirectorWritable` và chỉ cho run do Director tạo;
+   - task phải ở một trong ba trạng thái: (i) run `escalated` và có phase failure mang blocker không resumable cho task đó mà `!priorInputsChanged`; (ii) task đang `parked` với kind `plan_mismatch` (run có thể là `completed_with_parked`); (iii) task `blocked` do chính phase failure đó. Mọi trạng thái khác bị từ chối kèm lý do, **kể cả task `succeeded` hay đang `running` có writer lease**;
+   - không có delivery `sending`/`unknown_delivery`, không có `verificationPending`, không có approval hoặc user decision đang chờ cho task (cùng bộ guard với `parkTask`).
+2. Dựng input spec mới = `projectTaskSpecificationInput`-compatible từ `task.spec.specification` + thay đổi, `version + 1`, `metadata.sdd.revisionReason = reason`, qua `reviewSpec(…, true)` (ghi lên ArtifactStore, tạo `ApprovalRequest`).
+3. Chạy T3.2 trên (trước, sau). Chạy `validateTaskCommands(spec, strategy, ownedPaths)` như `proposeWorkflow` (`runtime.ts:~3935`).
+4. Runtime tự duyệt spec mới bằng `specification.approve` với `ApprovalDecision` `decidedBy: "coordinator"` + `idempotencyKey: "scope-amend:<runId>:<taskId>:<version>"`, đúng tiền lệ duyệt tự động trong `settleDesignApproval` (`runtime.ts:4162-4165`). Việc này **chỉ áp dụng cho thu hẹp hoặc sửa trong ownership**; mở rộng không bao giờ đi đường này. Sau đó `supersede(previous, next)`. Gọi `assertImplementationReady` cho spec mới (cùng chiếu `projected` như `acceptDesign`).
+5. Thay `task.spec`; nếu có `narrow_owned_paths` thì sửa `run.definition.tasks[].metadata.ownedPaths` rồi làm T3.5.
+6. Ghi vết kiểm toán (T3.4), `activityLog.record({ kind: "recovery", action: "task_scope_amended" })` và một `progress` tiếng Việt thường cho Conversation, kiểu "Đã thu hẹp phạm vi test của <task>: bỏ <n> tệp chưa có; tiêu chí giữ nguyên".
+7. **Không** tự gọi `resume_run`/`unpark_task` và **không** tự đo lại. Kết quả trả `nextStep`: task đang park → `set_issue_status retrying` (Director); run đang `escalated` → `resume_run`. Lý do: giữ hai đường hiện có làm nơi duy nhất cấp lại việc, và để `inputsChanged` là bằng chứng duy nhất cho phép đo lại. Q3 hỏi lại điểm này.
+8. Idempotent: cùng `reason` + cùng `changes` + cùng `specDigest` gốc gọi lại thì trả kết quả cũ; spec gốc đã đổi (bản cũ) thì từ chối `stale_scope`.
+
+Test trong `packages/runtime/test/agentic/scope-amend.test.ts` (dùng `connectedPhaseFixture`): thu hẹp thành công; run `completed_with_parked` + task park `plan_mismatch` được phép; task `succeeded`/đang chạy/đang chờ approval bị từ chối; waive/đổi tiêu chí bị từ chối; TDD đổi mode bị từ chối; gọi lại idempotent; hai lần gọi đua nhau chỉ một lần thắng (optimistic version).
+
+#### T3.4 Journal v10: `scopeAmendments` [∥ với T3.3]
+
+Theo đúng khuôn v9 (`journal.ts:350`, `:887`): thêm `10` vào union và danh sách version; `requiresScopeAmendmentJournal(state)`; nâng version khi save, không bao giờ hạ; validate lúc đọc; không upcaster; không suy ngược từ chuỗi cũ.
+- `TaskRecord.scopeAmendments?: { amendmentId; at; source: "coordinator"|"director"; reason; fromSpecVersion; toSpecVersion; fromSpecDigest; toSpecDigest; fromStrategyDigest; toStrategyDigest; diff: { droppedAffectedPaths; addedAffectedPaths; ownedPathsBefore; ownedPathsAfter; testNamesChanged: { criterionId, before, after }[] }; ownerApprovalId?: string }[]` (tối đa 20 mục mỗi task; mỗi danh sách path ≤ 50 mục × 1024 ký tự).
+- `amendmentId` = digest của (runId, taskId, fromSpecDigest, changes) để idempotent.
+- Test: v9 mang `scopeAmendments` bị từ chối; v10 đọc/ghi lại nguyên; v9 không có trường vẫn là v9; digest sai định dạng bị từ chối; restart giữa lúc amend và lúc resume không đổi kết quả.
+
+#### T3.5 Gắn lại digest execution plan [sau T3.3 và T3.4]
+
+- Chỉ khi `run.definition` thật sự đổi (có `narrow_owned_paths` hoặc `expand_owned_paths`): tái dùng guard của `rebindRepositoryDrift` (nguồn private khác `REPOSITORY_SNAPSHOT_COMPONENT` đổi thì **từ chối** việc sửa, không âm thầm nhận drift khác), rồi `bindAcceptedExecutionPlan`. Rút phần guard ra hàm dùng chung; không đổi hành vi của `reresolve_execution_plan`.
+- Nếu chỉ đổi `task.spec`/`strategy` thì không gắn lại gì (digest plan không phụ thuộc).
+- Test thăm dò đầu task: đo xem sửa `ownedPaths` có làm `assertRunExecutionPlan` ném `ExecutionPlanDriftError` hay không, và Core có giữ bản sao `ownedPaths` không (mục T3.0.3).
+- Test: sau amend, `assertRunExecutionPlan` không ném; đổi tệp cấu hình khác trước khi amend thì amend bị từ chối; không có thay đổi `definition` thì `executionPlan.fingerprint` giữ nguyên.
+
+#### T3.6 Nối vào cầu dao GĐ1 [sau T3.5, ∥ với T3.7]
+
+Không thêm cơ chế mới. Xác nhận bằng test rằng:
+- sau amend, `nonResumablePhaseFailures` không còn liệt kê phase failure cũ (vì `inputsChanged`), `resume_run` cấp `retryAuthorized`, và có `verification.requested` mới;
+- phase failure cũ **vẫn nằm** trong `state.outbound` (không bị xóa tay);
+- `priorSameFingerprint` của lần đo mới là 0 (dấu vân tay mới vì `specDigest` đổi), còn nếu amend không đổi digest nào thì cầu dao vẫn ngắt;
+- một amend rỗng hoặc chỉ đổi `reason` bị từ chối (không cho dùng amend như cách xả cầu dao).
+
+#### T3.7 Mở rộng ownership qua thẻ duyệt [sau T3.5, ∥ với T3.6]
+
+- `expand_owned_paths` không bao giờ áp dụng ngay. Lần gọi đầu tạo thẻ bằng `buildUserDecisionRequest` (khuôn `requestTestIntegrityException`), `metadata.scopeExpansion = { runId, taskId, fromSpecDigest, ownedPathsBefore, ownedPathsProposed, affectedPathsProposed }`, hai lựa chọn "Duyệt mở rộng" / "Từ chối", `evidence` chứa diff. Run vào trạng thái chờ quyết định như các thẻ khác; guard `pending userDecision` hiện có chặn mọi thay đổi khác trên task.
+- Lần gọi thứ hai `amend_task_scope { approvalId }` sau khi thẻ `answered`: xác thực bằng `authorizeHuman`, `validateUserDecisionAnswer`, `selectedOption` đúng, so khớp `digest(metadata.scopeExpansion)` với đề xuất hiện tại và với `digest(task.spec)` hiện tại (hết hạn nếu spec đã đổi); mỗi thẻ chỉ dùng một lần (đánh dấu trong `scopeAmendments[].ownerApprovalId`). Sau đó đi cùng đường T3.3 (spec version mới, T3.5).
+- Mở rộng **không** được vượt `workflowSpec.affectedPaths` (gói thiết kế đã duyệt). Cần vượt thì đó là thay đổi thiết kế: từ chối và hướng dẫn dùng revision yêu cầu mới.
+- Thẻ gắn pane nên chỉ hoạt động cho phiên Coordinator, qua handler của host (nơi có `PaneBinding`, cùng chỗ xử lý `request_user_decision`). Phiên Director: xem Q1.
+- Test: gọi `expand_owned_paths` không có thẻ thì không đổi gì và tạo thẻ; thẻ bị từ chối hoặc hết hạn thì không áp dụng; thẻ đã dùng không dùng lại; gọi lần hai với đề xuất khác thẻ bị từ chối; vượt `workflowSpec.affectedPaths` bị từ chối.
+
+#### T3.8 Đăng ký tool, hiển thị, tài liệu [sau T3.5]
+
+- `COORDINATOR_TOOLS` thêm `amend_task_scope` (mô tả nêu rõ: chỉ thu hẹp hoặc sửa trong ownership; mở rộng cần thẻ; không đổi/waive tiêu chí; không tự đo lại).
+- `CoordinatorTools.invoke`: `case "amend_task_scope"`; `host.ts` `argumentsByName.amend_task_scope` (JSON schema tương ứng T3.1, `additionalProperties: false`); `isDirectorCoordinatorTool` đã bao phủ nhờ `COORDINATOR_TOOLS`. Cập nhật `role-tool-schema.test.ts` (chỉ Coordinator và Director có tool này; các role khác thì không).
+- `inspect`: `view=blockers` / `tasks` thêm `scopeAmendments` (tóm tắt) để Director/Coordinator thấy lịch sử; cập nhật `mcp-output-views.ts` và test của nó.
+- `packages/runtime/README.md` và `docs/sdlc-policies.md`: ghi cơ chế, bất biến và giới hạn. `docs/contracts.md` **không đổi** vì không có contract mới (nếu chủ dự án chọn đưa schema vào contracts ở Q4 thì mới cập nhật).
+
+#### T3.9 Prompt Coordinator/Director và guide [sau T3.5; ∥ với T3.8]
+
+- `agents/coordinator/system-prompt.md:187-192` và `agents/director/system-prompt.md` mục 7: thay đoạn "chưa có tool" bằng: khi gặp `Plan mismatch (...)` hoặc `nonResumablePhaseFailures` thì gọi `amend_task_scope` (thu hẹp tệp test chưa có, hoặc sửa mapping); sau đó Director dùng `set_issue_status retrying` nếu task đã park, còn nếu run đang `escalated` thì `resume_run`. Không dùng `retry_verification` cho lỗi này. Không đổi tiêu chí hay bỏ tiêu chí; muốn vậy thì đó là revision yêu cầu mới. Mở rộng ownership: Coordinator gọi tool và chờ thẻ.
+- `packages/runtime/src/director/guide.ts` (nội dung `read_coordinator_guide`) và `apps/cli/src/director-skill.ts`: cập nhật cùng nội dung; sửa test `guide.test.ts`, `director-skill.test.ts`, test hành vi của `agents/**`.
+- Quy tắc skill: tên tệp/đường dẫn viết bằng văn xuôi, không đặt trong backtick (xem memory "Skill backtick paths are references"); nếu sửa nội dung `skills/**` thì bump version. Tên tool và tên kind (`amend_task_scope`, `plan_mismatch`) là mã định danh, không phải đường dẫn tệp; vẫn phải chạy test skill-bundle sau khi sửa vì commit `a04ba51f`/`7a0d02c7` vừa phải gỡ backtick quanh `plan_mismatch`.
+- Lệch 1 của T3.0.6 (Director `park_task` không mang `kind`): xử lý theo Q2.
+
+#### T3.10 Kịch bản đầu-cuối 06/11 và bất biến [bắt buộc, sau T3.6–T3.9]
+
+Tệp `packages/runtime/test/agentic/scope-amend-e2e.test.ts` (dùng `connectedPhaseFixture`, mô phỏng restart host giữa các bước):
+- **(a)** Kế hoạch khai 4 tệp test; Developer chỉ commit 2; Tester đo Red; cầu dao ngắt (`Plan mismatch (declared_test_missing)`). **(b)** Resume 1 lần vẫn không đo lại (GĐ1). **(c)** Coordinator gọi `amend_task_scope` bỏ 2 tệp chưa có (và đánh giá lại mapping). **(d)** `resume_run`: có `verification.requested` mới, phase failure cũ vẫn còn trong outbound, dấu vân tay mới. **(e)** Đo xanh, run đi tới `completed`. **(f)** `state.runs.length` và `runId` không đổi, không có run mới.
+- Biến thể Director: auto-park `plan_mismatch` → `completed_with_parked` → amend → `set_issue_status retrying` → unpark → đo lại → `completed`.
+- Bất biến: đề xuất waive/đổi chữ tiêu chí bị từ chối; mở rộng ownership tạo thẻ và không áp dụng khi chưa duyệt; sau từ chối thẻ thì cầu dao vẫn ngắt; amend rỗng không xả cầu dao.
+- Chạy lại không sửa kỳ vọng: `no-progress-breaker.test.ts`, `auto-park.test.ts`, `park-unpark.test.ts`, `verification-retry.test.ts`, `stuck-states.test.ts`, `integration-recovery.test.ts`, các test GĐ2 về danh tính test.
+
+#### T3.11 Kiểm tra và bàn giao [TT, cuối GĐ3]
+
+```bash
+pnpm run build
+pnpm exec vitest run packages/runtime/test/agentic/scope-amend.test.ts packages/runtime/test/agentic/scope-amend-e2e.test.ts packages/runtime/test/agentic/no-progress-breaker.test.ts packages/runtime/test/agentic/auto-park.test.ts packages/runtime/test/agentic/park-unpark.test.ts packages/runtime/test/agentic/role-tool-schema.test.ts packages/runtime/test/director
+pnpm check:deps && pnpm typecheck
+pnpm test:affected --base origin/main --run
+git diff --check && git status --short
+```
+
+Tiêu chí xong: T3.10 xanh toàn bộ; test cũ không sửa kỳ vọng; journal v10 có test chuyển đổi và restart; không đổi `packages/contracts` (trừ khi Q4 đổi); prompt và guide khớp tool thật.
+
+Rủi ro riêng của GĐ3:
+- Sửa `run.definition.ownedPaths` có thể lệch với bản sao của Core hoặc các chỗ băm khác (T3.5 thăm dò trước khi làm tiếp). Nếu Core giữ bản sao riêng và không có API cập nhật hợp lệ, chỉ cho phép sửa ở mức `task.spec` (không đổi `ownedPaths`) và dừng báo.
+- `amend_task_scope` là cửa vào mới tác động lên spec đã duyệt. Giảm rủi ro bằng: chỉ thu hẹp, so TDD mode, bất biến tiêu chí tính bằng digest, không áp dụng khi task đang chạy hoặc có lease, không xả cầu dao khi không đổi gì.
+- Cùng sửa `runtime.ts` với GĐ1 (đã merge); không còn xung đột song song. Selection của `test:affected` có thể nới thành full vì `runtime.ts` và `journal.ts` rộng; khi đó để integrator chạy full một lần (theo memory "Parallel agent test load").
+
+Tệp dự kiến chạm: `packages/runtime/src/agentic/{scope-amendment.ts (mới), runtime.ts, journal.ts, tools.ts, host.ts, mcp-output-views.ts, execution-binding.ts (chỉ nếu tách guard)}`, `packages/runtime/src/director/{guide.ts, tools.ts (chỉ nếu Q2)}`, `apps/cli/src/director-skill.ts`, `agents/coordinator/**`, `agents/director/**`, `packages/runtime/README.md`, `docs/sdlc-policies.md`, test tương ứng. **Không chạm** `task-commands.ts`, `behavioral-runner.ts`, `host-verification.ts`, `packages/contracts/**` (nếu Q4 giữ mặc định).
+
+**Câu hỏi cần chủ dự án quyết trước khi cài đặt (mặc định đề xuất ở đầu mỗi dòng):**
+- **Q1 – Mở rộng ownership trong phiên Director.** (Đề xuất: v1 từ chối kèm hướng dẫn, chỉ hỗ trợ thẻ trong phiên Coordinator.) Director không có pane nên thẻ gắn pane hiện không dùng được. Nếu cần hỗ trợ ngay, phải thêm loại thẻ do Runtime sở hữu không gắn pane, định tuyến câu trả lời vào mailbox Director; đó là việc lớn hơn GĐ3.
+- **Q2 – `park_task` của Director không mang `kind`.** (Đề xuất: thêm `kind` tùy chọn, chỉ chấp nhận `other` hoặc `plan_mismatch`, vào `ParkArgs` và `invoke`; sửa lỗi GĐ1 trong GĐ3 vì prompt đang hứa điều này.) Ngược lại thì phải sửa prompt GĐ1 cho khớp mã.
+- **Q3 – Amend có tự unpark/resume không.** (Đề xuất: không; giữ `set_issue_status retrying` và `resume_run` là đường duy nhất cấp lại việc.)
+- **Q4 – Schema tool nằm ở Runtime hay contracts.** (Đề xuất: Runtime, vì mọi tool Coordinator hiện nằm ở đó và không có consumer ngoài Runtime; không phải thay đổi contract công khai.) D3 nói "Contracts của MCP tool"; chọn contracts thì thêm một vòng review contract.
+- **Q5 – `decidedBy` của spec do Runtime tự duyệt.** (Đề xuất: `"coordinator"` theo tiền lệ duyệt tự động; thêm `metadata.autoApproved: "scope-amend"` để phân biệt khi kiểm toán.)
 
 ### GĐ4: Chặn dứt điểm kiểu sửa theo từng lỗi
 
