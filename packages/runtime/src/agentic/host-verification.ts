@@ -35,6 +35,7 @@ import { exceedsAgyInlineReply } from "./agy-assignment-admission.js";
 import { z } from "zod";
 import { policyPhaseReviewAssignment, PolicyReviewSubmissionSchema } from "./policy-phase-review.js";
 import { appCheckDefinitions, appCheckIdentity, type AppCheckSuite } from "./app-check-config.js";
+import { TaskBlocker, blockerOf } from "./blockers.js";
 import { AppCheckBrowserLeases } from "./app-check-lease.js";
 import { buildAppEvidence, sanitizeAppEvidence, type AppEvidenceCheck } from "./app-check-evidence.js";
 import { splitAppCriteria, type AppCriterionBinding } from "./app-check-selection.js";
@@ -611,7 +612,7 @@ export class HostVerification {
     return this.gate(`host-behavioral-${runner.id}`, async context => {
       const dossier = await this.dossierFor(context.runId, context.taskId);
       const bound = this.resolve(dossier).find(command => command.command === runner.command);
-      if (!bound) throw new Error(`${runner.command} has no test identities for this task: check criterion mappings, affectedPaths test files and ownership`);
+      if (!bound) throw new TaskBlocker("no_test_identities", `${runner.command} has no test identities for this task: check criterion mappings, affectedPaths test files and ownership`);
       return bound;
     });
   }
@@ -1111,8 +1112,10 @@ export class HostVerification {
         await this.trustGate(result);
         return { ok: true, value: result };
       } catch (error) {
-        const details = error instanceof BehavioralMeasurementError ? { diagnostics: error.diagnostics } : undefined;
-        return { ok: false, error: { code: "validation", retryable: false, message: String(error), ...(details ? { details } : {}) } };
+        const blocker = blockerOf(error);
+        const details = { ...(error instanceof BehavioralMeasurementError ? { diagnostics: error.diagnostics } : {}),
+          ...(blocker ? { blocker: { code: blocker.code, fixableBy: blocker.fixableBy, nextAction: blocker.nextAction, details: blocker.details } } : {}) };
+        return { ok: false, error: { code: "validation", retryable: false, message: String(error), ...(Object.keys(details).length ? { details } : {}) } };
       }
     } };
   }

@@ -74,6 +74,8 @@ Ký hiệu: **[TT]** = tuần tự, nằm trên đường găng. **[∥]** = là
 
 ### GĐ0: Phân loại lỗi chặn [TT], khoảng 1,5–2 ngày
 
+- Trạng thái: **đã cài đặt T0.1–T0.5 trên nhánh `fix/runtime/blocker-taxonomy`; T0.6 chưa đạt** vì `test:affected` báo một test cũ đỏ khi chạy đồng thời và đã dừng theo quy tắc bàn giao. Mức bằng chứng: mã nguồn + test cục bộ mục tiêu; chưa kiểm chứng live.
+
 Mục tiêu: lỗi chặn trên đường đo test có mã định danh, có bên sửa được và có hành động kế tiếp. Giai đoạn này **không đổi trạng thái run hay luồng resume**. Chỉ đổi kiểu lỗi, thông điệp và phản hồi `check_work`. Không đụng journal hay contract.
 
 Tương thích ngược: chỉ lỗi thuộc kiểu `TaskBlocker` mới mang phân loại mới. Mọi `Error` thường giữ nguyên hành vi, nên các test hạ tầng hiện có vẫn đúng, ví dụ `integration-connected-phases.test.ts:158` kỳ vọng `classification: "infrastructure"` cho lỗi môi trường.

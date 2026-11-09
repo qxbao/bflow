@@ -15,6 +15,7 @@ import type { AdapterRunner } from "./runner-adapter.js";
 import { parseRunnerResult } from "./runner-results.js";
 import { collectRunnerReports } from "./runner-reports.js";
 import { assertRunnerProvenance } from "./runner-provenance.js";
+import { TaskBlocker } from "./blockers.js";
 import {
   parseRegressionResult,
   RegressionInfrastructureFailure,
@@ -395,12 +396,15 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
   await assertPinnedRevision(cwd, revision);
   await assertRunnerProvenance(command, cwd, revision);
   const testBlobs: Record<string, string> = {};
+  const missing: string[] = [];
   for (const path of command.testPaths) {
     const entry = (await verificationGit(cwd, ["ls-tree", revision, "--", path])).trim();
     const match = /^100(?:644|755) blob ([a-f0-9]{40})\t/.exec(entry);
-    if (!match) throw new Error(`Behavioral test identity must be a committed regular file: ${path}`);
+    if (!match) { missing.push(path); continue; }
     testBlobs[path] = match[1]!;
   }
+  if (missing.length) throw new TaskBlocker("declared_test_missing",
+    `Behavioral test identity must be a committed regular file: ${missing.join(", ")}`, { paths: missing, revision });
   Object.assign(testBlobs, command.definitionBlobs ?? {});
   // Canonical path: Vitest reports resolved file names (macOS /var is a symlink to /private/var) and they are matched against the checkout.
   const temporary = await realpath(await mkdtemp(join(tmpdir(), "bflow-behavioral-"))), checkout = join(temporary, "checkout");
