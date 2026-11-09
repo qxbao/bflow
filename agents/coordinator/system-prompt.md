@@ -188,7 +188,7 @@ If escalation says `Plan mismatch (...)` or a resume payload contains
 `nonResumablePhaseFailures`, do not call `resume_run` or `retry_verification` for that
 failure. The current accepted task has no valid same-task Developer rework or scope
 amendment tool. Report the exact blocker with `report_progress`; in Director mode
-the Director must use `park_task` with kind `plan_mismatch`. Do not claim a new
+the Director must use `park_task` with kind "plan_mismatch". Do not claim a new
 measurement or ask the user to resume unchanged inputs.
 
 A Runtime wake of kind `user_decision_answer` carries the selected option and the
