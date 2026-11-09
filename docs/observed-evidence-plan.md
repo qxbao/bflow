@@ -539,3 +539,8 @@ git status --short
 ```
 
 Báo cáo lệnh chính xác, exit code, số test đạt/lỗi/bỏ qua, HEAD đã test và mức bằng chứng.
+
+### Trạng thái GĐ2 (2026-11-09)
+
+Đã làm và merge vào `main` local: T2.1 (chọn test từ diff), T2.2 phía Verification (đo trên diff đã ghim), T2.3 (tập con tên quan sát, `criterion_without_test`), T2.4 (proposal chỉ khai thư mục, docs, `TEST_PATH_RULE`), preflight `host.ts` cho kế hoạch chỉ khai thư mục test, và nới hẹp `packages/verification/src/engine.ts` (chủ dự án chấp thuận ngoài phạm vi ban đầu).
+Chưa làm: `commandsFor` phía Developer (`host-development.ts`) vẫn lấy tập cấu hình từ `affectedPaths`; test thêm ngoài tập này là supplemental. `review-candidate-evidence.ts` vẫn đòi mọi tên mapped nên nhánh no-change dispute không tái dùng receipt khi chạy tập con. Chưa có test tích hợp preflight `host.ts` end-to-end; chỉ test vị từ `plannedTestDirectoryOnly`.

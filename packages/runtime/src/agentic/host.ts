@@ -83,7 +83,7 @@ import { schedulerStatusReport } from "./scheduler-status.js";
 import { CONVERSATION_CONTEXT_BUDGET, boundConversationContext } from "./conversation-context-budget.js";
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
-import { HostVerification, HostBehavioralFailure, defaultHostChecks } from "./host-verification.js";
+import { HostVerification, HostBehavioralFailure, defaultHostChecks, plannedTestDirectoryOnly } from "./host-verification.js";
 import { blockerOf } from "./blockers.js";
 import { AgyNativeAnchorSchema, HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, parseConversationResumeRequest, isCoordinatorTrigger, type AgyNativeTurn, type CoordinatorTurnObservation, type HumanPromptHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands, RtkRequiredToolUnavailable, type RtkOutputIntegration } from "./behavioral-runner.js";
@@ -1382,8 +1382,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
             recovery: "Restore the pinned compiler locally, then ask the Coordinator to resume this same task." };
           if (behavioralRunnerRequired) {
             try {
-              const commands = resolveTaskCommands({ owner: behavioralCommands, profiles: testRunners.profilesForRevision(), strategy: input.strategy,
-                specification: input.specification, ownedPaths: input.ownedPaths });
+              // A plan that names only test directories has no committed identities yet; they are measured from the task diff.
+              // Preflight then only proves a selected runner exists, it never invents a bound command.
+              const plannedOnly = behavioralCommands.length === 0 && plannedTestDirectoryOnly(input.specification.affectedPaths);
+              const commands = plannedOnly
+                ? testRunners.profilesForRevision().filter(profile => input.strategy.targetCommands.includes(profile.command))
+                : resolveTaskCommands({ owner: behavioralCommands, profiles: testRunners.profilesForRevision(), strategy: input.strategy,
+                  specification: input.specification, ownedPaths: input.ownedPaths });
               if (!commands.length) return { status: "blocked", checkedAt, code: "task_runner_unavailable",
                 reason: "Accepted criteria have no usable host runner command bound to their committed test identities.",
                 recovery: "Restore the owner-configured runner and ask the Coordinator to resume this same task; Runtime will not install packages." };

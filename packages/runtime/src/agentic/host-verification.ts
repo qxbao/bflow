@@ -120,8 +120,11 @@ const includesTestIdentity = (names: readonly string[], target: string): boolean
   const normalizedTarget = target.normalize("NFC");
   return names.some(item => item.normalize("NFC") === normalizedTarget);
 };
-const plannedTestDirectory = (path: string): boolean =>
+export const plannedTestDirectory = (path: string): boolean =>
   /(^|\/)(?:test|tests|__tests__|spec|Specs|Tests)$/.test(path);
+/** True when the plan names test directories but no literal test file, so identities can only come from the committed diff. */
+export const plannedTestDirectoryOnly = (affectedPaths: readonly string[]): boolean =>
+  affectedPaths.some(plannedTestDirectory) && !affectedPaths.some(path => testFilePattern.test(path) && !plannedTestDirectory(path));
 const profilePathInProject = (profile: import("./behavioral-runner.js").RunnerProfile, path: string): boolean =>
   profile.adapter?.projectDirectory === undefined || profile.adapter.projectDirectory === "." ||
   path.startsWith(`${profile.adapter.projectDirectory}/`);

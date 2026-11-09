@@ -84,6 +84,7 @@ Hệ thống quy chuẩn hai cấp độ đặc tả (`SddPolicyLevel`):
   4. `scope`: Định rõ ranh giới gồm `inScope` (danh sách công việc bắt buộc) và `outOfScope` (danh sách nội dung không được phép đụng đến).
   5. `acceptanceCriteria`: Tối thiểu **1** tiêu chí nghiệm thu cụ thể tuân thủ `AcceptanceCriterionSchema`. Mỗi tiêu chí phải có `verificationMethod` độc lập và `evidenceArtifactIds`.
   6. `affectedPaths`: Danh sách đường dẫn tệp hoặc mẫu glob dự kiến bị tác động (tối thiểu 1 đường dẫn).
+     Với runner tự động, tệp test thực sự được đo lấy từ diff đã commit của task giao với ownership và dự án của runner; `affectedPaths` chỉ là dự kiến (có thể chỉ khai thư mục test). Mỗi tiêu chí bắt buộc cần ít nhất một test đã ánh xạ thực sự chạy, nếu không gate báo `criterion_without_test` và quay lại Developer. Xem docs/verification-runners.md.
 
 #### B. Cấp độ `full` (Đặc tả toàn diện)
 - **Đối tượng áp dụng**:

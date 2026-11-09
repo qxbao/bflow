@@ -231,7 +231,7 @@ export function resolveTaskCommands(input: TaskCommandInput & { changedPaths?: r
     safeTestPath(path) && testFilePattern.test(path) && !changed.has(path))) };
 }
 
-const TEST_PATH_RULE = "Test files must be listed in specification.affectedPaths, use the selected adapter language and its project directory, be committed, and belong to the task ownership. Split tasks whose criterion identities cannot be selected unambiguously.";
+const TEST_PATH_RULE = "List the expected test files or test directories in specification.affectedPaths. Runtime measures the test files that the committed task diff actually changes, restricted to the selected adapter language, its project directory and the task ownership; each required criterion needs at least one of its mapped tests to run. Split tasks whose criterion identities cannot be selected unambiguously.";
 const VITEST_NAME_RULE = "vitest reports fullName: describe titles plus the test title joined by a single space. Use exactly that string in criterionMappings.testNames.";
 const TAP_NAME_RULE = "node --test reports the test title only. Use exactly that string in criterionMappings.testNames.";
 
