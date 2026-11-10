@@ -1810,6 +1810,20 @@ refused once this run or another live run has Developer work. `withdraw_workflow
 design still awaiting approval; the next proposal gets a new approval id and a notice naming which
 card replaced which.
 
+`amend_task_scope` (Coordinator and Director) repairs a plan mismatch inside the same run. It is admitted only
+for a task stopped by a non-resumable phase failure whose spec/strategy digests are unchanged, or parked as
+`plan_mismatch`. Allowed changes: drop planned test paths the Runtime itself recorded as missing from the commit,
+add planned paths inside current ownership, and edit the mapped test names of one existing criterion. Runtime
+re-derives and rejects: any change to acceptance criteria, a required criterion left without a test, a changed
+TDD decision or weaker test levels, an empty amendment, and any ownership change (Core persists the workflow
+definition and refuses a different digest, so widening or narrowing ownership is a requirement revision).
+The new specification version is approved by the Runtime (`metadata.autoApproved: "scope-amend"`), recorded in
+`TaskRecord.scopeAmendments` (private journal v10, with the digest and path diff), and the earlier phase
+failure is left untouched as evidence. The tool never re-measures or reopens anything: because the spec/strategy
+digests changed, `resume_run` (escalated run) or `set_issue_status retrying` (parked task) lets the existing
+paths measure again. If an earlier resume had already consumed the escalation, the amendment re-offers that same
+action. Evidence level: source and local tests.
+
 `request_user_decision` and `report_progress` refuse text that hands the user a command these tools
 cover (a backstop on the prompts: a heuristic over the wording, not a proof). When the user really must
 act outside the chat, `request_user_decision` takes `userAction` (`why`, `steps`, `done`). It becomes part

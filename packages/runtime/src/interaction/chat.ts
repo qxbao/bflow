@@ -15,6 +15,11 @@ export interface ChatTransportPort {
  unavailable?():boolean;
 }
 const marker='[bflow-web:';
+export function unwrapWebEchoPrompt(prompt:string):string{
+ const wrapped=/^\s*<pasted_content id="([A-Za-z0-9_-]{1,128})">\s*([\s\S]*?)\s*<\/pasted_content id="\1">\s*$/.exec(prompt);
+ if(wrapped&&!wrapped[2]!.includes('<pasted_content')&&!wrapped[2]!.includes('</pasted_content')&&wrapped[2]!.startsWith(marker))return wrapped[2]!;
+ return prompt;
+}
 export class ChatApprovalRejectionError extends Error {
  constructor(message:string){super(message);this.name='ChatApprovalRejectionError';}
 }
@@ -72,13 +77,27 @@ export class HostChat {
   if(observed.length){const s=await this.port.session();for(const r of observed){if(s.sessionId===r.input.sessionId&&s.nativeSessionId===r.nativeSessionId&&s.paneId===r.paneId){try{await this.echo({nativeSessionId:r.nativeSessionId,paneId:r.paneId,prompt:this.wire(r)});}catch(error){if(!(error instanceof ChatApprovalRejectionError))throw error;}}}}
   const candidate=await this.store.exclusive(async()=>{
    const all=await this.store.all();
-   if(!all.some(r=>r.state==='queued'))return;
+   if(!all.some(r=>r.state==='queued'||r.state==='dispatching'||r.state==='accepted'))return;
    const s=await this.port.session();if(!s.ready)return;
    const matches=(r:ChatRecord)=>s.sessionId===r.input.sessionId&&s.nativeSessionId===r.nativeSessionId&&s.paneId===r.paneId;
+   if(!s.busy){
+    const now=Date.now();
+    for(const stale of all.filter(r=>(r.state==='dispatching'||r.state==='accepted')&&matches(r)&&!r.echoObserved&&!r.admitted)){
+     const age=now-Date.parse(stale.message.createdAt);
+     if(Number.isFinite(age)&&age>30_000){
+      const observed=this.port.observeAdmission?await this.port.observeAdmission(stale):undefined;
+      if(observed===undefined){
+       await this.store.write({...stale,state:'not_delivered',result:{code:'unavailable',message:'Prompt did not echo before Conversation pane became idle',retryable:true},message:{...stale.message,delivery:'failed'}});
+      }
+     }
+    }
+   }
+   const refreshed=await this.store.all();
+   if(!refreshed.some(r=>r.state==='queued'))return;
    // An old unknown dispatch is retained for observation, never replayed into a new native session.
-   if(all.some(r=>(r.state==='dispatching'||r.state==='accepted')&&matches(r)))return;
+   if(refreshed.some(r=>(r.state==='dispatching'||r.state==='accepted')&&matches(r)))return;
    let r:ChatRecord|undefined;
-   for(const queued of all.filter(v=>v.state==='queued')){
+   for(const queued of refreshed.filter(v=>v.state==='queued')){
     if(!matches(queued)){await this.store.write({...queued,state:'not_delivered',message:{...queued.message,delivery:'failed'}});continue;}
     r=queued;break;
    }
@@ -95,9 +114,10 @@ export class HostChat {
   }
  }
  async echo(input:{nativeSessionId:string;paneId:string;prompt:string}):Promise<unknown|undefined>{
-  if(!input.prompt.startsWith(marker))return undefined;
+  const prompt=unwrapWebEchoPrompt(input.prompt);
+  if(!prompt.startsWith(marker))return undefined;
   return this.store.exclusive(async()=>{
-   const r=(await this.store.all()).find(r=>this.wire(r)===input.prompt);
+   const r=(await this.store.all()).find(r=>{const w=this.wire(r);return w===prompt||w.trim()===prompt.trim();});
    if(!r||r.state==='queued'||r.nativeSessionId!==input.nativeSessionId||r.paneId!==input.paneId)throw Error('Uncorrelated web echo');
    const s=await this.port.session();if(s.sessionId!==r.input.sessionId||s.nativeSessionId!==r.nativeSessionId||s.paneId!==r.paneId)throw Error('Web echo session replaced');
    // Admission itself must be idempotent on messageId, so a crash before this final receipt replays one turn.

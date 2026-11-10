@@ -26,35 +26,39 @@ HTTP endpoints, never a traditional mutation CLI or fake host hook.
 
 ## Visualization mode (3D office)
 
-An optional mode, off by default: Classic stays the default view, and the choice is remembered per browser. The top-bar switch (`3D`) or the
-HUD toggle (`Classic | 3D`) enters it; the same `<Routes>` render in a floating panel, so every Classic page, form, recovery path and the operations
-dock are reachable from the scene (parity table in `test/office-parity.test.tsx`, 34 rows).
+An optional mode, off by default: Classic stays the default view, and the choice is remembered per browser. The taskbar switch (`3D` / `Web`) enters
+it. The same `<Routes>` remain mounted inside the app window, so drafts survive a mode switch. Route pages use one draggable/maximizable app window;
+inspectors, Director chat, operations and status use separate tool windows. Desktop shortcuts, Start menu and the taskbar provide navigation and window
+restore. Window geometry is saved per project. Layouts use free placement at 1100 px and wider, tiled windows from 768–1099 px, and full-screen sheets
+below 768 px. The parity map is in `test/office-parity.test.tsx`; window state and chrome tests are in `test/office-windows.test.ts` and
+`test/game-window.test.tsx`, with browser coverage in `e2e/office-windows.spec.ts`.
 
 - **What it shows.** A stylized low-poly office (three.js 0.187.0, imperative `OfficeRenderer`) drawn from the read-only workforce projection
   (D-WEB-03, [ADR 0008](../../docs/adr/0008-web-workforce-projection.md)) plus run, decision and session reads. Characters are chibi figures
   coloured by role; poses come from transport observation and assignment data, with a confidence label (confirmed, inferred, unknown). Herdr `done`
   is never shown as success, and HTTP 202 or `applied` never as a finished workflow. A degraded tier (no workforce route) shows placeholders and says so.
 - **Office look.** Partition walls with doorways split the floor into zones, each with a wall sign drawn as canvas text (the sign is decoration; the DOM mirror
-  holds the truth). Decor, keyboards and extra furniture come from the generated models, under bright lighting.
+  holds the truth). The symmetric floor plan features the Director Office, Director Team (executive leather chairs), Developer Zone (backless red plastic stools, water coolers), QA / Reviewer desks, a Creative Space (4 billiard tables, arcade machines, rounded bar with wine wall and an ambient working bartender), and a Swimming Pool with diving boards. Idle figures take random leisure spots and walk back when assigned work. Character styles reflect their role (Director in white shirt, Developers in tank top/shorts, Reviewer with crimson hair & glasses, QA with spiky hair). Decor, keyboards and extra furniture come from the generated models, under bright lighting.
 - **Zzz and message boxes.** A sleeping agent shows a `Zzz` pill; a working agent shows a message box with the last lines of its terminal
   text. The text is an unverified terminal snapshot read through `GET /api/v1/projects/:id/workforce/excerpts`, redacted and capped at 600 characters; it is
   not an `AgentResult` and never evidence of task success. Without that route (an older or fixture host) the box shows the staff member's status text and no terminal text.
-- **Operations dock.** Hidden by default behind a toggle that shows when something is tracked or needs attention. `Toàn cảnh` closes every open panel
-  except the re-pair view, then fits the camera.
+- **Operations window.** Hidden by default. The taskbar/HUD toggle appears when something is tracked or needs attention and opens a movable window.
+  `Toàn cảnh` closes app and tool windows except the re-pair view, then fits the camera.
 - **Nhân viên page.** `/projects/:id/agents` lists every staff member with their recent terminal text in Classic and 3D; the agent inspector has a
   `Nội dung gần đây` section. Full text comes from `GET /api/v1/projects/:id/agents/:instanceId/transcript` (tail of at most 64000 characters, source
   `terminal_snapshot`). See ADR 0008, "Amendment 2026-11-02: agent terminal transcripts", for redaction and the caveat that a pane that moved on or restarted shows whatever its terminal holds.
-- **Read-only.** `features/office/scene/**` imports no command API. The HUD navigates, opens inspectors and hands a chat draft to the chat page; it sends nothing.
+- **Read-only.** `features/office/scene/**` imports no command API. The HUD navigates, opens windows and hands a chat draft to the chat page; it sends nothing.
   Structured actions still go through the Classic components and the existing Local Server routes.
 - **Controls.** Click or tap an object or character; drag to pan, wheel or pinch to zoom; arrows pan, `+` / `-` zoom, `0` fits the view; `Esc` closes the
-  panel and returns focus to the control that opened it. The camera never moves by itself: only a user gesture, a selection or a HUD camera preset moves it.
+  active window and restores focus to its opener. `F6` cycles desktop shortcuts, window title bars and taskbar controls. The camera never moves by itself:
+  only a user gesture, a selection or a HUD camera preset moves it.
 - **Accessibility.** The canvas is `aria-hidden`. The DOM mirror ("Bản văn bản của văn phòng") lists every agent and object as real buttons; it is
   visually hidden while the scene is healthy, reachable by Tab, shown while focused, and becomes the visible complete list when WebGL is unavailable
   or the context is lost (the panel and drafts are untouched; there is no retry loop). Agent, object and message-box labels are DOM text; the zone wall signs are the one canvas-text exception (the mirror still lists every zone). `aria-live` announces new decisions and errors
   at most once per 5 s. `prefers-reduced-motion` turns off walking and instantly applies poses. `e2e/office-a11y.spec.ts` covers a keyboard-only pass,
   reduced motion and 375, 768, 1280 and 1440 px (no horizontal scroll, HUD controls not overlapping, labels clear of them).
-- **Scoped dark theme.** DESIGN.md governs Classic. The 3D mode re-values the same tokens in a `.office-3d` scope (dark, rounded) per the ADR 0008
-  amendment. `test/office-contrast.test.ts` computes the contrast ratios from the real CSS (text 4.5:1, focus and control borders 3:1).
+- **Scoped game-window theme.** DESIGN.md governs Classic. The 3D mode uses light lavender window bodies, 2 px ink borders, hard shadows, colored title bars
+  and sticker icons inside a `.office-3d` scope. Active title-bar text and the inactive title-bar text meet 4.5:1 contrast against their fills.
 - **Assets and CSP.** `public/office/character.glb` and `furniture.glb` are generated by `scripts/generate-office-models.mjs`: colour materials only, no
   embedded images (the CSP has no `blob:`), no Draco or KTX2, no text. The CSP is unchanged. three.js is loaded only by `import()` on entering the mode;
   the Classic bundle holds none of it (`e2e/office-csp.spec.ts`). **Final art may replace the GLBs without code changes if it keeps the same node,

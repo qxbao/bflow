@@ -7,16 +7,17 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { AgentExecutionHandleSchema, ArtifactReferenceSchema, ArtifactWriteOptionsSchema, PaneBindingSchema, RoleMessageSchema, type PaneBinding } from "@bflow/contracts";
-import { measureBehavior, parseBehavioralCommands, type BehavioralCommand, type RtkOutputIntegration } from "./behavioral-runner.js";
+import { measureBehavior, parseBehavioralCommands, testFilePattern, type BehavioralCommand, type BoundBehavioralCommand, type RtkOutputIntegration } from "./behavioral-runner.js";
 import { runtimeGitDirectoryFlags } from "./patch-paths.js";
 import { runnerDefinitionPattern } from "./runner-provenance.js";
-import { TestRunnerSource, resolveTaskCommands } from "./task-commands.js";
+import { TestRunnerSource, plannedTestDirectory, resolveTaskCommands } from "./task-commands.js";
 import { isConflictResolverAssignment, type AgenticWorkflowRuntime } from "./runtime.js";
 import { digest, json, record, strings, textField } from "./journal.js";
 import type { JsonValue, Specification, TestStrategy } from "@bflow/contracts";
 import { darwinWorkspaceFile } from "./workspace-file-darwin.js";
-import { exceedsAgyInlineReply } from "./agy-assignment-admission.js";
+import { AGY_INLINE_REPLY_BYTES, exceedsAgyInlineReply } from "./agy-assignment-admission.js";
 import { selectRoleProfile } from "./profile-admission.js";
+import { blockerOf, type TaskBlocker } from "./blockers.js";
 
 const execute = promisify(execFile);
 /** Rules every conflict resolver receives in assignment_context and workspace_status. */
@@ -52,11 +53,15 @@ const workspaceReadSchema = z.object({
   runId: optionalNonEmptyId,
   run_id: optionalNonEmptyId,
   taskId: optionalNonEmptyId,
-  task_id: optionalNonEmptyId
+  task_id: optionalNonEmptyId,
+  offset: z.number().int().min(0).max(FILE_BYTES).optional(),
+  limit: z.number().int().min(1).max(FILE_BYTES).optional()
 }).strict().transform(data => ({
   path: normalizeFilePath(data as Record<string, unknown>),
   runId: data.runId ?? data.run_id,
-  taskId: data.taskId ?? data.task_id
+  taskId: data.taskId ?? data.task_id,
+  offset: data.offset,
+  limit: data.limit
 }));
 const workspaceWriteSchema = z.object({
   path: z.string().min(1).max(4096).optional(),
@@ -99,10 +104,19 @@ export class HostDevelopment {
     private readonly candidateEvidence?: (context:{runId:string;taskId:string;attemptId:string;sourceRevision:string})=>Promise<JsonValue>) {
     this.runners = runners instanceof TestRunnerSource ? runners : new TestRunnerSource(parseBehavioralCommands(runners));
   }
-  /** The same resolver as Verification: owner commands and automatic profiles, bound to this task's identities and ownership. */
-  private commandsFor(task: { spec: { specification: Specification; strategy: TestStrategy }; worktrees?: { baseCommitHash: string }[] }, ownedPaths: string[]) {
-    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profilesForRevision(task.worktrees?.[0]?.baseCommitHash), strategy: task.spec.strategy,
-      specification: task.spec.specification, ownedPaths });
+  /**
+   * The same resolver as Verification: owner commands and automatic profiles, bound to this task's identities and ownership.
+   * With an automatic runner and a worktree (`cwd`), the tests are the ones the committed task diff changed, not the planned list.
+   */
+  private async commandsFor(task: { spec: { specification: Specification; strategy: TestStrategy }; worktrees?: { baseCommitHash: string }[] }, ownedPaths: string[],
+    cwd?: string): Promise<BoundBehavioralCommand[]> {
+    const input = { owner: this.runners.owner, profiles: this.runners.profilesForRevision(task.worktrees?.[0]?.baseCommitHash), strategy: task.spec.strategy,
+      specification: task.spec.specification, ownedPaths };
+    if (!this.runners.automatic || cwd === undefined || !task.worktrees?.length) return resolveTaskCommands(input);
+    const head = (await this.git(cwd, ["rev-parse", "HEAD"])).trim();
+    const changedPaths = (await this.git(cwd, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=ACMR", "-z", task.worktrees[0]!.baseCommitHash, head, "--"]))
+      .split("\0").filter(Boolean);
+    return resolveTaskCommands({ ...input, changedPaths }).commands;
   }
   private async git(cwd: string, args: string[]) {
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_") && !key.startsWith("NODE_")));
@@ -114,11 +128,14 @@ export class HostDevelopment {
     const binding = PaneBindingSchema.parse(bindingInput), args = record(input);
     const requestedRunId = normalizeOptionalId(args.runId ?? args.run_id), requestedTaskId = normalizeOptionalId(args.taskId ?? args.task_id);
     if (binding.role !== "developer" || !binding.worktreePath) throw new Error("An assigned Developer worktree is required");
-    const state = record(await this.runtime().inspect());
-    if (!Array.isArray(state.outbound)) throw new Error("Invalid Runtime assignment state");
+    const rt = this.runtime() as AgenticWorkflowRuntime & { outboundForPane?: (paneId: string) => Promise<unknown[]> };
+    const outbound = typeof rt.outboundForPane === "function"
+      ? await rt.outboundForPane(binding.paneId)
+      : record(await rt.inspect()).outbound;
+    if (!Array.isArray(outbound)) throw new Error("Invalid Runtime assignment state");
     // Herdr reuses pane ids across restarts, so a cancelled run's unconfirmed assignment can name this pane too; the
     // per-attempt Developer agent name tells them apart.
-    const candidates = state.outbound.map(record).filter(out => out.status === "accepted" && out.handle &&
+    const candidates = outbound.map(record).filter(out => out.status === "accepted" && out.handle &&
       RoleMessageSchema.parse(out.message).type === "task.assignment" &&
       AgentExecutionHandleSchema.parse(out.handle).target.paneId === binding.paneId &&
       AgentExecutionHandleSchema.parse(out.handle).target.agentId === binding.agentId &&
@@ -207,11 +224,21 @@ export class HostDevelopment {
       this.runtime().ports.policies.assertReadyToImplement(strategy);
       return;
     }
-    const commands = this.commandsFor(task, ownedPaths);
-    const configuredTests = commands.flatMap(command => command.testPaths);
-    const definitionPaths = commands.flatMap(command => Object.keys(command.definitionBlobs ?? {}))
+    // Planned paths still protect declared test files; the committed diff adds the tests actually written. A plan that names
+    // only test directories cannot bind planned paths, so it falls back to the directory and the diff.
+    let declared: BoundBehavioralCommand[] = [];
+    try { declared = await this.commandsFor(task, ownedPaths); }
+    catch (error) { if (!this.runners.automatic || !task.spec.specification.affectedPaths.some(plannedTestDirectory)) throw error; }
+    const observed = this.runners.automatic ? await this.commandsFor(task, ownedPaths, cwd) : [];
+    const commands = [...declared, ...observed];
+    const configuredTests = [...new Set(commands.flatMap(command => command.testPaths))];
+    const profileDefinitions = this.runners.automatic
+      ? this.runners.profilesForRevision(task.worktrees?.[0]?.baseCommitHash).filter(profile => strategy.targetCommands.includes(profile.command))
+        .flatMap(profile => Object.keys(profile.definitionBlobs ?? {})) : [];
+    const definitionPaths = [...new Set([...commands.flatMap(command => Object.keys(command.definitionBlobs ?? {})), ...profileDefinitions])]
       .filter(candidate => !configuredTests.includes(candidate));
-    const hasAutomaticRunner = commands.some(command => command.checkoutDependencyRoots !== undefined);
+    const hasAutomaticRunner = this.runners.automatic || commands.some(command => command.checkoutDependencyRoots !== undefined);
+    const plannedDirectories = this.runners.automatic ? task.spec.specification.affectedPaths.filter(plannedTestDirectory) : [];
     const evidence = strategy.metadata?.tddEvidence;
     const hasRedEvidence = Array.isArray(evidence) && evidence.length > 0;
     const firstReceipt = hasRedEvidence && evidence[0] !== null && typeof evidence[0] === "object" && !Array.isArray(evidence[0])
@@ -223,7 +250,9 @@ export class HostDevelopment {
     const redSourceRevision = typeof redDetails?.sourceRevision === "string" ? redDetails.sourceRevision : undefined;
     let requiresImplementationAuth = false;
     for (const path of paths) {
-      const isConfiguredTest = await this.isTestPath(cwd, path, configuredTests);
+      // Before Red a test file under a planned test directory is the Red test the Developer is expected to write.
+      const isConfiguredTest = await this.isTestPath(cwd, path, configuredTests) ||
+        (!hasRedEvidence && testFilePattern.test(path) && plannedDirectories.some(directory => path.startsWith(`${directory}/`)));
       const isDefinition = await this.isTestPath(cwd, path, definitionPaths);
       const isSupplementalTest = !isConfiguredTest && !isDefinition &&
         SUPPLEMENTAL_RED_TEST_OR_FIXTURE_PATTERN.test(path) &&
@@ -275,7 +304,7 @@ export class HostDevelopment {
       this.scope(path, owned, strings(record(definition.metadata).forbiddenPaths ?? []));
       if (writing) await this.authorizeTddPaths(context.cwd, task, owned, [path]);
       return use(context.cwd, path);
-    });
+    }, { readOnly: !writing });
   }
   /** Linux descriptor-relative traversal pins every directory; no check-path-then-open-path authorization gap.
    * Other platforms fail closed. Parent directories must already exist unless `createParents` is set for a new file. */
@@ -321,11 +350,41 @@ export class HostDevelopment {
   /** Bounded UTF-8 source access is allowed before Red; missing leaf files return exists:false. */
   async readWorkspaceFile(binding: PaneBinding, input: unknown): Promise<JsonValue> {
     const args = workspaceReadSchema.parse(input);
+    const isAgy = binding.agentKind === "agy" || binding.provider === "agy";
+    const formatFoundReply = (path: string, content: string, digestHex: string, byteLength: number): JsonValue => {
+      const fullReply = { path, exists: true, content, sha256: digestHex, bytes: byteLength };
+      const pagedRequested = args.offset !== undefined || args.limit !== undefined;
+      if (!pagedRequested && (!isAgy || !exceedsAgyInlineReply(fullReply))) return json(fullReply);
+      const start = Math.min(args.offset ?? 0, content.length);
+      let sliceLimit = Math.min(args.limit ?? (isAgy ? 5600 : content.length), Math.max(0, content.length - start));
+      const buildPaged = (limit: number) => {
+        const end = Math.min(content.length, start + limit);
+        const truncated = end < content.length;
+        return {
+          path,
+          exists: true,
+          content: content.slice(start, end),
+          sha256: digestHex,
+          bytes: byteLength,
+          offset: start,
+          totalChars: content.length,
+          truncated,
+          nextOffset: truncated ? end : null
+        };
+      };
+      let reply = buildPaged(sliceLimit);
+      while (isAgy && sliceLimit > 1 && exceedsAgyInlineReply(reply)) {
+        const overshoot = Buffer.byteLength(JSON.stringify(reply), "utf8") - AGY_INLINE_REPLY_BYTES;
+        sliceLimit = Math.max(1, sliceLimit - Math.max(128, overshoot));
+        reply = buildPaged(sliceLimit);
+      }
+      return json(reply);
+    };
     return this.withWorkspaceFile(binding, args, false, async (cwd, path) => {
       if (process.platform === "darwin") {
         const bytes = await darwinWorkspaceFile(cwd, path);
         return bytes === undefined ? json({ path, exists: false, content: null, sha256: null, bytes: 0 })
-          : json({ path, exists: true, content: utf8(bytes), sha256: sha256(bytes), bytes: bytes.length });
+          : formatFoundReply(path, utf8(bytes), sha256(bytes), bytes.length);
       }
       return this.withFileParent(cwd, path, async file => {
       try { await this.assertRegularPath(file); }
@@ -334,7 +393,7 @@ export class HostDevelopment {
         throw error;
       }
       const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      try { const value = await this.boundedFile(handle); return json({ path, exists: true, content: value.content, sha256: value.sha256, bytes: value.bytes.length }); }
+      try { const value = await this.boundedFile(handle); return formatFoundReply(path, value.content, value.sha256, value.bytes.length); }
       finally { await handle.close(); }
       });
     });
@@ -376,12 +435,14 @@ export class HostDevelopment {
     const context = await this.identity(binding, input);
     if (context.resolver) return (await this.conflictResolutionContext(binding))!;
     const rawRework = record(context.message.payload).reworkContext;
-    const rawResumeContext = await this.runtime().taskHandover(binding, { runId: context.runId, taskId: context.taskId });
     const isAgy = context.binding.agentKind === "agy" || context.binding.provider === "agy";
-    const resumeContext = isAgy ? deferredTaskHandover(rawResumeContext) : rawResumeContext;
+    const resumeContext = isAgy
+      ? deferredTaskHandover({ binding: { runId: context.runId, taskId: context.taskId } })
+      : await this.runtime().taskHandover(binding, { runId: context.runId, taskId: context.taskId });
+    const policyFailureContext = await this.runtime().readPolicyFailureContext(context.binding, context.runId, context.taskId, context.attemptId);
     const reply = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async task => {
       const fullEvidence = task.spec.strategy.metadata?.tddEvidence ?? [];
-      const fullReply = { resumeContext, runId: context.runId, taskId: context.taskId, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
+      const fullReply = { resumeContext, policyFailureContext, runId: context.runId, taskId: context.taskId, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
         branch: (await this.git(context.cwd, ["branch", "--show-current"])).trim(), worktreePath: context.cwd,
         tddDecision: task.spec.strategy.tddDecision, recordedEvidence: fullEvidence,
         ...(rawRework !== undefined ? { reworkContext: rawRework } : {}) };
@@ -406,13 +467,22 @@ export class HostDevelopment {
         return json(compact);
       }
       return json(fullReply);
-    });
+    }, { readOnly: true });
     const head=record(reply).head;
     if(!this.candidateEvidence || typeof head!=="string")return reply;
     // Receipt lookup runs outside the workspace transaction; it grants no mutation or acceptance authority.
     const packet=await this.candidateEvidence({runId:context.runId,taskId:context.taskId,attemptId:context.attemptId,sourceRevision:head});
     const combined=json({...record(reply),candidateBehavioralEvidence:packet});
     return isAgy && exceedsAgyInlineReply(combined) ? reply : combined;
+  }
+  private blockedReply(context: { runId: string; taskId: string; attemptId: string }, reason: string, blocker?: TaskBlocker) {
+    const classification = !blocker ? "infrastructure" : {
+      director: "plan_mismatch", developer: "code", environment: "infrastructure", runtime: "runtime", user: "runtime"
+    }[blocker.fixableBy];
+    return json({ status: "blocked", classification, independentAcceptanceEvidence: false,
+      runId: context.runId, taskId: context.taskId, attemptId: context.attemptId, reason,
+      recovery: blocker?.nextAction ?? "Restore local runner/browser/sandbox prerequisites, then call check_work again on this same assignment. No package installation or network access is performed.",
+      ...(blocker ? { blocker: { code: blocker.code, fixableBy: blocker.fixableBy, details: blocker.details } } : {}) });
   }
   /** Useful Developer feedback, deliberately not authenticated QA evidence. */
   async check(binding: PaneBinding, input: unknown) {
@@ -425,18 +495,38 @@ export class HostDevelopment {
     const rawRework = record(context.message.payload).reworkContext;
     const reworkGeneration = rawRework !== null && typeof rawRework === "object" && !Array.isArray(rawRework) && typeof (rawRework as Record<string, unknown>).reworkGeneration === "number"
       ? ((rawRework as Record<string, unknown>).reworkGeneration as number) : undefined;
-    const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => ({
-      commands: this.commandsFor(task, strings(record(definition.metadata).ownedPaths)),
-      head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
-      originalRevision: (task.worktrees[0] ?? task.worktrees.at(-1))!.baseCommitHash
-    }));
-    if (!selected.commands.length) throw new Error("No automated checks for this task: configure an owner command or make the accepted criteria and test files resolvable");
+    // Same authenticated assignment is an explicit readiness refresh point after the host environment changes.
+    await this.runners.refresh();
+    const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => {
+      let commands;
+      try { commands = await this.commandsFor(task, strings(record(definition.metadata).ownedPaths), context.cwd); }
+      catch (error) { return { blocked: `Host runner readiness is unavailable: ${String(error).slice(0, 800)}`, blocker: blockerOf(error) }; }
+      if (!commands.length) return { blocked: this.runners.automatic && task.worktrees?.length
+        ? "No test file is committed in the task diff yet. Commit the test files that cover the accepted criteria, then call check_work again."
+        : "No automated checks are currently ready for this accepted task." };
+      let environmentReadiness;
+      try {
+        environmentReadiness = await this.runtime().ports.preflightTaskEnvironment?.({ runId: context.runId, taskId: context.taskId,
+          attemptId: context.attemptId, worktreePath: context.cwd, specification: task.spec.specification,
+          strategy: task.spec.strategy, ownedPaths: strings(record(definition.metadata).ownedPaths) });
+        if (environmentReadiness?.status === "blocked") return { blocked: `${environmentReadiness.code}: ${environmentReadiness.reason}` };
+      } catch (error) { return { blocked: `Host environment readiness could not be refreshed: ${String(error).slice(0, 800)}` }; }
+      return { commands, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
+        originalRevision: (task.worktrees[0] ?? task.worktrees.at(-1))!.baseCommitHash, environmentReadiness };
+    });
+    if ("blocked" in selected) return this.blockedReply(context, selected.blocked, "blocker" in selected ? selected.blocker : undefined);
     const measurements = [];
-    for (const command of selected.commands) {
-      const rtk = await this.rtk?.resolve({ role: "developer", runId: context.runId, taskId: context.taskId,
-        attemptId: context.attemptId, commandId: command.id, revision: selected.head });
-      measurements.push(await measureBehavior(command.checkoutDependencyRoots === undefined ? command : { ...command, originalRevision: selected.originalRevision },
-        context.cwd, selected.head, rtk ? { rtk } : {}));
+    try {
+      for (const command of selected.commands) {
+        const rtk = await this.rtk?.resolve({ role: "developer", runId: context.runId, taskId: context.taskId,
+          attemptId: context.attemptId, commandId: command.id, revision: selected.head });
+        measurements.push(await measureBehavior(command.checkoutDependencyRoots === undefined ? command : { ...command, originalRevision: selected.originalRevision },
+          context.cwd, selected.head, rtk ? { rtk } : {}));
+      }
+    } catch (error) {
+      const blocker = blockerOf(error);
+      if (!blocker) throw error;
+      return this.blockedReply(context, blocker.message, blocker);
     }
     const bytes = Buffer.from(JSON.stringify({ sourceRevision: selected.head, ...(reworkGeneration !== undefined ? { reworkGeneration } : {}), measurements }));
     const artifactId = `check-work-${digest([context.runId, context.taskId, selected.head, reworkGeneration ?? 0, measurements]).slice(0, 36)}`;
@@ -448,7 +538,54 @@ export class HostDevelopment {
     const evidence = ArtifactReferenceSchema.parse(stored.value);
     for (const item of measurements) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId)
       await this.rtk?.consume(item.rtk.invocationId, evidence);
-    return json({ independentAcceptanceEvidence: false, sourceRevision: selected.head, ...(reworkGeneration !== undefined ? { reworkGeneration } : {}), evidence, measurements });
+    const fullReply = { independentAcceptanceEvidence: false, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
+      sourceRevision: selected.head, worktreePath: context.cwd, ...(reworkGeneration !== undefined ? { reworkGeneration } : {}),
+      ...(selected.environmentReadiness ? { environmentReadiness: selected.environmentReadiness } : {}), evidence, measurements };
+    const isAgy = context.binding.agentKind === "agy" || context.binding.provider === "agy";
+    if (isAgy && exceedsAgyInlineReply(fullReply)) {
+      const compactMeasurements = measurements.map(item => ({
+        sourceRevision: item.sourceRevision,
+        command: item.command,
+        commandId: item.commandId,
+        method: item.method,
+        tests: item.tests,
+        passed: item.passed,
+        failed: item.failed,
+        targetFailure: item.targetFailure,
+        testNames: item.testNames,
+        testResults: item.testResults,
+        outcome: {
+          exitCode: item.outcome.exitCode,
+          signal: item.outcome.signal,
+          timedOut: item.outcome.timedOut,
+          durationMs: item.outcome.durationMs,
+          stdout: item.outcome.stdout.slice(-1200),
+          stderr: item.outcome.stderr.slice(-1200)
+        }
+      }));
+      const compactReply = { ...fullReply, measurements: compactMeasurements };
+      if (!exceedsAgyInlineReply(compactReply)) return json(compactReply);
+      return json({
+        ...fullReply,
+        measurements: compactMeasurements.map(item => ({
+          sourceRevision: item.sourceRevision,
+          commandId: item.commandId,
+          method: item.method,
+          tests: item.tests,
+          passed: item.passed,
+          failed: item.failed,
+          targetFailure: item.targetFailure,
+          outcome: {
+            exitCode: item.outcome.exitCode,
+            timedOut: item.outcome.timedOut,
+            durationMs: item.outcome.durationMs,
+            stdout: item.outcome.stdout.slice(-400),
+            stderr: item.outcome.stderr.slice(-400)
+          }
+        }))
+      });
+    }
+    return json(fullReply);
   }
   /**
    * Concludes the preserved P18 merge with the resolver's edits. Only the conflicted files may differ from what the merge staged,

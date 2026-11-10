@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { lstat, mkdir, readFile, rename, rmdir, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { DirectorWaitResultSchema } from "@bflow/contracts";
 import { z } from "zod";
@@ -18,6 +18,13 @@ const STALE_MS = 120_000;
 const LOCK_STALE_MS = 60_000;
 const LOCK_DEADLINE_MS = 2000;
 const execFileAsync = promisify(execFile);
+const watchTransitions = new Map<string, Promise<void>>();
+const SESSION_STOPPED_ARM_MESSAGE = "session_stopped_by_user: Người dùng đã dừng phiên Bflow; không đặt watcher ngủ. Báo cho người dùng và kết thúc lượt.";
+
+/** A failing stop check fails toward stopping: a watcher must never keep a session alive on an unreadable marker. */
+async function stoppedSafely(stopped: () => Promise<boolean>): Promise<boolean> {
+  try { return await stopped(); } catch { return true; }
+}
 
 export async function queueCodexDirectorThread(input: {
   executable: string; cwd: string; threadId: string; message: string; env: Record<string, string | undefined>;
@@ -42,7 +49,19 @@ function statePath(root: string, sessionName: string): string {
 
 /** Cross-process serialization for the short marker transitions; never held during a long wait or queue call. */
 export async function withCodexDirectorWatchLock<T>(root: string, sessionName: string, action: () => Promise<T>): Promise<T> {
-  const lock = `${statePath(root, sessionName)}.lock`;
+  const lock = resolve(`${statePath(root, sessionName)}.lock`);
+  // mkdir retries provide exclusion across processes, but no FIFO ordering.
+  // In this process a later cancellation must follow an already-requested arm,
+  // even when both are waiting for the same filesystem lock.
+  const previous = watchTransitions.get(lock) ?? Promise.resolve();
+  const transition = previous.then(() => withWatchFileLock(lock, action));
+  const settled = transition.then(() => undefined, () => undefined);
+  watchTransitions.set(lock, settled);
+  try { return await transition; }
+  finally { if (watchTransitions.get(lock) === settled) watchTransitions.delete(lock); }
+}
+
+async function withWatchFileLock<T>(lock: string, action: () => Promise<T>): Promise<T> {
   await mkdir(dirname(lock), { recursive: true, mode: 0o700 });
   const deadline = Date.now() + LOCK_DEADLINE_MS;
   for (;;) {
@@ -89,7 +108,10 @@ export async function armCodexDirectorWatch(input: {
   root: string; sessionName: string; threadId: string; cursor: string;
   spawn: (generation: string) => Promise<void>;
   now?: () => Date;
+  /** True when the user stopped the session (or the stop marker is unreadable): the watcher must not be armed. */
+  stopped?: () => Promise<boolean>;
 }): Promise<DirectorWatchState> {
+  if (input.stopped && await stoppedSafely(input.stopped)) throw new Error(SESSION_STOPPED_ARM_MESSAGE);
   if (!/\.r[A-Za-z0-9_-]+$/.test(input.cursor)) throw new Error("Runtime cursor is not initialized; call director_wait before suspending");
   const now = input.now?.() ?? new Date();
   const state = StateSchema.parse({ version: 1, generation: randomUUID(), threadId: input.threadId, cursor: input.cursor, touchedAt: now.toISOString(), status: "armed" });
@@ -162,15 +184,28 @@ export async function runCodexDirectorWatch(input: {
   wait: (cursor: string, timeoutMs: number) => Promise<unknown>;
   queue: (threadId: string, message: string, env: Record<string, string | undefined>) => Promise<void>;
   delay: (ms: number) => Promise<void>;
+  /** True once the user stopped the session. Defaults to never stopped. */
+  stopped?: () => Promise<boolean>;
 }): Promise<void> {
   let failures = 0;
+  const isStopped = (): Promise<boolean> => input.stopped ? stoppedSafely(input.stopped) : Promise.resolve(false);
+  /** Marks this generation cancelled so no wake can be queued. Returns after the transition. */
+  const cancelForStop = async (): Promise<void> => {
+    await withCodexDirectorWatchLock(input.root, input.sessionName, async () => {
+      const current = await read(input.root, input.sessionName);
+      if (current?.generation === input.generation && (current.status === "armed" || current.status === "queueing"))
+        await save(input.root, input.sessionName, { ...current, status: "cancelled" });
+    });
+  };
   for (;;) {
     const state = await read(input.root, input.sessionName);
     if (!state || state.status !== "armed" || state.generation !== input.generation) return;
+    if (await isStopped()) { await cancelForStop(); return; }
     let result: z.infer<typeof DirectorWaitResultSchema>;
     try { result = DirectorWaitResultSchema.parse(await input.wait(state.cursor, WAIT_MS)); failures = 0; }
     catch (error) {
       if (/Director token rejected/i.test(String(error))) return;
+      if (await isStopped()) { await cancelForStop(); return; }
       failures++;
       await input.delay(Math.min(30_000, 1000 * 2 ** Math.min(failures, 5)));
       continue;
@@ -194,6 +229,10 @@ export async function runCodexDirectorWatch(input: {
     const admission = await withCodexDirectorWatchLock(input.root, input.sessionName, async () => {
       const current = await read(input.root, input.sessionName);
       if (!current || current.generation !== input.generation || current.status !== "armed") return undefined;
+      if (await isStopped()) {
+        await save(input.root, input.sessionName, { ...current, status: "cancelled" });
+        return undefined;
+      }
       await save(input.root, input.sessionName, { ...current, status: "queueing" });
       // Start the queue mutation before releasing the lock, so cancellation cannot slip between admission and send.
       const pending = input.queue(state.threadId, message, env);

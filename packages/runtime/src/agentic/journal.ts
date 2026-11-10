@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, rename, rm } from "node:fs/promises";
+import { mkdir, open, rename, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
@@ -26,8 +26,13 @@ import { ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./r
 import { CancellationStopProofSchema, NamespaceExitProofSchema, ownsCancelledAllocation, type CancellationStopProof, type NamespaceExitProof } from "./cancellation-stop.js";
 import { PrototypeRecordSchema, type PrototypeRecord } from "./prototype-review.js";
 import { TaskFailoverSchema, type TaskFailover } from "./provider-failover-state.js";
+import { BLOCKERS, type BlockerCode, type BlockerFixableBy } from "./blockers.js";
 
-export function json(value: unknown): JsonValue { return JsonValueSchema.parse(JSON.parse(JSON.stringify(value))); }
+export function json(value: unknown): JsonValue {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) return JsonValueSchema.parse(value);
+  return JSON.parse(serialized) as JsonValue;
+}
 export function digest(value: unknown): string {
   const canonical = (v: unknown): string => Array.isArray(v) ? `[${v.map(canonical)}]` : v !== null && typeof v === "object"
     ? `{${Object.entries(v).filter(([, x]) => x !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => `${JSON.stringify(k)}:${canonical(x)}`)}}`
@@ -56,6 +61,20 @@ const TaskParkSchema = z.object({
   episodeKey: z.string().min(1).optional()
 }).strict();
 export type TaskPark = z.infer<typeof TaskParkSchema>;
+const Hex64 = z.string().regex(/^[a-f0-9]{64}$/);
+const PathListSchema = z.array(z.string().min(1).max(1024)).max(50);
+/** Audit of one in-run scope amendment (private journal v10); the old spec and phase failures stay as evidence. */
+export const ScopeAmendmentRecordSchema = z.object({
+  amendmentId: Hex64, at: IsoDateTimeSchema, source: z.enum(["coordinator", "director"]),
+  reason: z.string().trim().min(1).max(1000),
+  fromSpecVersion: z.number().int().positive(), toSpecVersion: z.number().int().positive(),
+  fromSpecDigest: Hex64, toSpecDigest: Hex64, fromStrategyDigest: Hex64, toStrategyDigest: Hex64,
+  diff: z.object({ droppedAffectedPaths: PathListSchema, addedAffectedPaths: PathListSchema,
+    ownedPathsBefore: PathListSchema, ownedPathsAfter: PathListSchema,
+    testNamesChanged: z.array(z.object({ criterionId: z.string().min(1), before: z.array(z.string()).max(20), after: z.array(z.string()).max(20) }).strict()).max(20) }).strict(),
+  ownerApprovalId: z.string().min(1).max(200).optional()
+}).strict();
+export type ScopeAmendmentRecord = z.infer<typeof ScopeAmendmentRecordSchema>;
 const TaskParkSettlementSchema = z.object({
   attemptId: z.string().min(1), binding: PaneBindingSchema, park: TaskParkSchema
 }).strict();
@@ -68,6 +87,8 @@ export interface TaskRecord {
   parkedVerifications?: z.infer<typeof ParkedVerificationSchema>[];
   parked?: TaskPark;
   parkHistory?: TaskPark[];
+  /** Private v10 audit of scope amendments, oldest first. */
+  scopeAmendments?: ScopeAmendmentRecord[];
   /** Private v8 write-ahead authority to settle an unsent allocation; dispatch stays fenced until park commits. */
   parkSettlement?: z.infer<typeof TaskParkSettlementSchema>;
   failovers?: TaskFailover[];
@@ -306,7 +327,9 @@ export interface Outbound {
     contextDigest: string; replacementMessageId: string; disposition: "replaced_without_verdict_claim" };
   phaseFailureEvidence?: ArtifactReference;
   /** `retryAuthorized`: an explicit resume allows re-measuring the same revision after a non-repairable (infrastructure) failure. */
-  phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean; leaseRecoveryRequired?: boolean };
+  phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean; leaseRecoveryRequired?: boolean;
+    blocker?: { code: BlockerCode; fixableBy: BlockerFixableBy; fingerprint: string; specDigest: string; strategyDigest: string;
+      sourceRevision: string; details?: Record<string, JsonValue> } };
   /** A control notice borrows its task assignment's lease; it never owns capacity. */
   parentAssignmentId?: string;
   /** Private outbox position captured before this Coordinator turn is physically dispatched. */
@@ -319,7 +342,7 @@ export interface Outbound {
   leaseRelease?: ReleaseAgentLeaseRequest;
 }
 export interface JournalState {
-  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8; repository: string; runs: RunRecord[]; outbound: Outbound[];
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10; repository: string; runs: RunRecord[]; outbound: Outbound[];
   /** "rejected" is terminal and carries Runtime's reason: the message was refused by admission and must never be retried. */
   inbox: { message: RoleMessage; status: "received" | "applied" | "rejected"; reason?: string }[];
   pendingCore: AppendEventsRequest[];
@@ -340,13 +363,29 @@ export function requiresDirectorJournal(state: Pick<JournalState, "runs" | "outb
     state.runs.some(run => run.delegation.requestedBy === "director" || run.delegationHistory?.some(item => item.requestedBy === "director") ||
       run.status === "completed_with_parked" || run.tasks.some(task => task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined || task.parkedVerifications !== undefined));
 }
+export function requiresBlockerJournal(state: Pick<JournalState, "runs" | "outbound">): boolean {
+  return state.outbound.some(out => out.phaseFailure?.blocker !== undefined) ||
+    state.runs.some(run => run.tasks.some(task => task.parked?.kind === "plan_mismatch" ||
+      task.parkHistory?.some(entry => entry.kind === "plan_mismatch")));
+}
+export function requiresScopeAmendmentJournal(state: Pick<JournalState, "runs">): boolean {
+  return state.runs.some(run => run.tasks.some(task => task.scopeAmendments !== undefined));
+}
 /** Private storage codec; exported schemas validate every persisted boundary value. */
-export function parseAgenticJournalState(input: unknown, repository: string): JournalState {
+export function parseAgenticJournalState(input: unknown, repository: string, baseline?: JournalState): JournalState {
   const root = record(input);
-  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7, 8].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
+  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
   const state = root as unknown as JournalState;
+  const trustedBaseline = baseline && baseline.repository === repository && baseline.version <= state.version ? baseline : undefined;
+  const baselineRuns = trustedBaseline ? new Map(trustedBaseline.runs.map(r => [r.runId, r])) : undefined;
+  const baselineOut = trustedBaseline ? new Map(trustedBaseline.outbound.map(o => [o.message.message_id, o])) : undefined;
+  const baselineInbox = trustedBaseline ? new Map(trustedBaseline.inbox.map(i => [i.message.message_id, i])) : undefined;
+  const seenRuns = new Set<string>(), seenOut = new Set<string>(), seenInbox = new Set<string>();
   for (const run of state.runs) {
+    const priorRun = typeof run?.runId === "string" && !seenRuns.has(run.runId) ? baselineRuns?.get(run.runId) : undefined;
+    if (priorRun && isDeepStrictEqual(run, priorRun)) { seenRuns.add(run.runId); continue; }
+    if (typeof run?.runId === "string") seenRuns.add(run.runId);
     textField(run.runId); run.delegation = DelegationRequestSchema.parse(run.delegation);
     if (run.delegation.runId !== run.runId) throw new Error("Journal run/delegation mismatch");
     if (state.version < 8 && run.delegation.requestedBy === "director") throw new Error("Director journal fields require private journal v8");
@@ -478,11 +517,17 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {
+      if (task.scopeAmendments !== undefined) {
+        if (state.version < 10) throw new Error("Task scope amendments require private journal v10");
+        task.scopeAmendments = z.array(ScopeAmendmentRecordSchema).max(20).parse(task.scopeAmendments);
+      }
       if (task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined || task.parkedVerifications !== undefined) {
         if (state.version < 8) throw new Error("Task parking requires private journal v8");
         if (task.parkedVerifications !== undefined) task.parkedVerifications = z.array(ParkedVerificationSchema).max(20).parse(task.parkedVerifications);
         if (task.parked !== undefined) task.parked = TaskParkSchema.parse(task.parked);
         if (task.parkHistory !== undefined) task.parkHistory = z.array(TaskParkSchema).max(20).parse(task.parkHistory);
+        if (state.version < 9 && (task.parked?.kind === "plan_mismatch" || task.parkHistory?.some(entry => entry.kind === "plan_mismatch")))
+          throw new Error("Task parking plan mismatch requires private journal v9");
         if (task.parkSettlement !== undefined) task.parkSettlement = TaskParkSettlementSchema.parse(task.parkSettlement);
         if (task.parked && task.parkSettlement) throw new Error("Task park and allocation settlement cannot coexist");
         const pendingPark = task.parked ?? task.parkSettlement?.park;
@@ -506,9 +551,12 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
             binding.agentId !== `dev-${digest([run.runId, task.parkSettlement.attemptId]).slice(0, 20)}`)
           throw new Error("Invalid unsent park allocation settlement ownership");
       }
-      if (task.changeSet) task.changeSet = GitChangeSetSchema.parse(task.changeSet);
-      if (task.cycle) task.cycle = VerificationCycleSchema.parse(task.cycle);
-      if (task.result) task.result = AgentResultSchema.parse(task.result);
+      if (task.changeSet && (!priorRun || !isDeepStrictEqual(task.changeSet, priorRun.tasks.find(t => t.taskId === task.taskId)?.changeSet)))
+        task.changeSet = GitChangeSetSchema.parse(task.changeSet);
+      if (task.cycle && (!priorRun || !isDeepStrictEqual(task.cycle, priorRun.tasks.find(t => t.taskId === task.taskId)?.cycle)))
+        task.cycle = VerificationCycleSchema.parse(task.cycle);
+      if (task.result && (!priorRun || !isDeepStrictEqual(task.result, priorRun.tasks.find(t => t.taskId === task.taskId)?.result)))
+        task.result = AgentResultSchema.parse(task.result);
       if (task.reworkResolutions !== undefined) {
         if (!Array.isArray(task.reworkResolutions)) throw new Error("Invalid rework resolution history");
         task.reworkResolutions = task.reworkResolutions.map(item => {
@@ -518,11 +566,17 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
         });
       }
     }
-    if (run.workflowCycle) run.workflowCycle = VerificationCycleSchema.parse(run.workflowCycle);
-    if (run.workflowChange) run.workflowChange = GitChangeSetSchema.parse(run.workflowChange);
+    if (run.workflowCycle && (!priorRun || !isDeepStrictEqual(run.workflowCycle, priorRun.workflowCycle)))
+      run.workflowCycle = VerificationCycleSchema.parse(run.workflowCycle);
+    if (run.workflowChange && (!priorRun || !isDeepStrictEqual(run.workflowChange, priorRun.workflowChange)))
+      run.workflowChange = GitChangeSetSchema.parse(run.workflowChange);
   }
   for (const out of state.outbound) {
-    out.message = RoleMessageSchema.parse(out.message); textField(out.selector); textField(out.taskId); textField(out.attemptId); strings(out.capabilities);
+    const outId = typeof out?.message?.message_id === "string" ? out.message.message_id : undefined;
+    const priorOut = outId !== undefined && !seenOut.has(outId) ? baselineOut?.get(outId) : undefined;
+    if (outId !== undefined) seenOut.add(outId);
+    const unchangedOut = priorOut !== undefined && isDeepStrictEqual(out, priorOut);
+    if (!unchangedOut) { out.message = RoleMessageSchema.parse(out.message); textField(out.selector); textField(out.taskId); textField(out.attemptId); strings(out.capabilities); }
     if (!["queued", "sending", "unknown_delivery", "accepted", "released", "cancelled", "delivered", "failed"].includes(out.status)) throw new Error("Invalid outbound status");
     if (out.notReadySince !== undefined) { textField(out.notReadySince); if (!Number.isFinite(Date.parse(out.notReadySince))) throw new Error("Invalid not-ready timestamp"); }
     if (out.nextAttemptAt !== undefined) { textField(out.nextAttemptAt); if (!Number.isFinite(Date.parse(out.nextAttemptAt))) throw new Error("Invalid retry timestamp"); }
@@ -530,12 +584,12 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (out.cancelObservations !== undefined && (!Number.isSafeInteger(out.cancelObservations) || out.cancelObservations < 0)) throw new Error("Invalid cancellation observations");
     if (out.coordinatorResponseBaseline !== undefined && (!Number.isSafeInteger(out.coordinatorResponseBaseline) || out.coordinatorResponseBaseline < 0 || out.coordinatorResponseBaseline > state.outbound.length))
       throw new Error("Invalid Coordinator response baseline");
-    if (out.assignment) out.assignment = AgentAssignmentSchema.parse(out.assignment);
-    if (out.roleProfile !== undefined) out.roleProfile = RoleProfilePinSchema.parse(out.roleProfile);
+    if (!unchangedOut && out.assignment) out.assignment = AgentAssignmentSchema.parse(out.assignment);
+    if (!unchangedOut && out.roleProfile !== undefined) out.roleProfile = RoleProfilePinSchema.parse(out.roleProfile);
     if (out.profileAllocationTaskId !== undefined) textField(out.profileAllocationTaskId);
     if (out.profileAllocationReleased !== undefined && (out.profileAllocationReleased !== true || !out.profileAllocationTaskId || !out.roleProfile))
       throw new Error("Invalid profile allocation cleanup receipt");
-    if (out.executorLineage !== undefined) out.executorLineage = ExecutorLineageSchema.parse(out.executorLineage);
+    if (!unchangedOut && out.executorLineage !== undefined) out.executorLineage = ExecutorLineageSchema.parse(out.executorLineage);
     if (state.version < 7 && (out.roleProfile || out.executorLineage || out.profileAllocationTaskId))
       throw new Error("Profile authority requires private journal v7");
     if (out.delivery !== undefined) {
@@ -545,8 +599,8 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
           ["accepted", "unknown_delivery"].includes(out.status))
         throw new Error("Invalid Director mailbox outbound");
     }
-    if (out.request) out.request = AgentRequestSchema.parse(out.request);
-    if (out.prelaunchFailure) {
+    if (!unchangedOut && out.request) out.request = AgentRequestSchema.parse(out.request);
+    if (!unchangedOut && out.prelaunchFailure) {
       out.prelaunchFailure = { request: AgentRequestSchema.parse(out.prelaunchFailure.request), reconciledAt: IsoDateTimeSchema.parse(out.prelaunchFailure.reconciledAt),
         ...(out.prelaunchFailure.executorLineage ? {executorLineage:ExecutorLineageSchema.parse(out.prelaunchFailure.executorLineage)} : {}),
         ...(out.prelaunchFailure.lease ? {lease:AgentLeaseSchema.parse(out.prelaunchFailure.lease)} : {}) };
@@ -554,8 +608,8 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
           out.prelaunchFailure.request.attemptId !== out.attemptId || out.prelaunchFailure.request.taskId !== out.taskId)
         throw new Error("Invalid prelaunch failure audit binding");
     }
-    if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
-    if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
+    if (!unchangedOut && out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
+    if (!unchangedOut && out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
     if (out.parkStop !== undefined) {
       out.parkStop = z.object({ requestedAt: IsoDateTimeSchema, observations: z.number().int().min(0).max(5),
         proof: CancellationStopProofSchema.optional() }).strict().parse(out.parkStop);
@@ -620,6 +674,19 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
           out.phaseFailure.leaseRecoveryRequired !== undefined && (out.phaseFailure.leaseRecoveryRequired !== true || !out.phaseFailure.repairable || !out.phaseFailure.applied) ||
           out.message.type !== "verification.requested" || record(out.message.payload).kind !== "conditional_evidence")
         throw new Error("Invalid private policy failure outcome");
+      if (out.phaseFailure.blocker !== undefined) {
+        const blocker = out.phaseFailure.blocker;
+        const details = blocker?.details;
+        const paths = details?.paths;
+        if (state.version < 9 || !blocker || !Object.hasOwn(BLOCKERS, blocker.code) ||
+            blocker.fixableBy !== BLOCKERS[blocker.code]?.fixableBy ||
+            ![blocker.fingerprint, blocker.specDigest, blocker.strategyDigest].every(value => /^[a-f0-9]{64}$/.test(value)) ||
+            !/^[a-f0-9]{40}$/.test(blocker.sourceRevision) ||
+            details !== undefined && (!z.record(z.string(), JsonValueSchema).safeParse(details).success ||
+              JSON.stringify(details).length > 52_000 || paths !== undefined &&
+              (!Array.isArray(paths) || paths.length > 50 || paths.some(path => typeof path !== "string" || path.length > 1024))))
+          throw new Error("Invalid private policy failure outcome");
+      }
     }
     if (out.leaseHistory) {
       if (!Array.isArray(out.leaseHistory) || !out.leaseHistory.length || out.leaseHistory.length > 3 ||
@@ -673,6 +740,10 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
         out.request && digest(out.request.target) !== digest(parent.handle.target)) throw new Error("Invalid task notice parent assignment");
   }
   for (const item of state.inbox) {
+    const inId = typeof item?.message?.message_id === "string" ? item.message.message_id : undefined;
+    const priorIn = inId !== undefined && !seenInbox.has(inId) ? baselineInbox?.get(inId) : undefined;
+    if (inId !== undefined) seenInbox.add(inId);
+    if (priorIn && isDeepStrictEqual(item, priorIn)) continue;
     item.message = RoleMessageSchema.parse(item.message);
     if (!["received", "applied", "rejected"].includes(item.status)) throw new Error("Invalid inbox status");
     if (item.reason !== undefined) textField(item.reason);
@@ -706,11 +777,28 @@ function parseSpec(value: SpecRecord): void {
 /** Linux flock + fsync/rename. A crashed process releases its lock; stale PID files are never stolen. */
 export const JOURNAL_LOCK_WAIT_MS = 5_000;
 export const JOURNAL_LOCK_SPAWN_TIMEOUT_MS = 15_000;
+function journalStatesEqual(a: JournalState, b: JournalState): boolean {
+  if (a === b) return true;
+  if (a.version !== b.version || a.repository !== b.repository ||
+      a.runs.length !== b.runs.length || a.outbound.length !== b.outbound.length ||
+      a.inbox.length !== b.inbox.length || a.pendingCore.length !== b.pendingCore.length ||
+      a.pendingVerifications.length !== b.pendingVerifications.length) return false;
+  for (let i = a.outbound.length - 1; i >= 0; i--) {
+    if (!isDeepStrictEqual(a.outbound[i], b.outbound[i])) return false;
+  }
+  for (let i = a.runs.length - 1; i >= 0; i--) {
+    if (!isDeepStrictEqual(a.runs[i], b.runs[i])) return false;
+  }
+  for (let i = a.inbox.length - 1; i >= 0; i--) {
+    if (!isDeepStrictEqual(a.inbox[i], b.inbox[i])) return false;
+  }
+  return isDeepStrictEqual(a, b);
+}
 export class AgenticJournal {
   readonly directory: string;
   private readonly lockWaitMs: number;
   private readonly spawnTimeoutMs: number;
-  private validatedSnapshot?: { bytes: Buffer; value: JournalState };
+  private validatedSnapshot?: { ino?: number; size?: number; mtimeMs?: number; ctimeMs?: number; bytes: Buffer; value: JournalState };
   constructor(directory: string, readonly repository: string, options: { lockWaitMs?: number; spawnTimeoutMs?: number } = {}) {
     this.directory = resolve(directory);
     this.lockWaitMs = options.lockWaitMs ?? JOURNAL_LOCK_WAIT_MS;
@@ -723,7 +811,10 @@ export class AgenticJournal {
   }
   /** Select under the same lock; clone only the selected value. No write callback or mutable cached state escapes. */
   async project<T>(select: (state: Readonly<JournalState>) => T): Promise<T> {
-    return this.access(async state => structuredClone(select(state)), true);
+    return this.access(async state => {
+      const selected = select(state);
+      return selected === undefined || selected === null || typeof selected !== "object" ? selected : json(selected) as T;
+    }, true);
   }
   private async access<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>, readOnly = false): Promise<T> {
     const active = AgenticJournal.heldDirectories.getStore();
@@ -762,19 +853,44 @@ export class AgenticJournal {
     }
   }
   private async locked<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>, readOnly = false): Promise<T> {
+    const statePath = join(this.directory, "state.json");
+    if (readOnly && this.validatedSnapshot?.ino !== undefined && this.validatedSnapshot.size !== undefined) {
+      const fastState = await readMatchingSnapshotIfUnchanged(statePath, this.validatedSnapshot);
+      if (fastState) {
+        freezeJournalState(fastState);
+        return await action(fastState, async () => {
+          throw new Error("Read-only journal projection cannot save");
+        });
+      }
+    }
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const lock = await open(join(this.directory, "lock"), constants.O_CREAT | constants.O_RDWR | (constants.O_NOFOLLOW ?? 0), 0o600);
     try {
       if (!(await lock.stat()).isFile()) throw Object.assign(new Error(`Journal lock is not a regular file: ${this.directory}`), { code: "EISDIR" });
       await this.acquireFlock(lock.fd);
       let state: JournalState, baseline: JournalState | undefined, durableBytes: Buffer | undefined;
-      const statePath = join(this.directory, "state.json");
       try {
-        const bytes = await readRegularJournalFile(statePath);
-        if (this.validatedSnapshot?.bytes.equals(bytes)) state = readOnly ? this.validatedSnapshot.value : structuredClone(this.validatedSnapshot.value);
-        else {
-          state = parseAgenticJournalState(JSON.parse(bytes.toString("utf8")), this.repository);
-          this.validatedSnapshot = { bytes: Buffer.from(bytes), value: readOnly ? state : structuredClone(state) };
+        const readResult = await readRegularJournalFileWithStat(statePath, this.validatedSnapshot);
+        const bytes = readResult.bytes;
+        if (readResult.reused && this.validatedSnapshot) {
+          state = readOnly ? this.validatedSnapshot.value : JSON.parse(bytes.toString("utf8")) as JournalState;
+        } else if (this.validatedSnapshot?.bytes.equals(bytes)) {
+          state = readOnly ? this.validatedSnapshot.value : JSON.parse(bytes.toString("utf8")) as JournalState;
+          this.validatedSnapshot.ino = readResult.ino;
+          this.validatedSnapshot.size = readResult.size;
+          this.validatedSnapshot.mtimeMs = readResult.mtimeMs;
+          this.validatedSnapshot.ctimeMs = readResult.ctimeMs;
+        } else {
+          const raw = JSON.parse(bytes.toString("utf8"));
+          state = parseAgenticJournalState(raw, this.repository, this.validatedSnapshot?.value);
+          this.validatedSnapshot = {
+            ino: readResult.ino,
+            size: readResult.size,
+            mtimeMs: readResult.mtimeMs,
+            ctimeMs: readResult.ctimeMs,
+            bytes: Buffer.from(bytes),
+            value: readOnly ? state : JSON.parse(bytes.toString("utf8")) as JournalState
+          };
         }
         baseline = this.validatedSnapshot.value; durableBytes = bytes;
       } catch (e) {
@@ -783,12 +899,7 @@ export class AgenticJournal {
         state = { version: 1, repository: this.repository, runs: [], outbound: [], inbox: [], pendingCore: [], pendingVerifications: [] };
       }
       if (readOnly) {
-        const freeze = (value: unknown): void => {
-          if (!value || typeof value !== "object" || Object.isFrozen(value)) return;
-          for (const child of Object.values(value)) freeze(child);
-          Object.freeze(value);
-        };
-        freeze(state);
+        freezeJournalState(state);
       }
       return await action(state, async () => {
         if (readOnly) throw new Error("Read-only journal projection cannot save");
@@ -796,13 +907,15 @@ export class AgenticJournal {
         if (state.version < 7 && (state.runs.some(run => run.roleProfiles?.length || Object.keys(run.roleProfileDefaults ?? {}).length) ||
             state.outbound.some(out => out.roleProfile || out.executorLineage || out.profileAllocationTaskId))) state.version = 7;
         if (state.version < 8 && requiresDirectorJournal(state)) state.version = 8;
+        if (state.version < 9 && requiresBlockerJournal(state)) state.version = 9;
+        if (state.version < 10 && requiresScopeAmendmentJournal(state)) state.version = 10;
         // Equality covers invalid values that JSON.stringify would omit. Re-read under flock before acknowledging unchanged durable bytes.
-        if (baseline && durableBytes && isDeepStrictEqual(state, baseline)) {
+        if (baseline && durableBytes && journalStatesEqual(state, baseline)) {
           try { if ((await readRegularJournalFile(statePath)).equals(durableBytes)) return; }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         }
-        parseAgenticJournalState(state, this.repository);
-        const serialized = JSON.stringify(state), normalized = parseAgenticJournalState(JSON.parse(serialized), this.repository);
+        parseAgenticJournalState(state, this.repository, baseline);
+        const serialized = JSON.stringify(state), normalized = JSON.parse(serialized) as JournalState;
         const path = join(this.directory, `state-${randomUUID()}.tmp`);
         try {
           const file = await open(path, "wx", 0o600);
@@ -817,7 +930,12 @@ export class AgenticJournal {
             }
           } finally { await dir.close(); }
         } finally { await rm(path, { force: true }); }
-        this.validatedSnapshot = { bytes: Buffer.from(serialized, "utf8"), value: normalized };
+        const savedStat = await stat(statePath).catch(() => undefined);
+        this.validatedSnapshot = {
+          ...(savedStat?.isFile() ? { ino: savedStat.ino, size: savedStat.size, mtimeMs: savedStat.mtimeMs, ctimeMs: savedStat.ctimeMs } : {}),
+          bytes: Buffer.from(serialized, "utf8"),
+          value: normalized
+        };
         baseline = normalized; durableBytes = this.validatedSnapshot.bytes;
       });
     } finally { await lock.close(); }
@@ -825,6 +943,39 @@ export class AgenticJournal {
 }
 
 const IGNORED_REGULAR_FSYNC_CODES = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EROFS"]);
+function freezeJournalState(value: unknown): void {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return;
+  for (const child of Object.values(value)) freezeJournalState(child);
+  Object.freeze(value);
+}
+async function readMatchingSnapshotIfUnchanged(
+  path: string,
+  cached: { ino?: number; size?: number; mtimeMs?: number; ctimeMs?: number; value: JournalState }
+): Promise<JournalState | undefined> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch {
+    return undefined;
+  }
+  try {
+    const stat = await handle.stat();
+    if (
+      stat.isFile() &&
+      cached.ino === stat.ino &&
+      cached.size === stat.size &&
+      cached.mtimeMs === stat.mtimeMs &&
+      cached.ctimeMs === stat.ctimeMs
+    ) {
+      return cached.value;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
 export async function syncFileHandle(file: { sync(): Promise<void> }): Promise<void> {
   try { await file.sync(); }
   catch (error) {
@@ -833,10 +984,27 @@ export async function syncFileHandle(file: { sync(): Promise<void> }): Promise<v
   }
 }
 async function readRegularJournalFile(path: string): Promise<Buffer> {
+  return (await readRegularJournalFileWithStat(path)).bytes;
+}
+async function readRegularJournalFileWithStat(
+  path: string,
+  cached?: { ino?: number; size?: number; mtimeMs?: number; ctimeMs?: number; bytes: Buffer }
+): Promise<{ bytes: Buffer; ino: number; size: number; mtimeMs: number; ctimeMs: number; reused: boolean }> {
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
-    if (!(await handle.stat()).isFile()) throw Object.assign(new Error(`Journal state is not a regular file: ${path}`), { code: "EISDIR" });
-    return await handle.readFile();
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw Object.assign(new Error(`Journal state is not a regular file: ${path}`), { code: "EISDIR" });
+    if (
+      cached &&
+      stat.size > 65536 &&
+      cached.ino === stat.ino &&
+      cached.size === stat.size &&
+      cached.mtimeMs === stat.mtimeMs &&
+      cached.ctimeMs === stat.ctimeMs
+    ) {
+      return { bytes: cached.bytes, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, reused: true };
+    }
+    return { bytes: await handle.readFile(), ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, reused: false };
   } finally {
     await handle.close();
   }

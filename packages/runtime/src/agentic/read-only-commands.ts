@@ -1,4 +1,6 @@
 import type { AgentRole } from "@bflow/contracts";
+import { lstat, readFile } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 
 /**
  * Native shell allowlist enforced by the host PreToolUse guard.
@@ -218,8 +220,10 @@ function checkDeveloperBuild(words: readonly string[]): string | undefined {
     return `${program} ${[first, second].filter(Boolean).join(" ")} is not permitted (allowed: test, run test|build|typecheck, exec vitest|tsc; no install/add/publish)`;
   }
   if (program === "npx") {
-    if (first === undefined || !NPX_TOOLS.has(first)) return `npx '${first ?? ""}' is not permitted (allowed: ${[...NPX_TOOLS].join(", ")})`;
-    return checkBuildArgs(program, words.slice(2));
+    const tool = first === "--no-install" ? second : first;
+    if (first !== "--no-install") return "npx requires --no-install so it cannot download missing packages";
+    if (tool === undefined || !NPX_TOOLS.has(tool)) return `npx '${tool ?? ""}' is not permitted (allowed: ${[...NPX_TOOLS].join(", ")})`;
+    return checkBuildArgs(program, words.slice(3));
   }
   if (program === "node") return first === "--test" ? checkBuildArgs(program, words.slice(2)) : "node is permitted only as 'node --test ...'";
   if (program === "tsc") return checkBuildArgs(program, words.slice(1));
@@ -281,4 +285,43 @@ export function guardNativeShell(role: AgentRole, tool: string, toolInput: unkno
   const command = nativeShellCommand(toolInput);
   if (command === undefined) return refuse(`${tool} input has no readable command string`);
   return evaluateNativeCommand(role, command);
+}
+
+/**
+ * A second, workspace-bound gate for commands which can bootstrap packages. It is called by the host
+ * before admitting a Developer shell tool, so a refused package-manager/npx invocation never starts.
+ * Isolated host checks use their own pinned dependency mounts and do not pass through this native path.
+ */
+export async function checkNativeTaskEnvironment(role: AgentRole, tool: string, toolInput: unknown,
+  workspacePath: string): Promise<NativeCommandDecision> {
+  const base = guardNativeShell(role, tool, toolInput);
+  if (!base.permitted || role !== "developer") return base;
+  const command = nativeShellCommand(toolInput);
+  if (command === undefined) return refuse(`${tool} input has no readable command string`);
+  const tokenized = tokenizeCommand(command);
+  if ("error" in tokenized) return refuse(`${tokenized.error} in ${JSON.stringify(command.slice(0, 200))}`);
+  for (const words of tokenized.segments) {
+    const program = words[0];
+    if (program && [...PACKAGE_MANAGERS, "npx"].includes(program))
+      return refuse("Native package-manager and npx execution is disabled in task worktrees; use authenticated check_work with the host's pinned dependencies (no install, network or cache mutation)");
+    if (program === "tsc") return refuse("Native TypeScript compiler resolution is not pinned to the task; use authenticated check_work with the host's verified compiler");
+    if (program === "node" && words[1] === "--test") {
+      if (!isAbsolute(workspacePath) || resolve(workspacePath) !== workspacePath || workspacePath.includes("\0"))
+        return refuse("Developer task workspace identity is invalid; use authenticated check_work");
+      try {
+        const manifestPath = resolve(workspacePath, "package.json"), info = await lstat(manifestPath);
+        if (info.isSymbolicLink() || !info.isFile() || info.size > 262_144)
+          return refuse("Task package manifest is unsafe or oversized; use authenticated check_work");
+        const source = await readFile(manifestPath, "utf8");
+        if (Buffer.byteLength(source) > 262_144) return refuse("Task package manifest is oversized; use authenticated check_work");
+        const manifest = JSON.parse(source) as Record<string, unknown>;
+        const hasDependencies = [manifest.dependencies, manifest.devDependencies, manifest.optionalDependencies, manifest.peerDependencies]
+          .some(value => value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0);
+        if (hasDependencies) return refuse("This task declares JavaScript dependencies that are not prepared in its worktree; use authenticated check_work with host-mounted pinned dependencies");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return refuse("Task package manifest could not be safely checked; use authenticated check_work");
+      }
+    }
+  }
+  return PERMIT;
 }

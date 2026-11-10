@@ -13,6 +13,7 @@ import {
   type LocalWorkspaceServices, type WebProject, type WebProjectSession, type WebOperation,
 } from '@bflow/contracts/web';
 import { openUserInteractionClient } from '@bflow/runtime';
+import { clearUserStopIntent } from './user-stop-intent.js';
 import { EnvironmentLifecycle, lifecycleLeftSessionUnchanged, startupLeftSessionUnchanged, startupSessionWasCleanedUp, type EnvironmentDependencies } from './environment.js';
 import { identifyRepository } from './repository.js';
 import { readEnvironmentConfig } from './environment-config.js';
@@ -215,6 +216,8 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
       try {
         // EnvironmentLifecycle owns locks, provider preflight, startup receipts and activation.
         return await perform(ctx.project,operationId,'session_start',async()=>{
+        // A Web start is the user's own decision to reopen the session: it ends the earlier stop intent.
+        await clearUserStopIntent(ctx.repository.root);
         await lifecycle(ctx.repository.root).up();
         const health = WebProjectSessionResultSchema.parse(await readSession(ctx.project, ctx.repository.sessionName));
         if (!health.ok || health.value.projectId !== projectId || health.value.state !== 'ready')
@@ -230,7 +233,7 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
       try {
         // Explicit web confirmation is checked by W03. Never force past unverified writers/checkpoints.
         return await perform(ctx.project,operationId,'session_stop',async()=>{
-        const stopped = await lifecycle(ctx.repository.root).down(true, undefined, force);
+        const stopped = await lifecycle(ctx.repository.root).down(true, undefined, force, { source: 'web', operationId });
         if (!('status' in stopped && stopped.status === 'down') && !('server' in stopped && stopped.server === 'stopped'))
           return error('transport_unavailable', 'Chưa xác nhận dừng phiên. Đọc lại operation; không tự gửi lại stop.');
         return WebProjectSessionResultSchema.parse({ ok: true, value: { apiVersion: 1, projectId,

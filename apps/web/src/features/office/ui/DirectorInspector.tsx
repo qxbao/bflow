@@ -8,7 +8,7 @@ export function DirectorInspector({ onChat, onQueue }: { onChat: () => void; onQ
   return <section aria-label="Bàn Director" data-component="DirectorDesk" className="min-w-0">
     <h2 className="mt-0">Bàn Director</h2>
     <DirectorPresenceStatus />
-    <p className="text-sm text-muted">Director chạy trong CLI của bạn và điều phối công việc qua Runtime. Trạng thái lấy từ nhịp báo hoạt động của phiên, không từ pane Herdr.</p>
+    <p className="text-sm text-muted">Director chạy trực tiếp từ phiên làm việc của bạn để điều phối tiến độ. Trạng thái hiển thị dựa trên nhịp kết nối thực tế của phiên.</p>
     <div className="flex flex-wrap gap-2">
       <button type="button" onClick={onChat}>Mở trò chuyện với Director</button>
       <button type="button" onClick={onQueue}>Mở hàng đợi sự cố</button>

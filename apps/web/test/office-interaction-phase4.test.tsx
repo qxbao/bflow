@@ -77,7 +77,56 @@ test('AgentDialogue reports unknown waiting authority and mounts technical evide
   expect(screen.getByRole('link', { name: /Xem công việc: Build search/ }).getAttribute('href')).toBe('/projects/p/runs/run-1');
   expect(fetcher.mock.calls.some(([path]) => String(path).includes('/activity'))).toBe(false);
   fireEvent.click(screen.getByText('Chi tiết kỹ thuật'));
-  expect(await screen.findByText(/Nhật ký chỉ ghi vai trò/)).toBeTruthy();
+  expect(await screen.findByText(/Nhật ký ghi theo từng vai trò/)).toBeTruthy();
   expect(fetcher.mock.calls.some(([path]) => String(path).includes('/activity'))).toBe(true);
   expect(screen.getByText(/Nội dung gần đây/)).toBeTruthy();
+});
+
+test('OfficeNotifications offers one-click actions for stopped session, absent Director and open queue issues, and AgentDialogue maps known poses', () => {
+  const onServer = vi.fn(), onDirector = vi.fn(), onQueue = vi.fn();
+  const stoppedSession = WebProjectSessionSchema.parse({ ...session, state: 'stopped', pendingIntakes: [] });
+  const directorModel: OfficeModel = {
+    ...model,
+    director: { label: 'Director', presence: 'absent', certainty: 'confirmed', statusText: 'Chưa có mặt' },
+    queue: { availability: 'ready', open: 2, retrying: 0, truncated: false },
+  };
+  const { rerender } = render(
+    <OfficeNotifications
+      connection="connected"
+      session={stoppedSession}
+      stale={false}
+      authRequired={false}
+      model={directorModel}
+      onInbox={() => {}}
+      onClarifications={() => {}}
+      onServer={onServer}
+      onDirector={onDirector}
+      onQueue={onQueue}
+    />
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Phiên đang dừng · Mở máy chủ phiên' }));
+  expect(onServer).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole('button', { name: '2 sự cố đang mở · Xem hàng đợi' }));
+  expect(onQueue).toHaveBeenCalledTimes(1);
+
+  rerender(
+    <OfficeNotifications
+      connection="connected"
+      session={ready}
+      stale={false}
+      authRequired={false}
+      model={directorModel}
+      onInbox={() => {}}
+      onClarifications={() => {}}
+      onServer={onServer}
+      onDirector={onDirector}
+      onQueue={onQueue}
+    />
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Director chưa có mặt · Mở bàn Director' }));
+  expect(onDirector).toHaveBeenCalledTimes(1);
+
+  cleanup();
+  render(<MemoryRouter><AgentDialogue api={new ApiClient()} projectId="p" agent={{ ...agent, pose: 'hand_raised' }} view={view} handoffs={[]} revision={0} titleOf={() => 'Build search'} /></MemoryRouter>);
+  expect(screen.getByText('Đang chờ bạn quyết định')).toBeTruthy();
 });

@@ -17,6 +17,38 @@ const empty = { cursor, timedOut: true, messages: [], issues: [], runtimeEvents:
 const event = { cursor: "m5.i0.b2.rZmVlZDoy", timedOut: false, messages: [{ schemaVersion: 1, seq: 5, messageId: "message-5", author: "user", channel: "web", text: "Làm tiếp", at: "2026-11-05T00:00:00.000Z" }], issues: [], runtimeEvents: [], mailbox: [] };
 
 describe("Codex Director event wake", () => {
+  it("preserves invocation order for watcher state transitions contending on a held lock", async () => {
+    const dir = await root(); let release!: () => void; let held!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { held = resolve; });
+    const holder = withCodexDirectorWatchLock(dir, "session", async () => { held(); await gate; });
+    await entered;
+    const order: number[] = [];
+    const pending = Array.from({ length: 16 }, (_, index) =>
+      withCodexDirectorWatchLock(dir, "session", async () => { order.push(index); }));
+    release();
+    await Promise.all([holder, ...pending]);
+    expect(order).toEqual(Array.from({ length: 16 }, (_, index) => index));
+  });
+
+  it("releases the transition queue after a rejection without serializing unrelated sessions", async () => {
+    const dir = await root(); let release!: () => void; let held!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { held = resolve; });
+    const failed = withCodexDirectorWatchLock(dir, "session", async () => {
+      held(); await gate; throw new Error("transition failed");
+    });
+    const rejected = expect(failed).rejects.toThrow("transition failed");
+    await entered;
+    let completed = false;
+    const next = withCodexDirectorWatchLock(dir, "session", async () => { completed = true; });
+    await withCodexDirectorWatchLock(dir, "unrelated-session", async () => { expect(completed).toBe(false); });
+    release();
+    await rejected;
+    await next;
+    expect(completed).toBe(true);
+  });
+
   it("keeps the model idle through empty waits and queues one wake without acknowledging the event", async () => {
     const dir = await root(); const spawned: string[] = [];
     const state = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async generation => { spawned.push(generation); } });
@@ -190,5 +222,59 @@ describe("Codex Director event wake", () => {
     expect(message).toContain("inspect");
     expect(message).toContain("view summary");
     expect(message).toContain("projection.run");
+  });
+});
+
+describe("Codex Director watcher and user stop intent", () => {
+  it("cancels instead of backing off when wait fails after the user stopped the session", async () => {
+    const dir = await root(); const state = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} });
+    let stopped = false; let queued = 0; let delays = 0;
+    await runCodexDirectorWatch({ root: dir, sessionName: "session", generation: state.generation,
+      stopped: async () => stopped,
+      wait: async () => { stopped = true; throw new Error("connect ENOENT /tmp/host.sock"); },
+      queue: async () => { queued++; }, delay: async () => { delays++; } });
+    expect(queued).toBe(0);
+    expect(delays).toBe(0);
+    expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("cancelled");
+  });
+
+  it("does not call wait when the stop intent exists before the first loop", async () => {
+    const dir = await root(); const state = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} });
+    let waits = 0;
+    await runCodexDirectorWatch({ root: dir, sessionName: "session", generation: state.generation,
+      stopped: async () => true,
+      wait: async () => { waits++; return event; }, queue: async () => { throw new Error("must not queue"); }, delay: async () => {} });
+    expect(waits).toBe(0);
+    expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("cancelled");
+  });
+
+  it("does not queue when the stop intent appears between wait and admission", async () => {
+    const dir = await root(); const state = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} });
+    let stopped = false; let queued = 0;
+    await runCodexDirectorWatch({ root: dir, sessionName: "session", generation: state.generation,
+      stopped: async () => stopped,
+      wait: async () => { stopped = true; return event; },
+      queue: async () => { queued++; }, delay: async () => {} });
+    expect(queued).toBe(0);
+    expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("cancelled");
+  });
+
+  it("still retries transient wait failures when the session was not stopped", async () => {
+    const dir = await root(); const state = await armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, spawn: async () => {} });
+    let calls = 0; let queued = 0; let delays = 0;
+    await runCodexDirectorWatch({ root: dir, sessionName: "session", generation: state.generation,
+      stopped: async () => false,
+      wait: async () => { if (calls++ === 0) throw new Error("connect ECONNREFUSED"); return event; },
+      queue: async () => { queued++; }, delay: async () => { delays++; } });
+    expect(delays).toBe(1);
+    expect(queued).toBe(1);
+  });
+
+  it("refuses to arm a watcher after the user stopped the session", async () => {
+    const dir = await root(); let spawned = 0;
+    await expect(armCodexDirectorWatch({ root: dir, sessionName: "session", threadId, cursor, stopped: async () => true,
+      spawn: async () => { spawned++; } })).rejects.toThrow(/^session_stopped_by_user:/);
+    expect(spawned).toBe(0);
+    expect(await readCodexDirectorWatchStatus(dir, "session")).toBe("absent");
   });
 });

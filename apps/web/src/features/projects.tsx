@@ -6,10 +6,14 @@ import type { WebProject } from '@bflow/contracts/web';
 import { ApiClient, explain } from '../api/client';
 import { EmptyState } from '../components/EmptyState';
 import { FieldLabel } from '../components/FieldHelp';
+export function sortProjects(projects: readonly WebProject[]): WebProject[] {
+  const isTemp = (p: WebProject): number => (p.canonicalPath.startsWith('/tmp/') ? 1 : 0);
+  return [...projects].sort((a, b) => isTemp(a) - isTemp(b));
+}
 export function Projects({api,projects,refresh}:{api:ApiClient;projects:WebProject[];refresh:()=>void}) {
   const [query,setQuery]=useSearchParams();
   const term=query.get('search')??'';
-  const filtered=projects.filter(project=>`${project.displayName} ${project.canonicalPath}`.toLocaleLowerCase('vi').includes(term.toLocaleLowerCase('vi')));
+  const filtered=sortProjects(projects).filter(project=>`${project.displayName} ${project.canonicalPath}`.toLocaleLowerCase('vi').includes(term.toLocaleLowerCase('vi')));
   const pagination=localPage(filtered,query.get('page'),12);
   function page(value:number){const next=new URLSearchParams(query);next.set('page',String(value));setQuery(next);}
   const [path,setPath]=useState(''),[error,setError]=useState<unknown>(),[busy,setBusy]=useState(false),[registered,setRegistered]=useState<WebProject>();

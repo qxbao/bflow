@@ -27,6 +27,8 @@ import { runDoctorDiagnostics } from "./doctor-integration.js";
 import { observeAuthoritativeRuntime } from "./runtime-observation.js";
 import { EnvironmentError } from "./environment-error.js";
 import { fsyncTolerant } from "./fs-resilience.js";
+import { cancelCodexDirectorWatch } from "./director-wake.js";
+import { clearUserStopIntent, userStopState, writeUserStopIntent } from "./user-stop-intent.js";
 import { gitSafeDirectoryFlags } from "./git-safe-directory.js";
 export { EnvironmentError };
 
@@ -137,6 +139,8 @@ export function startupLeftSessionUnchanged(error: unknown): boolean {
 // Internal lifecycle evidence, never reconstructed from user/provider error messages.
 const unchangedLifecycleFailures = new WeakSet<object>();
 const cleanedStartupFailures = new WeakSet<object>();
+/** A shutdown barrier refusal after which operation.json was restored: the session is exactly as the user left it. */
+const restoredStopRefusals = new WeakSet<object>();
 export function lifecycleLeftSessionUnchanged(error: unknown): boolean {
   return startupLeftSessionUnchanged(error) ||
     (typeof error === "object" && error !== null && unchangedLifecycleFailures.has(error));
@@ -305,6 +309,25 @@ export class EnvironmentLifecycle {
   }
   private writeIntent(repository: RepositoryIdentity, phase: OperationIntent["phase"]) {
     return this.writeJson(repository, "operation.json", { repositoryId: repository.id, sessionName: repository.sessionName, phase });
+  }
+  /**
+   * Writes the `stopping` phase, then runs the shutdown barrier. When the barrier refuses (nothing changed), the previous
+   * operation record is restored so operation.json cannot stay in a phase that no longer describes the session.
+   * A timeout or any later failure keeps `stopping`: the barrier may already stand and the next down must reconcile.
+   */
+  private async stopBehindBarrier(repository: RepositoryIdentity, barrier: () => Promise<void>) {
+    const prior = await this.intent(repository);
+    await this.writeIntent(repository, "stopping");
+    this.progress("Đang thiết lập rào chắn dừng Runtime an toàn...");
+    try { await barrier(); }
+    catch (error) {
+      if (error instanceof EnvironmentError && error.contractError.code !== "timeout" && error.contractError.code !== "cancelled") {
+        if (prior === null) await rm(this.statePath(repository, "operation.json"), { force: true });
+        else await this.writeJson(repository, "operation.json", prior);
+        restoredStopRefusals.add(error);
+      }
+      throw error;
+    }
   }
   private async integration(repository: RepositoryIdentity, config: EnvironmentConfig,
     validateExecutionPlan?: (input: ExecutionPlanInput) => Promise<void>, sourceConfig?: EnvironmentConfig): Promise<EnvironmentIntegration | undefined> {
@@ -900,16 +923,18 @@ export class EnvironmentLifecycle {
       // A provider dialog needs its exact live pane. Shutting it down makes the
       // advertised inspect/resolve/retry recovery impossible on every launch.
       const preserveStartupDialog = roleDispatchAttempted && startupError instanceof EnvironmentError &&
-        startupError.contractError.code === "conflict" && startupDetails !== null && typeof startupDetails === "object" &&
+        ["conflict", "cancelled"].includes(startupError.contractError.code) && startupDetails !== null && typeof startupDetails === "object" &&
         !Array.isArray(startupDetails) && startupDetails.sessionId === repository.sessionName &&
         typeof startupDetails.paneId === "string" && typeof startupDetails.reason === "string";
       if (preserveStartupDialog) {
-        const reason = startupDetails.reason;
+        const reason = typeof startupDetails.reason === "string" ? startupDetails.reason : "";
         cleanupOutcome = reason === "unowned_agent_name_collision"
           ? "was not attempted because an agent-name collision requires ownership reconciliation; session and panes were preserved"
-          : reason === "restored_terminal_not_ready"
-            ? "was not attempted because a restored role is still working or not ready; session and panes were preserved"
-            : "was not attempted because an interactive startup dialog requires a choice; session and panes were preserved";
+          : ["restored_terminal_not_ready", "restored_role_busy", "restored_role_interaction_required", "restored_role_recovering", "restored_role_not_ready"].includes(reason)
+            ? "was not attempted because a restored role is busy, recovering or not ready; session and panes were preserved"
+            : ["restored_identity_mismatch", "malformed_agent_observation", "agent_observation_failed", "agent_observation_unavailable", "restored_observation_cancelled"].includes(reason)
+              ? "was not attempted because live role identity/readiness could not be reconciled with the stored binding; session and panes were preserved"
+              : "was not attempted because an interactive startup dialog requires a choice; session and panes were preserved";
       }
       if (startupError !== undefined && cleanupEligible && !preserveStartupDialog) {
         try {
@@ -989,12 +1014,36 @@ export class EnvironmentLifecycle {
       return current;
     } finally { await integration.close?.(); }
   }
-  async down(confirmed = false, timeoutMs?: number, force = false): Promise<SessionManifest | EnvironmentStatus> {
+  /**
+   * Public stop requested by the user (CLI or Web). Records a durable user-stop intent first so no automatic path
+   * (Codex watcher, stale Director wake, `director start`) can bring the session back. Internal cleanup after a failed
+   * `up` calls downLocked directly and never records it.
+   */
+  async down(confirmed = false, timeoutMs?: number, force = false,
+    origin: { readonly source: "cli" | "web"; readonly operationId?: string } = { source: "cli" }): Promise<SessionManifest | EnvironmentStatus> {
     this.progress("Đang kiểm tra trạng thái phiên và các quy trình đang chạy...");
     const repository = await identifyRepository(this.cwd, this.runner);
     const config = await readEnvironmentConfig(repository);
+    let intentWritten = false;
     try {
-      return await this.locked(repository, () => this.downLocked(repository, config, confirmed || force, timeoutMs, this.dependencies.signal, undefined, force));
+      return await this.downRequested(repository, config, confirmed, timeoutMs, force, async () => {
+        await writeUserStopIntent(repository.root, { version: 1, repositoryId: repository.id, sessionName: repository.sessionName,
+          source: origin.source, ...(origin.operationId !== undefined ? { operationId: origin.operationId } : {}), requestedAt: new Date().toISOString() });
+        intentWritten = true;
+        try { await cancelCodexDirectorWatch(repository.root, repository.sessionName); }
+        catch { this.progress("Không hủy được watcher Director; watcher sẽ tự dừng khi đọc ý định dừng của người dùng."); }
+      });
+    } catch (error) {
+      // Refusal with nothing changed: the session keeps running, so the user did not effectively stop it (I4).
+      if (intentWritten && typeof error === "object" && error !== null && (unchangedLifecycleFailures.has(error) || restoredStopRefusals.has(error)))
+        await clearUserStopIntent(repository.root).catch(() => undefined);
+      throw error;
+    }
+  }
+  private async downRequested(repository: RepositoryIdentity, config: EnvironmentConfig, confirmed: boolean, timeoutMs: number | undefined,
+    force: boolean, recordIntent: () => Promise<void>): Promise<SessionManifest | EnvironmentStatus> {
+    try {
+      return await this.locked(repository, async () => { await recordIntent(); return this.downLocked(repository, config, confirmed || force, timeoutMs, this.dependencies.signal, undefined, force); });
     } catch (error) {
       // Only a host that cannot run the barrier at all is bypassed: an incompatible build, an unreachable dead-socket owner,
       // or an unactivated host that refuses to quiesce over persisted journal work or Core runs. Journal/run store stay on disk
@@ -1006,10 +1055,17 @@ export class EnvironmentLifecycle {
       // code/config change. Forced shutdown preserves its stores and uses only the
       // recorded process/session ownership; it must not restart or rebind execution.
       const staleExecution = typeof error === "object" && error !== null && "code" in error && error.code === "execution_plan_drift";
-      if (!force && unactivated && error instanceof EnvironmentError) throw new EnvironmentError({ ...error.contractError,
-        message: error.message + " Run bflow up to resume/reconcile the persisted workflows, or bflow down --force to stop now; durable state is preserved and the next bflow up reconciles it." });
+      if (!force && unactivated && error instanceof EnvironmentError) {
+        const rewritten = new EnvironmentError({ ...error.contractError,
+          message: error.message + " Run bflow up to resume/reconcile the persisted workflows, or bflow down --force to stop now; durable state is preserved and the next bflow up reconciles it." });
+        if (restoredStopRefusals.has(error)) restoredStopRefusals.add(rewritten);
+        throw rewritten;
+      }
       if (!force && unreachableOwner && error instanceof EnvironmentError) throw new EnvironmentError({ ...error.contractError,
         message: error.message + " Run bflow down --force to stop the unreachable host owner and session; durable state is preserved." });
+      if (!force && staleExecution && error instanceof Error) {
+        error.message = `${error.message} Run bflow down --force to stop the incompatible host and session; durable state is preserved.`;
+      }
       if (!force || !(unactivated || unreachableOwner || staleExecution || /Unknown host operation/.test(msg))) throw error;
     }
     this.progress("Tiến trình nền không thể chạy rào chắn dừng an toàn; đang buộc dừng. Trạng thái bền vững được giữ nguyên và sẽ được đối soát ở lần 'bflow up' tiếp theo.");
@@ -1127,9 +1183,7 @@ export class EnvironmentLifecycle {
         try {
           if (offline?.shutdownHost) {
             if (!offline.runtime || !offline.quiesce) fail("Cannot drain the retained host safely; state was preserved.");
-            await this.writeIntent(repository, "stopping");
-            this.progress("Đang thiết lập rào chắn dừng Runtime an toàn...");
-            unwrap(await deadline.call(opts => offline.quiesce!(opts)));
+            await this.stopBehindBarrier(repository, async () => { unwrap(await deadline.call(opts => offline.quiesce!(opts))); });
             this.progress("Đang thu thập lại các luồng chạy đang hoạt động...");
             const active = new Map<string, { version: number }>(); let cursor: string | undefined;
             const seen = new Set<string>();
@@ -1249,9 +1303,7 @@ export class EnvironmentLifecycle {
         }
         if (activeRuns.size && !integration.checkpoint) refuseUnchangedStop("Runtime checkpoint/quiesce API is unavailable. --yes cannot bypass recovery checkpoint requirements.");
         if (!integration.quiesce) refuseUnchangedStop("Runtime shutdown barrier is unavailable; cannot stop intake/dispatch safely.");
-        await this.writeIntent(repository, "stopping");
-        this.progress("Đang thiết lập rào chắn dừng Runtime an toàn...");
-        unwrap(await deadline.call((opts) => integration.quiesce!(opts)));
+        await this.stopBehindBarrier(repository, async () => { unwrap(await deadline.call((opts) => integration.quiesce!(opts))); });
         // Runs may have advanced or appeared between the safety inspection and the barrier.
         this.progress("Đang thu thập lại các luồng chạy đang hoạt động...");
         await collectActiveRuns();
@@ -1366,6 +1418,10 @@ export class EnvironmentLifecycle {
       injectedRuntime: this.dependencies.integration?.runtime
     });
     for (const issue of runtimeObs.issues) issues.push(issue);
+    const userStop = await userStopState(repository.root, repository.id, repository.sessionName);
+    if (userStop.stopped) issues.push(userStop.intent
+      ? `Phiên đã được người dùng dừng lúc ${userStop.intent.requestedAt} (${userStop.intent.source}). Chạy bflow up trong terminal hoặc bắt đầu phiên trên Web để mở lại.`
+      : "Dấu dừng phiên của người dùng không đọc được; Director sẽ không tự khởi động lại. Chạy bflow up trong terminal để mở lại.");
     return { workspaceRoot: repository.root, sessionName: repository.sessionName, server, configuration: "valid", manifest, liveObservation, issues };
   }
   async doctor(deep = false): Promise<EnvironmentDoctorReport> {

@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 
-export const BFLOW_START_SKILL_VERSION = "1.7.0";
+export const BFLOW_START_SKILL_VERSION = "1.8.0";
 export const BFLOW_STATUS_SKILL_VERSION = "1.0.0";
 export const BFLOW_QUEUE_SKILL_VERSION = "1.0.0";
 /** Upper bound of each generated helper skill (bflow-status, bflow-queue), in UTF-8 bytes. */
@@ -32,7 +32,7 @@ You are the Bflow Director for this repository: the single agent the user talks 
 
    {{CMD}} director start --json
 
-2. If \`ok\` is false, tell the user the exact \`message\` and the \`fix\` it gives, then stop.
+2. If \`ok\` is false, tell the user the exact \`message\` and the \`fix\` it gives, then stop. When \`code\` is session_stopped_by_user the user stopped this session on purpose: see the stopped-session rule in section 3.
 3. Remember \`token\` and \`cursor\` from the output, plus \`threadId\` for Codex. Pass the token as the \`token\` argument of every Bflow MCP tool call, and as the BFLOW_DIRECTOR_TOKEN environment variable of other shell calls. Never show the token to the user.
 4. Tools: use the MCP tools of the \`bflow\` server when they are available. Otherwise call the same tool through the shell:
 
@@ -60,6 +60,7 @@ Repeat until the user tells you to stop:
 - Active blocked work is not idle. On startup and each blocker event, call \`inspect\` for the run; read its delegation.requestedBy, delegation.sessionId and current \`pendingAction\` (use the full view if needed). Take the bounded recovery step below before returning to \`director_wait\`. Wait only when idle or when a known external action is pending, such as a running specialist or human approval.
 - A stuck task must not stop unrelated work. If recovery is refused or exhausted, report the blocker, what you tried and the next owner/action through \`director_say\`. Use \`park_task\` for an eligible task; follow Runtime refusals and never claim it is parked without confirmation. Track existing issues with \`list_issues\`, \`inspect_issue\`, \`set_issue_status\`, then continue unrelated work. Do not silently replace active recovery with repeated waits.
 - Never resend a message whose delivery is uncertain until \`reconcile_delivery\` proves it was not delivered.
+- Stopped session: an error or \`code\` starting with session_stopped_by_user means the user stopped the session. Tell the user in one sentence and end your turn. Do not run \`director start\` or \`bflow up\`, and do not call \`director_suspend\`. Use the \`--restart\` option only when the latest message from the user asks to start or reopen the session. Any other lost Runtime connection (ENOENT, ECONNREFUSED, Host unavailable): run \`bflow status\`, tell the user what it shows and ask before restarting. Never recover on your own with \`director start\`.
 - A tool error is information: read the message, tell the user in one line when it blocks them, and take the smallest safe next step. Do not repeat an identical failing call more than twice.
 - Send whole messages through \`director_say\`, one per real change. There is no token streaming and Bflow Web is refreshed message by message.
 - A run that finished with parked tasks is not fully done: say so and name the parked tasks.

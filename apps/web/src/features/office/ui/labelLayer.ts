@@ -1,7 +1,7 @@
 import type { ProjectedLabel } from '../scene/renderer';
 
 const CLASSES: Record<ProjectedLabel['kind'], string> = {
-  agent: 'absolute left-0 top-0 whitespace-nowrap rounded-md bg-surface/80 px-1.5 py-0.5 font-data text-[0.6875rem] leading-4 text-ink',
+  agent: 'absolute left-0 top-0 whitespace-nowrap rounded-md border border-line bg-surface/95 px-1.5 py-0.5 font-data text-[0.6875rem] leading-4 text-ink shadow-sm',
   bubble: 'office-bubble absolute left-0 top-0',
   sleep: 'office-zzz absolute left-0 top-0',
 };

@@ -18,7 +18,7 @@ function labels(agents: readonly WebAgentView[]): Map<string, string> {
   const out = new Map<string, string>();
   const plain = agents.filter(a => a.role === 'developer' && !a.profileId).sort((a, b) => a.boundAt.localeCompare(b.boundAt) || a.instanceId.localeCompare(b.instanceId));
   plain.forEach((a, i) => out.set(a.instanceId, `Developer #${i + 1}`));
-  for (const a of agents) if (!out.has(a.instanceId)) out.set(a.instanceId, a.displayName);
+  for (const a of agents) if (!out.has(a.instanceId)) out.set(a.instanceId, a.displayName === 'Qa' ? 'QA' : a.displayName);
   return out;
 }
 
@@ -33,11 +33,14 @@ function derivePose(a: WebAgentView, input: OfficeInput, observed: number, pendi
   // 2. Delivery uncertain: never claim the work arrived.
   const uncertain = work.find(w => w.delivery === 'unknown_delivery');
   if (uncertain) return { verdict: v('question', 'unknown', 'Chưa xác định việc đã tới'), via: uncertain };
-  // 3. Run-level decisions do not identify which active agent is awaiting the owner.
+  // 3/4/5. Accepted work needs a lease still valid at snapshot time (never the browser clock); no lease is not confirmed.
+  // An agent actively executing a turn (turnSeenAt set and transport not blocked) keeps typing even if another task in the run awaits a decision.
+  const held = work.find(w => w.delivery === 'accepted' && w.leaseExpiresAt !== undefined && Date.parse(w.leaseExpiresAt) > observed);
+  if (held && held.turnSeenAt !== undefined && a.transport.state !== 'blocked') {
+    return { verdict: v('typing', 'inferred', 'Có dấu hiệu đang chạy'), via: held };
+  }
   const asked = work.find(w => ACTIVE_DELIVERY.has(w.delivery) && pendingRuns.has(w.runId));
   if (asked) return { verdict: v('hand_raised', 'inferred', 'Công việc có quyết định đang chờ'), via: asked };
-  // 4/5. Accepted work needs a lease still valid at snapshot time (never the browser clock); no lease is not confirmed.
-  const held = work.find(w => w.delivery === 'accepted' && w.leaseExpiresAt !== undefined && Date.parse(w.leaseExpiresAt) > observed);
   if (held) {
     return { verdict: held.turnSeenAt !== undefined ? v('typing', 'inferred', 'Có dấu hiệu đang chạy') : v('working', 'confirmed', `Đang giữ việc: ${taskTitle(held)}`), via: held };
   }
@@ -46,6 +49,9 @@ function derivePose(a: WebAgentView, input: OfficeInput, observed: number, pendi
   if (waiting) return { verdict: v('preparing', 'confirmed', 'Đang chờ giao'), via: waiting };
   // 7. No unresolved work. Conversation busy is read from the session, not from transport.
   const unresolved = work.find(w => w.delivery === 'accepted');
+  if (!unresolved && !stale && a.transport.state === 'starting') {
+    return { verdict: v('preparing', 'confirmed', 'Đang khởi động') };
+  }
   const idle = a.transport.state === 'idle' || a.transport.state === 'done';
   if (!unresolved && !stale && idle) {
     const busy = a.role === 'conversation' && input.session.conversationStatus !== undefined && BUSY_CONVERSATION.has(input.session.conversationStatus);

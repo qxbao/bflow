@@ -410,6 +410,72 @@ function verifyInspectCursor(
   return cursorState === actualStateDigest;
 }
 
+function compactVerificationCycle(cycleInput: unknown): unknown {
+  if (cycleInput === null || typeof cycleInput !== "object" || Array.isArray(cycleInput)) return cycleInput;
+  const cycle = record(cycleInput);
+  if (!Array.isArray(cycle.history)) return cycleInput;
+  return {
+    ...cycle,
+    history: cycle.history.map(entryInput => {
+      if (entryInput === null || typeof entryInput !== "object" || Array.isArray(entryInput)) return entryInput;
+      const entry = record(entryInput);
+      const next: Record<string, unknown> = { ...entry };
+      if (entry.metadata !== null && typeof entry.metadata === "object" && !Array.isArray(entry.metadata)) {
+        const { checks: _omittedDuplicateChecks, ...metaRest } = record(entry.metadata);
+        next.metadata = metaRest;
+      }
+      if (Array.isArray(entry.qualityGateResults)) {
+        next.qualityGateResults = entry.qualityGateResults.map(qgInput => {
+          if (qgInput === null || typeof qgInput !== "object" || Array.isArray(qgInput)) return qgInput;
+          const qg = record(qgInput);
+          if (qg.metadata === null || typeof qg.metadata !== "object" || Array.isArray(qg.metadata)) return qg;
+          const qgMeta = record(qg.metadata);
+          if (qgMeta.hostExecution === null || typeof qgMeta.hostExecution !== "object" || Array.isArray(qgMeta.hostExecution)) return qg;
+          const hostExec = record(qgMeta.hostExecution);
+          const { testBlobs, outcome, ...hostExecRest } = hostExec;
+          const compactOutcome = outcome !== null && typeof outcome === "object" && !Array.isArray(outcome)
+            ? {
+                ...record(outcome),
+                ...(Array.isArray(record(outcome).args) && (record(outcome).args as unknown[]).length > 20
+                  ? {
+                      args: [
+                        ...(record(outcome).args as unknown[]).slice(0, 20),
+                        `… [+${(record(outcome).args as unknown[]).length - 20} more args]`
+                      ]
+                    }
+                  : {}),
+                ...(typeof record(outcome).stdout === "string" && (record(outcome).stdout as string).length > 1000
+                  ? { stdout: `${(record(outcome).stdout as string).slice(0, 1000)}… [truncated]` }
+                  : {}),
+                ...(typeof record(outcome).stderr === "string" && (record(outcome).stderr as string).length > 1000
+                  ? { stderr: `${(record(outcome).stderr as string).slice(0, 1000)}… [truncated]` }
+                  : {}),
+                ...(typeof record(outcome).combinedOutput === "string" &&
+                (record(outcome).combinedOutput as string).length > 1000
+                  ? { combinedOutput: `${(record(outcome).combinedOutput as string).slice(0, 1000)}… [truncated]` }
+                  : {})
+              }
+            : outcome;
+          return {
+            ...qg,
+            metadata: {
+              ...qgMeta,
+              hostExecution: {
+                ...hostExecRest,
+                ...(testBlobs !== null && typeof testBlobs === "object" && !Array.isArray(testBlobs)
+                  ? { testBlobCount: Object.keys(record(testBlobs)).length }
+                  : {}),
+                ...(compactOutcome !== undefined ? { outcome: compactOutcome } : {})
+              }
+            }
+          };
+        });
+      }
+      return next;
+    })
+  };
+}
+
 function summarizeTaskRecord(taskInput: unknown): Record<string, unknown> {
   const task = record(taskInput);
   const spec = record(task.spec ?? {});
@@ -423,10 +489,11 @@ function summarizeTaskRecord(taskInput: unknown): Record<string, unknown> {
     ...(task.verificationPending !== undefined ? { verificationPending: task.verificationPending } : {}),
     ...(task.writerReleased !== undefined ? { writerReleased: task.writerReleased } : {}),
     ...(task.worktrees !== undefined ? { worktrees: task.worktrees } : {}),
-    ...(task.cycle !== undefined ? { cycle: task.cycle } : {}),
+    ...(task.cycle !== undefined ? { cycle: compactVerificationCycle(task.cycle) } : {}),
     ...(task.result !== undefined ? { result: task.result } : {}),
     ...(task.changeSet !== undefined ? { changeSet: task.changeSet } : {}),
     ...(task.reworkResolutions !== undefined ? { reworkResolutions: task.reworkResolutions } : {}),
+    ...(task.scopeAmendments !== undefined ? { scopeAmendments: task.scopeAmendments } : {}),
     spec: {
       request: requestRest,
       ...(spec.decision !== undefined ? { decision: spec.decision } : {}),
@@ -525,7 +592,7 @@ function projectRunByView(
       ...(runInput.decision !== undefined ? { decision: runInput.decision } : {}),
       ...(runInput.userDecisions !== undefined ? { userDecisions: runInput.userDecisions } : {}),
       ...(runInput.supersededApprovals !== undefined ? { supersededApprovals: runInput.supersededApprovals } : {}),
-      ...(runInput.workflowCycle !== undefined ? { workflowCycle: runInput.workflowCycle } : {}),
+      ...(runInput.workflowCycle !== undefined ? { workflowCycle: compactVerificationCycle(runInput.workflowCycle) } : {}),
       ...(runInput.workflowChange !== undefined ? { workflowChange: runInput.workflowChange } : {}),
       ...(runInput.workflowVerificationPending !== undefined
         ? { workflowVerificationPending: runInput.workflowVerificationPending }
@@ -589,7 +656,7 @@ function projectRunByView(
     ...(runInput.decision !== undefined ? { decision: runInput.decision } : {}),
     ...(runInput.userDecisions !== undefined ? { userDecisions: runInput.userDecisions } : {}),
     ...(runInput.supersededApprovals !== undefined ? { supersededApprovals: runInput.supersededApprovals } : {}),
-    ...(runInput.workflowCycle !== undefined ? { workflowCycle: runInput.workflowCycle } : {}),
+    ...(runInput.workflowCycle !== undefined ? { workflowCycle: compactVerificationCycle(runInput.workflowCycle) } : {}),
     ...(runInput.workflowChange !== undefined ? { workflowChange: runInput.workflowChange } : {}),
     ...(runInput.workflowVerificationPending !== undefined
       ? { workflowVerificationPending: runInput.workflowVerificationPending }
@@ -749,7 +816,7 @@ export function summarizeInspectState(stateInput: unknown, rawQuery: InspectInpu
 export const AssignmentContextInputSchema = z
   .object({
     view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "compact", "active_only"]).optional()),
-    surveyView: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "summary", "anchors_only"]).optional()),
+    surveyView: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "summary", "anchors_only", "omit"]).optional()),
     includeReleased: z.preprocess(nullToUndefined, z.boolean().optional()),
     paths: z.unknown().optional()
   })
@@ -759,9 +826,12 @@ export type AssignmentContextInput = z.infer<typeof AssignmentContextInputSchema
 
 function compactRepositorySurvey(
   surveyInput: unknown,
-  surveyView: "full" | "summary" | "anchors_only"
+  surveyView: "full" | "summary" | "anchors_only" | "omit"
 ): unknown {
-  if (surveyInput === undefined || surveyView === "full") {
+  if (surveyInput === undefined || surveyView === "omit") {
+    return undefined;
+  }
+  if (surveyView === "full") {
     return surveyInput;
   }
   const surveyWrapper = record(surveyInput);

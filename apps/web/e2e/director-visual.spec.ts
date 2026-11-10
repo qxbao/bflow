@@ -112,14 +112,20 @@ test('Office3D: Director desk and issue board in the WebGL scene and the accessi
   await page.waitForTimeout(1500);
   await shot(page, '10-office3d-director-desk');
   // The panel closed: the camera stays on the desk, so the WebGL figure itself is in view.
-  await page.getByRole('button', { name: 'Đóng bảng' }).click();
+  await page.getByRole('button', { name: 'Đóng cửa sổ Director' }).click();
   await page.waitForTimeout(1500);
   await blur(page); await page.waitForTimeout(500);
   await shot(page, '10b-office3d-director-desk-scene');
   await mirror(page, /^Bảng sự cố \(/);
   await page.waitForTimeout(1500);
+  const issueDialog=page.getByRole('dialog',{name:'Sự cố'});
+  const filterWidth=await issueDialog.evaluate(root=>{
+    const body=root.querySelector<HTMLElement>('.bwin-body')!,row=root.querySelector<HTMLElement>('.issue-filter-row')!;
+    return {content:body.clientWidth,toolbar:row.getBoundingClientRect().width};
+  });
+  expect(filterWidth.toolbar).toBeGreaterThan(filterWidth.content-48);
   await shot(page, '11-office3d-issue-board');
-  await page.getByRole('button', { name: 'Đóng bảng' }).click();
+  await page.getByRole('button', { name: 'Đóng cửa sổ Sự cố' }).click();
   await page.waitForTimeout(1500);
   await blur(page); await page.waitForTimeout(500);
   await shot(page, '11b-office3d-issue-board-scene');
@@ -128,7 +134,7 @@ test('Office3D: Director desk and issue board in the WebGL scene and the accessi
   await expect(region.getByRole('button', { name: /^Director: Chưa có mặt\. Mức tin cậy: Đã xác nhận/ })).toHaveCount(1, { timeout: 20000 });
   await mirror(page, /^Director: Chưa có mặt/);
   await page.waitForTimeout(1000);
-  await page.getByRole('button', { name: 'Đóng bảng' }).click();
+  await page.getByRole('button', { name: 'Đóng cửa sổ Director' }).click();
   await page.waitForTimeout(1500);
   await blur(page); await page.waitForTimeout(500);
   await shot(page, '12-office3d-director-absent');
@@ -137,6 +143,60 @@ test('Office3D: Director desk and issue board in the WebGL scene and the accessi
   await page.waitForTimeout(1000);
   await blur(page); await page.waitForTimeout(500);
   await shot(page, '13-office3d-phone-reduced-motion');
+});
+
+test('Office3D: chat controls fit inside the game window', async ({ page }) => {
+  test.setTimeout(120000);
+  await call('configure', { presence: 'active' });
+  const base=await openProject(page,await call('pair'),repository,/guides.*Xem dự án/);
+  await enterVisual(page);
+  await page.goto(`${new URL(page.url()).origin}${base}/chat`);
+  const app=page.getByRole('dialog',{name:'Trò chuyện'});
+  const chat=app.getByRole('region',{name:'Trò chuyện với Director'});
+  await expect(chat).toBeVisible();
+  await expect(app.locator('.bwin-nav')).toHaveCount(0);
+  await expect(page.getByRole('navigation',{name:'Điều hướng văn phòng'})).toBeVisible();
+  await expect(app.getByRole('button',{name:'Lịch sử trò chuyện'})).toBeVisible();
+  await expect(app.getByText('Về phê duyệt')).toBeHidden();
+  await expect(app.getByRole('button',{name:'Gửi tin nhắn'})).toBeVisible();
+  const fit=await app.evaluate(root=>{
+    const body=root.querySelector<HTMLElement>('.bwin-body')!,thread=root.querySelector<HTMLElement>('[data-component="DirectorChat"]')!,send=root.querySelector<HTMLElement>('button[aria-label="Gửi tin nhắn"]')!,form=thread.querySelector<HTMLElement>('form')!;
+    const right=root.getBoundingClientRect().right,button=send.getBoundingClientRect(),bodyBox=body.getBoundingClientRect();
+    return {bodyOverflow:body.scrollWidth-body.clientWidth,threadOverflow:thread.scrollWidth-thread.clientWidth,sendRight:button.right,right,formBottom:form.getBoundingClientRect().bottom,bodyBottom:bodyBox.bottom,windowBottom:root.getBoundingClientRect().bottom};
+  });
+  expect(fit.bodyOverflow).toBeLessThanOrEqual(1);
+  expect(fit.threadOverflow).toBeLessThanOrEqual(1);
+  expect(fit.sendRight).toBeLessThanOrEqual(fit.right);
+  expect(fit.formBottom).toBeLessThanOrEqual(fit.bodyBottom);
+  expect(fit.formBottom).toBeLessThanOrEqual(fit.windowBottom);
+  await page.waitForTimeout(350);
+  await shot(page,'16-office3d-chat-compact');
+});
+
+test('Office3D: unavailable Director chat keeps notices aligned', async ({page})=>{
+  test.setTimeout(120000);
+  await call('configure',{presence:'absent',clearMessages:true});
+  await page.route('**/director/messages**',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({apiVersion:1,code:'unavailable',message:'fixture offline',retryable:true,correlationId:'fixture-chat-read'})}));
+  const base=await openProject(page,await call('pair'),repository,/guides.*Xem dự án/);
+  await enterVisual(page);
+  await page.route('**/api/v1/projects/*/session',async route=>{const response=await route.fetch();const value=await response.json();await route.fulfill({response,json:{...value,state:'stopped'}});});
+  await page.setViewportSize({width:1024,height:900});
+  await page.goto(`${new URL(page.url()).origin}${base}/chat`);
+  const chat=page.getByRole('region',{name:'Trò chuyện với Director'});
+  await expect(chat.getByRole('alert')).toBeVisible();
+  const geometry=await chat.evaluate(root=>{
+    const pick=(selector:string)=>{const node=root.querySelector<HTMLElement>(selector);if(!node)return null;const r=node.getBoundingClientRect(),s=getComputedStyle(node);return {x:r.x,y:r.y,width:r.width,height:r.height,position:s.position,boxShadow:s.boxShadow,borderLeftWidth:s.borderLeftWidth};};
+    return {log:pick('[role="log"]'),alert:pick('[role="alert"]'),block:pick('#director-chat-blocked'),form:pick('form'),outcome:pick('[aria-label="Kết quả mở phiên Director"]')};
+  });
+  expect(geometry.log&&geometry.alert&&geometry.block&&geometry.form&&geometry.outcome).toBeTruthy();
+  expect(geometry.alert!.width).toBeGreaterThan(geometry.log!.width-36);
+  expect(geometry.alert!.boxShadow).toBe('none');
+  expect(geometry.block!.width).toBeGreaterThan(geometry.form!.width-36);
+  expect(geometry.block!.boxShadow).toBe('none');
+  expect(geometry.outcome!.position).toBe('static');
+  expect(geometry.outcome!.borderLeftWidth).toBe('0px');
+  await expect(chat.locator('[role="status"][aria-busy="true"]')).toHaveCount(0);
+  await shot(page,'17-office3d-chat-unavailable');
 });
 
 test('Immersive flag: Director desk opens one persistent, editable in-scene dialogue', async ({ page }) => {
@@ -151,13 +211,12 @@ test('Immersive flag: Director desk opens one persistent, editable in-scene dial
   const opener = page.getByLabel('Bản văn bản của văn phòng').getByRole('button', { name: /^Director: Đang hoạt động/ });
   await opener.focus();
   await page.keyboard.press('Enter');
-  const dialogue = page.getByRole('region', { name: 'Hội thoại tại bàn Director' });
+  const dialogue = page.getByRole('dialog', { name: 'Trò chuyện với Director' });
   await expect(dialogue).toBeVisible();
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-state', 'interacting');
   await page.waitForTimeout(600);
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-state', 'interacting');
   await expect(dialogue.getByRole('region', { name: 'Trò chuyện với Director' })).toHaveCount(1);
-  expect(await page.evaluate(() => document.elementFromPoint(20, Math.floor(innerHeight / 2))?.getAttribute('aria-hidden'))).toBe('true');
   await expect(dialogue.getByText(/Chào bạn, tôi là Director/)).toBeVisible();
   const before = await call('inspect');
   await dialogue.getByText('Gợi ý trò chuyện',{exact:true}).click();
@@ -166,6 +225,11 @@ test('Immersive flag: Director desk opens one persistent, editable in-scene dial
   const after = await call('inspect');
   expect(after.commands).toHaveLength(before.commands.length);
   expect(after.messages.filter((message: any) => message.author === 'user' && message.channel === 'web')).toHaveLength(before.messages.filter((message: any) => message.author === 'user' && message.channel === 'web').length);
+  await dialogue.getByRole('button', { name: 'Thu nhỏ Trò chuyện với Director' }).click();
+  await expect(dialogue).toBeHidden();
+  await page.getByRole('group', { name: 'Cửa sổ đang mở' }).getByRole('button', { name: 'Trò chuyện với Director' }).click();
+  await expect(dialogue).toBeVisible();
+  await expect(dialogue.getByLabel('Tin nhắn cho Director')).toHaveValue(/Cho tôi biết tiến độ/);
   for (const viewport of [{ width: 375, height: 812 }, { width: 812, height: 375 }]) {
     await page.setViewportSize(viewport);
     const editor=dialogue.getByLabel('Tin nhắn cho Director');
@@ -175,14 +239,21 @@ test('Immersive flag: Director desk opens one persistent, editable in-scene dial
     expect(input!.y + input!.height).toBeLessThanOrEqual(viewport.height);
     expect(await editor.evaluate(element=>{const rect=element.getBoundingClientRect(),hit=document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2);return Boolean(hit&&(hit===element||element.contains(hit)));})).toBe(true);
   }
-  await dialogue.getByRole('button', { name: 'Rời bàn Director' }).click();
+  await dialogue.getByRole('button', { name: 'Đóng cửa sổ Trò chuyện với Director' }).click();
   await expect(dialogue).toBeHidden();
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-state', 'selected');
   await expect(opener).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-state', 'overview');
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-selected', 'false');
-  await page.getByText('Camera', { exact: true }).click();
+  const camera = page.getByText('Camera', { exact: true });
+  const cameraBox = await camera.boundingBox();
+  expect(cameraBox, `camera control bounds: ${JSON.stringify(cameraBox)}`).not.toBeNull();
+  expect(cameraBox!.x, `camera control bounds: ${JSON.stringify(cameraBox)}`).toBeGreaterThanOrEqual(0);
+  expect(cameraBox!.y, `camera control bounds: ${JSON.stringify(cameraBox)}`).toBeGreaterThanOrEqual(0);
+  expect(cameraBox!.x + cameraBox!.width, `camera control bounds: ${JSON.stringify(cameraBox)}`).toBeLessThanOrEqual(812);
+  expect(cameraBox!.y + cameraBox!.height, `camera control bounds: ${JSON.stringify(cameraBox)}`).toBeLessThanOrEqual(375);
+  await camera.click();
   await expect(page.getByRole('button', { name: 'Phóng to' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Di chuyển góc nhìn sang trái' })).toBeVisible();
   await opener.focus();
@@ -201,17 +272,26 @@ test('short landscape recovery keeps transcript, launch/read controls, suggestio
   await enterVisual(page);
   await page.setViewportSize({ width: 812, height: 375 });
   await mirror(page, /^Director: Đang hoạt động/);
-  const dialogue=page.getByRole('region',{name:'Hội thoại tại bàn Director'});
+  const dialogue=page.getByRole('dialog',{name:'Trò chuyện với Director'});
   await expect(dialogue).toBeVisible();
   await dialogue.getByLabel('Tin nhắn cho Director').fill('Kiểm tra khôi phục màn hình ngang');
   await dialogue.getByRole('button',{name:'Gửi tin nhắn'}).click();
   await expect(dialogue.getByRole('button',{name:'Đối chiếu tin nhắn'})).toBeFocused();
-  await expect(dialogue.getByText('Director · Trao đổi')).toBeVisible();
+  await expect(dialogue.getByRole('heading', { name: 'Trò chuyện với Director' })).toBeVisible();
   await expect(dialogue.getByText('Gợi ý trò chuyện',{exact:true})).toBeVisible();
   await expect(dialogue.getByText(/không tự gửi lại/)).toBeVisible();
-  const targets=[dialogue.getByRole('button',{name:'Rời bàn Director'}),dialogue.getByRole('button',{name:'Đọc lại hội thoại'}),dialogue.getByRole('button',{name:'Khởi động phiên'}),dialogue.getByText('Gợi ý trò chuyện',{exact:true}),dialogue.getByRole('button',{name:'Đối chiếu tin nhắn'})];
-  await shot(page,'14-office3d-landscape-lost-ack');
+  const targets=[dialogue.getByRole('button',{name:'Đóng cửa sổ Trò chuyện với Director'}),dialogue.getByRole('button',{name:'Đọc lại hội thoại'}),dialogue.getByRole('button',{name:'Khởi động phiên'}),dialogue.getByText('Gợi ý trò chuyện',{exact:true}),dialogue.getByRole('button',{name:'Đối chiếu tin nhắn'})];
+  await shot(page,'812-director-landscape-final');
+  const chatGeometry=await dialogue.evaluate(root=>{const win=root.closest('.bwin'),box=(selector:string)=>{const el=win?.querySelector<HTMLElement>(selector),r=el?.getBoundingClientRect();return el&&r?{x:r.x,y:r.y,width:r.width,height:r.height,scrollTop:el.scrollTop}:undefined;};return {body:box('.bwin-body'),thread:box('.chat-thread'),header:box('.chat-thread > header'),form:box('.chat-thread > form')};});
+  expect(chatGeometry.thread?.scrollTop).toBe(0);
+  expect(chatGeometry.header!.y).toBeGreaterThanOrEqual(chatGeometry.body!.y);
+  expect(chatGeometry.form!.y+chatGeometry.form!.height).toBeLessThanOrEqual(chatGeometry.body!.y+chatGeometry.body!.height);
+  expect(chatGeometry.header!.y+chatGeometry.header!.height).toBeLessThanOrEqual(chatGeometry.form!.y);
+  const compactControls=[targets[0]!,dialogue.getByLabel('Tin nhắn cho Director'),dialogue.getByRole('button',{name:'Gửi tin nhắn'}),targets[4]!];
+  const compactBoxes=await Promise.all(compactControls.map(async target=>{const box=await target.boundingBox();expect(box).not.toBeNull();expect(box!.x).toBeGreaterThanOrEqual(0);expect(box!.y).toBeGreaterThanOrEqual(0);expect(box!.x+box!.width).toBeLessThanOrEqual(812);expect(box!.y+box!.height).toBeLessThanOrEqual(375);return box!;}));
+  for(let i=0;i<compactBoxes.length;i++)for(let j=i+1;j<compactBoxes.length;j++)expect(compactBoxes[i]!.x+compactBoxes[i]!.width<=compactBoxes[j]!.x||compactBoxes[j]!.x+compactBoxes[j]!.width<=compactBoxes[i]!.x||compactBoxes[i]!.y+compactBoxes[i]!.height<=compactBoxes[j]!.y||compactBoxes[j]!.y+compactBoxes[j]!.height<=compactBoxes[i]!.y,`landscape controls ${i} and ${j} must not overlap`).toBe(true);
   for(const target of targets){
+    await target.scrollIntoViewIfNeeded();
     await expect(target).toBeVisible();
     const box=await target.boundingBox();expect(box).not.toBeNull();expect(box!.x).toBeGreaterThanOrEqual(0);expect(box!.y).toBeGreaterThanOrEqual(0);expect(box!.x+box!.width).toBeLessThanOrEqual(812);expect(box!.y+box!.height).toBeLessThanOrEqual(375);
     const hit=await target.evaluate(element=>{const rect=element.getBoundingClientRect(),hit=document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2);return {ok:Boolean(hit&&(hit===element||element.contains(hit))),target:element.getAttribute('aria-label')||element.textContent,hit:hit?.outerHTML.slice(0,120)};});
@@ -230,7 +310,7 @@ test('short landscape recovery keeps transcript, launch/read controls, suggestio
   await page.emulateMedia({reducedMotion:'reduce'});
   await page.evaluate(()=>{document.documentElement.style.zoom='2';});
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-  const touch=await page.context().newCDPSession(page),summary=dialogue.getByText('Gợi ý trò chuyện',{exact:true}),summaryBox=await summary.boundingBox();
+  const touch=await page.context().newCDPSession(page),summary=dialogue.getByText('Gợi ý trò chuyện',{exact:true});await summary.scrollIntoViewIfNeeded();const summaryBox=await summary.boundingBox();
   expect(summaryBox).not.toBeNull();
   await touch.send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
   const touchPoint={x:summaryBox!.x+summaryBox!.width/2,y:summaryBox!.y+summaryBox!.height/2};

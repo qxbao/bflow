@@ -31,10 +31,10 @@ function Activity({ api, projectId, runId, revision }: { api: ApiClient; project
   const unsupported = read.error instanceof ApiError && ['not_found', 'operation_not_allowed'].includes(read.error.code);
   return <section aria-label="Hoạt động gần đây" className="mt-3">
     <h3 className="m-0 text-sm">Hoạt động gần đây (chẩn đoán, có thể thiếu)</h3>
-    <p className="my-1 text-xs text-muted">Nhật ký chỉ ghi vai trò, không ghi nhân viên nào. Đây là các dòng của cả công việc, không riêng nhân viên này.</p>
+    <p className="my-1 text-xs text-muted">Nhật ký ghi theo từng vai trò trong toàn bộ công việc, không riêng nhân viên này.</p>
     {read.loading && !read.data && <p className="my-1 text-sm text-muted">Đang đọc hoạt động…</p>}
-    {Boolean(read.error) && <p className="my-1 text-sm text-muted">{unsupported ? 'Máy chủ chưa cung cấp nhật ký hoạt động.' : 'Chưa đọc được hoạt động. Điều này không cho biết nhân viên đang rảnh.'}</p>}
-    {read.data && entries.length === 0 && <p className="my-1 text-sm text-muted">Chưa có hoạt động nào được ghi nhận. Danh sách này có thể thiếu.</p>}
+    {Boolean(read.error) && <p className="my-1 text-sm text-muted">{unsupported ? 'Máy chủ chưa cung cấp nhật ký hoạt động.' : 'Chưa tải được nhật ký hoạt động; điều này không đồng nghĩa nhân viên đang rảnh.'}</p>}
+    {read.data && entries.length === 0 && <p className="my-1 text-sm text-muted">Chưa có hoạt động nào được ghi nhận cho phiên này.</p>}
     {entries.length > 0 && <ul className="my-1 list-none p-0 text-sm">{entries.map(e => <li key={e.entryId} className="border-t border-line py-1 first:border-t-0">
       <time dateTime={e.occurredAt} className="text-xs text-muted">{when(e.occurredAt)}</time>{' '}<span className="font-semibold">{roleLabel(e.role)}</span>: {e.action}{e.outcome ? `: ${e.outcome}` : ''}
     </li>)}</ul>}
@@ -56,7 +56,7 @@ export function AgentInspector({ api, projectId, agent, view, handoffs, revision
     <h2 className="mt-0">{agent.label}</h2>
     <dl className="my-2">
       <dt>Vai trò</dt><dd>{roleLabel(agent.role)}</dd>
-      {view && <><dt>Tên hiển thị</dt><dd>{view.displayName}</dd><dt>Nhà cung cấp</dt><dd>{view.provider}</dd><dt>Mô hình</dt><dd>{view.model ?? 'Không công bố'}</dd></>}
+      {view && <><dt>Tên hiển thị</dt><dd>{view.displayName === 'Qa' ? 'QA' : view.displayName}</dd><dt>Nhà cung cấp</dt><dd>{view.provider}</dd><dt>Mô hình</dt><dd>{view.model ?? 'Không công bố'}</dd></>}
       <dt>Trạng thái</dt><dd>{agent.statusText}</dd>
       <dt>Mức tin cậy</dt><dd>{CERTAINTY[agent.certainty]}</dd>
       <dt>Quan sát lúc</dt><dd>{agent.observedAt ? <time dateTime={agent.observedAt}>{when(agent.observedAt)}</time> : 'Chưa có quan sát'}</dd>

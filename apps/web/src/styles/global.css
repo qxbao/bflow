@@ -25,29 +25,66 @@
   --font-mono: 'JetBrains Mono', monospace;
 }
 
-/* 3D office scope (visual mode). The same tokens re-valued after the reference: charcoal translucent panels, thin olive border, cream text,
-   pale-lime accent. Classic components inside the overlay panel inherit them; outside this scope nothing changes. Text pairs are >= 4.5:1. */
+/* 3D office scope (visual mode). Classic components inside the overlay and game windows inherit these tokens; outside this scope nothing changes. Text pairs are >= 4.5:1. */
 .office-3d {
-  color-scheme: dark;
+  color-scheme: light;
   color: var(--color-ink);
-  --color-canvas: #101210;
-  --color-ink: #f1ead8;
-  --color-muted: #c4c0ae;
-  --color-faint: #2a2d23;
-  --color-line: #4d5238;
-  --color-accent: #d6e58a;
-  --color-steel: #a9c2e0;
-  --color-brand: #ffc400;
-  --color-on-brand: #1a1a1a;
-  --color-focus: #e6f08c;
-  --color-surface: #191b16;
-  --color-input: #8d9279;
-  --color-success: #92d3a0;
-  --color-danger: #ff9d9d;
-  --color-warning: #ecd48a;
-  --color-code: #20231a;
-  --color-code-line: #3b402d;
+  --win-ink: #1f1814; --win-shadow: 0 10px 26px rgb(31 24 20 / .16), 3px 3px 0 var(--win-ink); --win-shadow-sm: 2px 2px 0 var(--win-ink);
+  --win-border: 2px solid var(--win-ink); --win-radius: 10px; --win-body: #faf6f0; --win-panel: #efe7db;
+  --win-title-inactive: #78695c; --win-c-system: #3b536f; --win-c-work: #8c3d1e; --win-c-decide: #d98200;
+  --win-c-chat: #2d5a4c; --win-c-people: #1f5c58; --win-c-docs: #2b4c6f; --win-c-alert: #962226;
+  --color-canvas: #faf6f0; --color-ink: #1f1814; --color-muted: #52453b; --color-faint: #f2ebe1;
+  --color-line: #d8ccb8; --color-accent: #7a4100; --color-steel: #2b4c6f; --color-brand: #f2b705;
+  --color-on-brand: #1f1814; --color-focus: #8a4b00; --color-surface: #ffffff; --color-input: #78695c;
+  --color-success: #1b5e32; --color-danger: #962226; --color-warning: #6e4c00; --color-code: #f2ebe1; --color-code-line: #d8ccb8;
 }
+.bwin { position: fixed; display:flex; flex-direction:column; min-width:320px; min-height:240px; border:var(--win-border); border-radius:var(--win-radius); background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); overflow:hidden; }
+.bwin[hidden] { display:none!important; }
+.bwin.hidden { display:none!important; }
+.office-windows { pointer-events:none; z-index:0; }
+.office-windows:has([data-window-kind="repair"]:not([hidden])) { z-index:2000; }
+.office-windows .bwin { pointer-events:auto; }
+.bwin[style*="--bwin-preview-width"] { width:var(--bwin-preview-width)!important; height:var(--bwin-preview-height)!important; }
+.bwin.is-active { box-shadow:var(--win-shadow); }
+.bwin-titlebar { display:flex; flex:none; align-items:center; gap:8px; min-height:36px; padding:4px 6px; color:var(--win-title-ink,#fff); background:var(--win-accent,var(--win-c-system)); border-bottom:2px solid var(--win-ink); cursor:grab; touch-action:none; }
+.bwin-titlebar:active { cursor:grabbing; }
+.bwin-titlebar.is-inactive { background:var(--win-title-inactive); }
+.bwin-title-icon { width:22px; height:22px; flex:none; }
+.bwin-title-text { margin:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:700 13px/1.2 var(--font-mono); text-transform:uppercase; }
+.bwin-controls { display:flex; gap:4px; }
+.bwin-controls button { width:26px; height:26px; min-height:26px; padding:0; border:2px solid var(--win-ink); border-radius:0; color:var(--win-ink); background:var(--win-body); box-shadow:var(--win-shadow-sm); font:700 16px/1 var(--font-mono); }
+.bwin-controls button:active { transform:translate(1px,1px); box-shadow:none; }
+.bwin-nav { flex:none; min-height:36px; border-bottom:2px solid var(--win-ink); background:var(--win-panel); }
+.bwin-nav-buttons { display:flex; align-items:center; gap:6px; padding:3px 8px; font:600 12px var(--font-mono); }
+.bwin-nav-buttons button { width:30px; min-height:28px; padding:0; border:2px solid var(--win-ink); border-radius:0; background:#fff; box-shadow:var(--win-shadow-sm); }
+.bwin-nav-buttons span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.bwin-body { flex:1; min-height:0; overflow:auto; padding:16px; color-scheme:light; background:var(--win-body); color:var(--win-ink); scrollbar-color:var(--win-accent) var(--win-panel); }
+.bwin-app .bwin-body { padding:0; }
+.bwin[data-window-kind="director-chat"] .bwin-body { display:flex; flex-direction:column; overflow:hidden; padding:0; }
+.bwin[data-window-kind="director-chat"] .chat-thread { height:100%; min-height:0; max-height:none; overflow:hidden; }
+.bwin[data-window-kind="director-chat"] .chat-thread > header { position:static; flex:none; background:var(--color-surface); }
+.bwin[data-window-kind="director-chat"] .chat-thread > [role="log"] { flex:1; min-height:0; }
+.bwin[data-window-kind="director-chat"] .chat-thread > form { flex:none; }
+.bwin-chrome-host { display:flex; flex:none; flex-direction:column; }
+.classic-chrome-host { display:none; }
+.classic-route-host { display:contents; }
+.bwin-app .workspace-main-content { display:flex; flex:1; min-height:0; flex-direction:column; overflow:auto; }
+.bwin-app .bwin-inspector-host:empty { display:none; }
+.bwin-resize { position:absolute; right:0; bottom:0; width:20px; min-height:20px; padding:0; border:0; background:transparent; cursor:nwse-resize; }
+.bwin-backdrop { position:fixed; inset:0; z-index:90; background:rgb(27 16 51 / .35); backdrop-filter:blur(2px); pointer-events:auto; }
+.office-3d .bwin-body button { border-radius:0; border:2px solid var(--win-ink); box-shadow:var(--win-shadow-sm); background:#fff; color:var(--win-ink); }
+.office-3d .bwin-body button.bg-brand { background:var(--color-brand); color:var(--win-ink); font-weight:700; }
+.office-3d .bwin-body button.bg-steel { background:var(--color-steel); color:#fff; font-weight:600; }
+.office-3d .bwin-body button.bg-danger, .office-3d .bwin-body button.border-danger { border-color:var(--color-danger); }
+.office-3d .bwin-body input, .office-3d .bwin-body select, .office-3d .bwin-body textarea { border-radius:0; border:2px solid var(--win-ink); background:#fff; color:var(--win-ink); }
+.office-3d .bwin-body :focus-visible { outline-color:var(--win-c-work); }
+.office-3d .bwin { animation:bwin-open 120ms ease-out; }
+@keyframes bwin-open { from { opacity:0; scale:.96; } to { opacity:1; scale:1; } }
+@media (prefers-reduced-motion:reduce) { .office-3d .bwin { animation:none!important; } }
+.office-3d .bwin-app { container:workspace / inline-size; }
+.office-3d .bwin-app .workspace-main-content { min-height:0; height:100%; overflow:auto; padding:16px; }
+@media (min-width:768px) and (max-width:1099px) { .office-3d .bwin-app:not(.hidden),.office-windows .bwin { left:38vw!important; top:0!important; width:62vw!important; height:calc(100dvh - 56px)!important; } .office-3d .office-windows .bwin:not([data-active="true"]):not([data-window-kind="repair"]) { display:none; } }
+@media (max-width:767px) { .office-3d .bwin-app:not(.hidden),.office-windows .bwin { left:0!important; top:0!important; width:100vw!important; height:calc(100dvh - 56px)!important; } .office-3d .office-windows .bwin:not([data-active="true"]):not([data-window-kind="repair"]) { display:none; } .office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .bwin-app:not(.hidden) { display:none!important; } .office-3d:has(.bwin-app:not(.hidden)[data-active="true"]) .office-stage,.office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .office-stage { visibility:hidden; pointer-events:none; } .office-3d:has(.bwin-app:not(.hidden)[data-active="true"]) .office-cameras,.office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .office-cameras { display:none; } }
 .office-3d button, .office-3d input, .office-3d select, .office-3d textarea { border-radius: .5rem; }
 .office-3d fieldset { border-radius: .5rem; }
 
@@ -132,15 +169,8 @@
 .notice h2 { font-size: 1rem; margin: 0; }
 .notice p { font-size: .875rem; margin-block: .5rem; }
 .notice details { margin-bottom: 0; }
-.office-3d { --office-panel-width: clamp(420px, 40vw, 680px); }
-.office-panel { padding: 0 1.5rem 2rem; }
-.office-panel-header { position: sticky; top: 0; z-index: 10; margin-inline: -1.5rem; padding: 1rem 1.5rem; background: var(--color-surface); border-bottom: 1px solid var(--color-line); }
 .office-hud-root { container: office / inline-size; }
-.office-panel-open .office-stage, .office-panel-open .office-hud-root { right: var(--office-panel-width); }
-.office-panel-open .office-panel { width: var(--office-panel-width); }
 .office-3d .workspace-grid { display: block; }
-.office-3d .office-panel .panel { padding: 1.5rem; }
-.office-3d .office-panel h1 { font-size: 1.5rem; }
 .office-topbar { display: grid; grid-template-columns: minmax(0, 18rem) auto; gap: .75rem; align-items: start; }
 .office-topbar > .office-mode { justify-self: end; }
 .office-status summary::-webkit-details-marker { display: none; }
@@ -158,7 +188,6 @@
 .office-rail { left: .75rem; right: auto; top: 50%; transform: translateY(-42%); }
 .office-rail button { min-height: 44px; width: 72px; font-size: 11px; }
 .office-rail.office-rail-anchored { bottom: auto; transform: none; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; transition: top .18s ease; }
-.office-panel-open .office-quick-chat { display: none; }
 .office-cameras { margin-inline: auto; }
 .chat-layout { position: relative; border-radius: 1rem; overflow: clip; }
 .chat-toolbar { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
@@ -191,30 +220,9 @@
   .office-topbar section { max-width: 17rem; }
   .office-topbar [aria-label="Trạng thái văn phòng"] { font-size: .75rem; }
   .office-cameras button span { display: none; }
-  .office-quick-chat { max-width: 26rem; }
 }
 @media (min-width: 1024px) { .workspace-navigation { position: sticky; top: 1rem; } }
-@media (max-width: 1099px) {
-  .office-panel-open .office-panel { width: 100%; }
-  .office-panel-open .office-stage { right: 0; visibility: hidden; pointer-events: none; }
-  .office-panel-open .office-hud-root { right: 0; visibility: hidden; pointer-events: none; }
-  .office-panel-open .office-hud-root [data-hud-bottom] { visibility: visible; position: fixed; bottom: 0; left: 1rem; right: 1rem; padding: .5rem; }
-  .office-panel-open .office-hud-root [data-hud-bottom] > :not([data-hud-dock]) { visibility: hidden; }
-  .office-panel-open .office-hud-root [data-hud-bottom] > button { visibility: visible; }
-  .office-panel-open .office-hud-root { z-index: 50; }
-  .office-panel { padding-bottom: calc(var(--hud-h, 0px) + 2rem); }
-}
-@media (max-width: 600px) {
-  .workspace-main { padding-inline: 1rem; }
-  .office-panel-header { margin-inline: -1rem; padding-inline: 1rem; }
-  .office-rail { left: .5rem; }
-  .office-rail button { width: 58px; min-height: 40px; }
-  .office-topbar section { padding: .75rem; }
-  .office-topbar section h2 { font-size: 1rem; }
-  .office-cameras { margin-left: 4.5rem; }
-  .chat-thread { height: calc(100dvh - 14rem); min-height: 26rem; }
-  .chat-thread > header, .chat-thread > form { padding: 1rem; }
-}
+@media (max-width: 600px) { .chat-thread { height:calc(100dvh - 14rem); min-height:26rem; } .chat-thread > header,.chat-thread > form { padding:1rem; } }
 @media (max-height: 650px) {
   .office-rail { top: 6.5rem; bottom: 7rem; transform: none; overflow-y: auto; }
   .office-topbar section > div { display: none; }
@@ -225,25 +233,6 @@
 .office-status summary { min-height: 2rem; }
 .office-cameras details[open] > div { grid-template-columns: repeat(3, 2.75rem); }
 .office-cameras details[open] > div > button { min-width: 2.75rem; min-height: 2.75rem; padding-inline: .25rem; }
-@media (max-width: 1099px) { .office-panel-open [data-hud-bottom] > div:last-child { display: none; } }
-
-/* The opt-in interaction frame floats above the scene at every viewport width. Keep the legacy side panel rules untouched. */
-.office-immersive.office-panel-open .office-stage,
-.office-immersive.office-panel-open .office-hud-root { right: 0; visibility: visible; }
-.office-immersive.office-panel-open .office-stage { right: 0; visibility: visible; }
-.office-immersive.office-panel-open .office-panel {
-  left: 50%; right: auto; top: 50%; bottom: auto; width: min(1080px, calc(100vw - 32px));
-  max-height: 90dvh; transform: translate(-50%, -50%); translate: none; z-index: 60;
-}
-@media (max-width: 1099px) {
-  .office-immersive.office-panel-open .office-stage,
-  .office-immersive.office-panel-open .office-hud-root { visibility: visible; }
-  .office-immersive.office-panel-open .office-stage { visibility: visible; }
-  .office-immersive.office-panel-open .office-panel {
-    left: 50%; right: auto; top: 50%; bottom: auto; width: calc(100vw - 24px);
-    max-height: calc(100dvh - 24px); transform: translate(-50%, -50%); translate: none;
-  }
-}
 .overview-session-details { border: 0; margin: 0; padding: 0; }
 .overview-session-details > summary { margin-bottom: .75rem; }
 .new-work-disclosure { border: 1px solid var(--color-line); border-radius: 1rem; padding: 1rem 1.5rem; background: var(--color-surface); }
@@ -252,7 +241,6 @@
 @media (min-height: 650px) {
   .workspace-main:has(.chat-layout) { display: flex; flex-direction: column; height: calc(100dvh - 4.25rem); padding-bottom: 1.5rem; }
   .workspace-shell:has(.chat-layout) > footer { display: none; }
-  .office-panel:has(.chat-layout) { height: 100dvh; }
   .chat-layout { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .chat-layout > div { flex: 1; min-height: 0; }
   .chat-history { flex-shrink: 0; max-height: min(16rem, 30dvh); }
@@ -262,6 +250,220 @@
     .chat-history { height: 100%; max-height: none; }
   }
 }
+
+/* Retro desktop chrome and the persistent window switcher. */
+.bflow-taskbar { position:fixed; inset:auto 0 0; z-index:120; display:flex; align-items:center; gap:8px; min-height:56px; padding:6px 12px; border-top:2px solid var(--win-ink); background:var(--win-body); color:var(--win-ink); box-shadow:0 -3px 0 var(--win-ink); pointer-events:auto; }
+.bflow-taskbar button { flex:none; min-height:36px; padding:4px 10px; border:2px solid var(--win-ink); border-radius:0; color:var(--win-ink); background:#fff; box-shadow:var(--win-shadow-sm); font:600 11px/1.2 var(--font-mono); }
+.taskbar-start-wrap { position:relative; }
+.taskbar-start { background:#fff!important; box-shadow:var(--win-shadow-sm)!important; }
+.taskbar-windows { display:flex; flex:1; min-width:0; gap:6px; overflow-x:auto; }
+.taskbar-windows button[aria-pressed="true"] { background:var(--win-panel); box-shadow:var(--win-shadow-sm); }
+.taskbar-end,.taskbar-mode { display:flex; align-items:center; gap:4px; }
+.taskbar-start-menu { position:absolute; bottom:calc(100% + 10px); left:0; display:grid; min-width:220px; gap:6px; padding:10px; border:2px solid var(--win-ink); background:var(--win-body); box-shadow:var(--win-shadow); }
+.taskbar-start-menu button { text-align:left; }
+.taskbar-mobile-menu { display:none; }
+@media (max-width:767px) {
+  .office-3d:has(.bwin-app:not(.hidden),.office-windows .bwin:not([hidden])) .taskbar-mobile-menu { display:grid; gap:6px; }
+}
+.taskbar-history-menu { display:none; grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px; }
+@media (max-width:1099px) { .taskbar-history-menu { display:grid; } .taskbar-history-menu button { min-width:0; padding:4px; font-size:10px; } }
+.taskbar-status { max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.status-window-details { display:grid; grid-template-columns:minmax(9rem,auto) minmax(0,1fr); gap:8px 16px; margin:0; }
+.status-window-details dt { margin:0; font:600 12px var(--font-mono); }
+.status-window-details dd { margin:0; overflow-wrap:anywhere; }
+@media (min-width:768px) and (max-width:1099px) {
+  .office-3d .bwin-app:not(.hidden),.office-windows .bwin { left:38vw!important; top:0!important; width:62vw!important; height:calc(100dvh - 56px)!important; }
+  .office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .bwin-app:not(.hidden) { display:none!important; }
+  .office-3d .office-windows .bwin[data-active="true"] { left:38vw!important; top:0!important; width:62vw!important; height:calc(100dvh - 56px)!important; }
+  .office-3d .office-windows .bwin:not([data-active="true"]):not([data-window-kind="repair"]) { display:none; }
+  .office-3d .office-topbar > section[aria-label="Văn phòng Bflow"] { width:256px; }
+}
+@media (max-width:767px) {
+  .bflow-taskbar { min-height:56px; padding:4px; gap:4px; }
+  .taskbar-start { padding-inline:2px; font-size:9px; }
+  .taskbar-windows { max-width:16vw; }
+  .taskbar-windows button { max-width:72px; overflow:hidden; padding-inline:4px; text-overflow:ellipsis; white-space:nowrap; }
+  .taskbar-mode button { min-width:36px; padding-inline:3px; }
+  .office-3d .office-rail { display:none; }
+  .office-3d .bwin-app:not(.hidden),.office-windows .bwin { left:0!important; top:0!important; width:100vw!important; height:calc(100dvh - 56px)!important; max-height:none!important; border-radius:0; }
+  .office-3d .office-windows .bwin:not([data-active="true"]):not([data-window-kind="repair"]) { display:none; }
+  .office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .bwin-app:not(.hidden) { display:none!important; }
+  .office-3d:has(.bwin-app:not(.hidden)[data-active="true"]) .office-stage,.office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .office-stage { visibility:hidden; }
+  .office-3d:has(.bwin-app:not(.hidden)[data-active="true"]) .office-cameras,.office-3d:has(.office-windows .bwin[data-active="true"]:not([hidden])) .office-cameras { display:none; }
+  .bwin-titlebar { min-height:48px; }
+  .bwin-controls button { width:40px; height:40px; }
+}
+.office-3d .office-topbar { left:16px; right:16px; grid-template-columns:288px auto; align-items:start; }
+.office-3d .office-mode { display:none; }
+.office-3d [data-hud-bottom] { bottom:56px!important; }
+.office-3d .office-topbar > section[aria-label="Văn phòng Bflow"] { width:288px; border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
+.office-3d .office-topbar h2 { font:800 16px/1.2 var(--font-mono); }
+.office-3d .office-current-run { width:100%; min-height:32px; border:0; border-radius:0; padding:0; background:transparent; color:var(--win-ink); box-shadow:none; font:600 13px/1.35 var(--font-prose); }
+.office-3d .office-current-run:hover { text-decoration:underline; background:transparent; color:var(--win-ink); }
+.office-3d .office-topbar select { border:2px solid var(--win-ink); border-radius:0; background:#fff; color:var(--win-ink); }
+.office-3d .office-rail button:hover { background:var(--win-panel); color:var(--win-ink); }
+@media (max-height:480px) and (min-width:768px) {
+  .office-3d .bwin-app:not(.hidden),.office-3d .office-windows .bwin { left:42vw!important; width:58vw!important; }
+  .office-3d .office-topbar { left:8px; right:auto; top:8px; }
+  .office-3d .office-topbar > section[aria-label="Văn phòng Bflow"] { width:220px; padding:6px; }
+  .office-3d .office-topbar h2 { font-size:13px; }
+  .office-3d .office-topbar select { min-height:28px; margin-top:2px; }
+  .office-3d .office-topbar section > div { display:none; }
+  .office-3d .office-cameras > button,.office-3d .office-cameras > details > summary { min-width:36px; min-height:34px; padding:2px; }
+  .office-3d .taskbar-quick-chat { display:none; }
+  .office-3d .taskbar-windows { flex:1; max-width:none; }
+}
+
+/* Visual office contents use the same square-edged, compact language as the game windows. */
+.office-3d :where(button,input,select,textarea,fieldset,details,article,.panel,.notice,[data-component="EmptyState"],[data-field-help]) { border-radius:0; }
+.office-3d .bwin-body :where(button,input,select,textarea,[data-field-help]),
+.office-3d .bwin-body :where(.panel,.notice,article,fieldset,[data-component="EmptyState"]) { border-radius:0; }
+.office-3d .bwin-app .workspace-main-content { padding:12px; }
+.office-3d .workspace-main .panel { margin-block:8px; padding:12px; border:2px solid var(--win-ink); border-radius:0; background:#fff; box-shadow:var(--win-shadow-sm); }
+.office-3d .workspace-main-content > .content-grid { margin-block:8px; gap:10px; }
+.office-3d .workspace-main-content > .content-grid > section { border:2px solid var(--win-ink); background:#fff; box-shadow:var(--win-shadow-sm); }
+.office-3d .workspace-main :where(section,article,fieldset,details) { border-radius:0; }
+.office-3d .workspace-main .overview-intro { display:none; }
+.office-3d .workspace-main-content .agents-page-heading,
+.office-3d .workspace-main-content .review-page-intro { display:none; }
+.office-3d .workspace-main-content > div:has(+ h1[data-component="Runs"]),
+.office-3d .workspace-main-content > div:has(+ h1[data-component="Review"]),
+.office-3d .workspace-main-content > div:has(+ h1[data-component="Issues"]),
+.office-3d .workspace-main-content > div:has(+ h1[data-component="Settings"]),
+.office-3d .workspace-main-content > h1[data-component="Runs"],
+.office-3d .workspace-main-content > h1[data-component="Review"],
+.office-3d .workspace-main-content > h1[data-component="Issues"],
+.office-3d .workspace-main-content > h1[data-component="Settings"] { display:none; }
+.office-3d .overview-session-details > summary { margin-bottom:0; }
+.office-3d .overview-session-details[open] > summary { margin-bottom:8px; }
+.office-3d .overview-session-details > summary { min-height:32px; padding:4px 8px; border:1px solid var(--win-ink); background:var(--win-panel); font:700 12px var(--font-mono); }
+.office-3d .overview-session-details > summary { display:flex; align-items:center; gap:6px; line-height:1; }
+.office-3d .overview-session-details > summary::before { content:'▸'; flex:none; font-size:12px; }
+.office-3d .overview-session-details[open] > summary::before { content:'▾'; }
+.office-3d .notice { padding:10px 12px; border-radius:0; }
+.office-3d .bwin-body [role="alert"] { margin-block:6px; padding:8px 10px; border:2px solid var(--win-ink); border-left:4px solid var(--win-c-decide); border-radius:0; background:var(--win-panel); box-shadow:var(--win-shadow-sm); color:var(--win-ink); font-size:12px; line-height:1.4; }
+.office-3d .bwin-body [role="alert"].border-l-danger { border-left-color:var(--win-c-alert); }
+.office-3d .new-work-disclosure { margin-block:8px; padding:10px 12px; border:2px solid var(--win-ink); border-radius:0; background:#fff; box-shadow:var(--win-shadow-sm); }
+.office-3d .settings-section-tabs { display:flex; flex-wrap:wrap; gap:4px; margin:0 0 10px; padding:4px 4px 0; border:2px solid var(--win-ink); border-bottom-width:3px; background:var(--win-panel); }
+.office-3d .settings-section-tabs a { display:inline-flex; min-height:36px; align-items:center; padding:5px 10px; border:2px solid var(--win-ink); border-bottom:0; border-radius:0; background:#fff; box-shadow:2px 0 0 var(--win-ink); color:var(--win-ink); font:600 12px/1.25 var(--font-mono); text-decoration:none; }
+.office-3d .settings-section-tabs a:hover,.office-3d .settings-section-tabs a:focus-visible { background:var(--win-body); }
+.office-3d .settings-section-tabs a[href="#settings-remove"] { color:var(--win-c-alert); }
+.office-3d .chat-toolbar { margin-bottom:8px; justify-content:flex-end; }
+.office-3d .chat-toolbar > div { display:none; }
+.office-3d .director-chat-toolbar { display:none; }
+.chat-history-toggle-icon,.director-read-icon { display:none; }
+.office-3d .chat-history-toggle { display:grid; place-items:center; width:36px; min-width:36px; height:36px; min-height:36px; padding:0; }
+.office-3d .chat-history-toggle-text,.office-3d .director-read-text { display:none; }
+.office-3d .chat-history-toggle-icon,.office-3d .director-read-icon { display:block; }
+.office-3d .bwin-app .workspace-main-content { overflow-x:hidden; }
+.office-3d .chat-layout { width:100%; max-width:100%; min-width:0; overflow-x:hidden; border-radius:0; }
+.office-3d .chat-layout > div,.office-3d .chat-thread { width:100%; max-width:100%; min-width:0; }
+.office-3d [data-component="DirectorChat"] > header { position:relative; display:grid; grid-template-columns:28px minmax(0,1fr) 34px auto; align-items:center; gap:6px; min-width:0; }
+.office-3d [data-component="DirectorChat"] > header.has-history-action { grid-template-columns:28px minmax(0,1fr) 36px 34px auto; }
+.director-chat-history { display:none; }
+.office-3d .director-chat-history { display:block; }
+.office-3d [data-component="DirectorChat"] > header > div:nth-child(2) { min-width:0; flex-basis:auto; }
+.office-3d [data-component="DirectorChat"] > header > div:nth-child(2) [role="status"] { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.office-3d .director-read-button { display:grid; place-items:center; width:34px; min-width:34px; padding:0; font-size:18px; }
+.office-3d [data-component="DirectorChat"] > header [data-component="DirectorLaunch"] button { min-width:0; white-space:nowrap; }
+.office-3d [data-component="DirectorChat"] > header .director-launch-picker { position:absolute; z-index:5; top:calc(100% + 4px); right:0; width:min(380px,calc(100% - 12px)); max-height:min(60dvh,480px); overflow-y:auto; border:2px solid var(--win-ink); background:var(--win-body); box-shadow:var(--win-shadow); }
+.office-3d [data-component="DirectorChat"] > header > span:first-child { display:grid; place-items:center; }
+.office-3d .chat-thread > header { gap:8px; padding:8px 10px; }
+.office-3d .chat-thread > header > span:first-child { width:28px; height:28px; border-radius:0; }
+.office-3d .chat-thread > header .min-w-0 { flex-basis:100px; }
+.office-3d .chat-thread > header button { min-height:32px; padding:4px 8px; }
+.office-3d .chat-thread > [role="log"] { padding:10px 12px; }
+.office-3d .chat-thread > [role="log"] > ol { gap:8px; }
+.office-3d .chat-thread > [role="log"] ol li > div > p:first-child { padding:8px 10px; border-radius:0; }
+.office-3d .chat-thread > form { padding:8px 10px; }
+.office-3d .chat-thread > form,.office-3d .chat-thread > form > div { min-width:0; max-width:100%; }
+.office-3d .chat-thread > form textarea { min-width:0; flex:1 1 auto; }
+.office-3d .chat-thread > form textarea { min-height:44px; padding:8px 10px; border-radius:0; }
+.office-3d .chat-thread > form [data-field-help] { width:17px; height:17px; }
+.office-3d .chat-thread > form #director-chat-blocked { display:block; width:100%; max-width:none; margin:0 0 6px; padding:3px 8px; border:0; border-left:3px solid var(--win-c-decide); background:var(--win-panel); box-shadow:none; font-size:12px; line-height:1.4; }
+.office-3d .director-chat-approval-note { margin-top:4px; }
+.office-3d .bwin-body .director-read-alert { display:block; width:100%; max-width:none; margin:4px 0; padding:4px 8px; border:0; border-left:3px solid var(--win-c-decide); background:var(--win-panel); box-shadow:none; font:500 12px/1.4 var(--font-data); }
+.office-3d .director-chat-approval-note > summary,
+.office-3d .chat-capture-note > summary { font-size:11px; cursor:pointer; }
+.office-3d .director-chat-approval-note:not([open]) { line-height:1.2; }
+.office-3d .chat-capture-note { margin:0 0 6px; }
+.office-3d .role-bulk-settings > summary { cursor:pointer; }
+.office-3d .issue-queue-heading,.office-3d h1[data-component="Issues"] + p { display:none; }
+.office-3d .issue-read-alert { margin:6px 0; padding:6px 8px; border:2px solid var(--win-ink); border-left:4px solid var(--win-c-decide); background:var(--win-panel); box-shadow:var(--win-shadow-sm); font:600 11px/1.4 var(--font-data); }
+.office-3d .issue-empty { margin:6px 0; font:500 12px/1.4 var(--font-data); }
+.office-3d .issue-filter-row { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; width:100%; max-width:none; gap:8px; }
+.office-3d .issue-filter-row > div { min-width:0; }
+.office-3d .issue-filter-row select { width:100%; }
+.office-3d .office-windows .bwin-body > section > h2:first-child,
+.office-3d .office-windows .bwin-body > section > section > h2:first-child { display:none; }
+.office-3d .bwin-body [data-component="EmptyState"] { padding:10px 12px; }
+.office-3d .bwin-body [data-component="EmptyState"] h2 { font-size:14px; }
+.office-3d .bwin-body [data-component="EmptyState"] p { font-size:12px; }
+
+/* The shortcut strip occupies its own compact dock above the taskbar and never stretches empty space across the 3D scene. */
+.office-3d .office-rail,
+.office-3d .office-rail.office-rail-anchored { position:fixed; display:flex; flex-direction:row; align-items:center; left:12px; right:auto; max-width:calc(100vw - 24px); top:auto!important; bottom:64px; width:fit-content; height:56px; max-height:56px!important; padding:6px 8px; gap:6px; overflow-x:auto; overflow-y:hidden; transform:none; border:2px solid var(--win-ink); border-radius:10px; background:rgb(250 246 240 / .94); backdrop-filter:blur(8px); box-shadow:var(--win-shadow); scrollbar-width:none; }
+.office-3d .office-rail::-webkit-scrollbar { display:none; }
+.office-3d .office-rail button { display:inline-flex; flex:0 0 auto; flex-direction:row; width:auto; height:42px; min-height:42px; padding:6px 10px; gap:6px; white-space:nowrap; line-height:1; font-size:11px; border:2px solid var(--win-ink); border-radius:6px; background:#fff; box-shadow:var(--win-shadow-sm); }
+.office-3d .office-rail button svg { width:24px; height:24px; padding:2px; border:0; border-radius:4px; background:var(--win-panel); }
+.office-3d .office-rail button span { white-space:nowrap; }
+.office-3d :is(.office-rail button,.bflow-taskbar button,.bwin-body button,.office-desktop-nav button,.bwin-controls button) { border:2px solid var(--win-ink); border-radius:6px; box-shadow:var(--win-shadow-sm); font-family:var(--font-mono); }
+.office-3d .bflow-taskbar button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:42px; height:42px; padding:6px 10px; background:#fff; font-size:11px; line-height:1; }
+.office-3d .bflow-taskbar .taskbar-start { background:#fff!important; }
+.office-3d .bflow-taskbar .taskbar-windows button[aria-pressed="true"] { background:var(--win-panel); }
+.office-3d .bflow-taskbar .taskbar-start-menu button { justify-content:flex-start; }
+.taskbar-button-icon { flex:none; width:24px; height:24px; padding:2px; border-radius:4px; background:var(--win-panel); }
+.office-3d [data-hud-bottom] { bottom:124px!important; }
+.office-3d .bflow-taskbar { gap:6px; background:rgb(250 246 240 / .96); backdrop-filter:blur(8px); }
+.office-3d .taskbar-windows { flex:1 1 auto; }
+.office-3d .taskbar-quick-chat { flex:2 1 260px; max-width:none; min-width:120px; border-radius:8px; }
+.office-3d .office-topbar > section[aria-label="Văn phòng Bflow"] { border-radius:10px; background:rgb(250 246 240 / .94); backdrop-filter:blur(8px); }
+.office-3d .office-project-widget { padding:8px 10px 6px; }
+.office-3d .office-project-widget > div { margin-top:6px; padding-top:6px; }
+.office-3d .office-project-widget .office-status { margin-top:4px; padding-top:4px; }
+.office-3d .office-project-widget .office-status summary { min-height:24px; line-height:1; }
+.office-3d .office-desktop-nav { grid-column:1; grid-row:2; justify-self:start; display:flex; gap:5px; padding:4px; border:2px solid var(--win-ink); border-radius:8px; background:rgb(250 246 240 / .94); backdrop-filter:blur(8px); box-shadow:var(--win-shadow-sm); }
+.office-3d .office-desktop-nav button { width:34px; height:34px; min-height:34px; padding:0; border:2px solid var(--win-ink); border-radius:6px; background:#fff; box-shadow:var(--win-shadow-sm); font:700 18px/1 var(--font-mono); }
+.office-3d .office-topbar { grid-template-rows:auto auto; }
+.office-3d .office-topbar:has([aria-label="Thông báo văn phòng"]) .office-desktop-nav { grid-column:1; grid-row:3; }
+@media (min-width:768px) and (max-width:1099px) { .office-3d .office-desktop-nav { display:none; } }
+.office-3d .taskbar-status { display:grid; place-items:center; width:36px; min-width:36px; max-width:36px; padding:0; overflow:visible; }
+.taskbar-live-dot { display:block; width:12px; height:12px; border:2px solid var(--win-ink); border-radius:50%; background:#2cbf69; box-shadow:0 0 0 2px #fff inset; animation:taskbar-pulse 1.5s ease-in-out infinite; }
+.taskbar-live-dot.is-warning { background:#f4a51c; }
+@keyframes taskbar-pulse { 50% { opacity:.35; } }
+@media (prefers-reduced-motion:reduce) { .taskbar-live-dot { animation:none; } }
+.status-window-details { gap:0; border:2px solid var(--win-ink); }
+.status-window-details dt,.status-window-details dd { padding:7px 9px; border-bottom:1px solid var(--win-ink); }
+.status-window-details dt { background:var(--win-panel); border-right:1px solid var(--win-ink); }
+.status-window-details dt:nth-last-of-type(1),.status-window-details dd:nth-last-of-type(1) { border-bottom:0; }
+@media (max-width:767px) {
+  .office-3d .office-rail { display:flex; left:6px; right:6px; bottom:60px; }
+  .office-3d:has(.bwin-app:not(.hidden)) .office-rail,
+  .office-3d:has(.office-windows .bwin:not([hidden])) .office-rail { display:none; }
+  .office-3d .taskbar-quick-chat { flex:1 1 80px; }
+}
+.office-3d .office-cameras { border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); box-shadow:var(--win-shadow); }
+.office-3d .office-cameras { position:fixed; left:calc(var(--app-left,100vw) / 2 + 44px); bottom:64px; z-index:120; max-width:max(180px,calc(var(--app-left,100vw) - 96px)); margin:0; }
+.office-3d .office-cameras button { border:2px solid var(--win-ink); border-radius:0; background:#fff; color:var(--win-ink); box-shadow:var(--win-shadow-sm); }
+.office-3d .taskbar-quick-chat { flex:2 1 260px; min-width:120px; max-width:none; border:2px solid var(--win-ink); border-radius:0; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow-sm); }
+.office-3d .taskbar-quick-chat input { min-height:36px; border:0; border-radius:0; background:transparent; color:var(--win-ink); }
+.office-3d .taskbar-quick-chat input::placeholder { color:var(--color-muted); }
+.office-3d .taskbar-quick-chat button { min-width:36px; min-height:36px; }
+.office-3d [data-component="OfficeNotifications"] { position:fixed; top:16px; right:16px; z-index:60; width:min(320px,calc(100vw - 32px)); border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
+.office-3d [data-component="FirstVisit"] { border:2px solid var(--win-ink); border-radius:6px; background:var(--win-body); color:var(--win-ink); box-shadow:var(--win-shadow); }
+@media (max-width:767px) { .office-3d .office-cameras { position:relative;left:auto;bottom:auto;max-width:100%; } }
+@media (max-width:767px) {
+  .office-3d .bflow-taskbar { gap:3px; }
+  .office-3d .taskbar-quick-chat { min-width:110px; max-width:none; flex:1; padding-left:4px; gap:3px; }
+  .office-3d .taskbar-quick-chat input { min-width:36px; width:100%; padding-inline:4px; font-size:11px; }
+  .office-3d .taskbar-quick-chat button { min-width:36px; padding-inline:3px; }
+  .office-3d .taskbar-quick-chat input::placeholder { content:'Chat'; }
+  .office-3d .taskbar-quick-chat > svg { display:none; }
+  .office-3d:has(.bwin-app:not(.hidden)) .office-topbar,.office-3d:has(.office-windows .bwin:not([hidden])) .office-topbar { display:none!important; }
+}
+@media (prefers-reduced-motion:reduce) { .bwin, .bflow-taskbar { animation:none!important; transition:none!important; } }
+@media (pointer:coarse) { .bwin-controls button { width:44px; height:44px; min-height:44px; } .bwin-resize { width:44px; min-height:44px; } .bflow-taskbar button { min-height:44px; } }
+@media (pointer:coarse) { .office-3d .taskbar-quick-chat button { min-width:44px; min-height:44px; } }
 @media (min-height: 650px) {
   .chat-layout > div { display: flex; flex-direction: column; }
   .chat-layout > div > :not(.chat-thread) { flex-shrink: 0; }
@@ -278,13 +480,28 @@
 /* The immersive desk dialog shares the viewport on short landscape screens; keep its composer above the fold. */
 .director-dialogue .chat-thread { height: 100%; min-height: 0; overflow: visible; }
 @media (max-height: 480px) {
-  .director-dialogue .chat-thread > header,
-  .director-dialogue .chat-thread > form { padding: .25rem .5rem; }
-  .director-dialogue .chat-thread .director-chat-suggestions { position: sticky; top: 4.5rem; z-index: 2; margin-bottom: .25rem; background: var(--color-surface); }
-  .director-dialogue .chat-thread .director-chat-suggestions > summary { min-height: 2.25rem; padding-block: .25rem; }
-  .director-dialogue .chat-thread form [role="status"] { margin-bottom: .25rem; font-size: .6875rem; line-height: 1.2; }
-  .director-dialogue .chat-thread [aria-label="Gợi ý trò chuyện"] button { min-height: 2rem; padding: .25rem .5rem; }
-  .director-dialogue .chat-thread #director-chat-approval { margin-top: 0; line-height: 1.15; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > header { display:grid; grid-template-columns:auto auto; justify-content:space-between; gap:.25rem; padding:.25rem .5rem; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > header > span,
+  .bwin[data-window-kind="director-chat"] .chat-thread > header > div:nth-child(2) { display:none; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > header button { min-height:1.875rem; padding:.2rem .4rem; font-size:.75rem; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > header [data-component="DirectorLaunch"] button { min-width:0; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > [role="log"] { max-height:3rem; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > form { padding:.125rem .5rem; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > form textarea { height:2.125rem; min-height:2.125rem; max-height:2.125rem; padding:.25rem .5rem; }
+  .bwin[data-window-kind="director-chat"] .chat-thread .director-chat-suggestions { margin:0 0 .25rem; padding:0; border:0; }
+  .bwin[data-window-kind="director-chat"] .chat-thread .director-chat-suggestions > summary { height:1.75rem; min-height:1.75rem; padding:.15rem .5rem; font-size:.75rem; line-height:1.2; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > form .director-chat-suggestions > div { margin-top:.25rem; gap:.25rem; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > form .director-chat-suggestions > div button { min-height:2rem; padding:.25rem .5rem; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > form > div { margin-bottom:.125rem; gap:.25rem; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > form > div:nth-of-type(1) { height:1.5rem; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > form > div:nth-of-type(2) { height:2.125rem; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > form > div:nth-of-type(3) { height:1.75rem; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > form > div button { width:1.5rem; min-width:1.5rem; min-height:1.5rem; height:1.5rem; padding:0; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > form button { min-height:1.75rem; padding-block:.125rem; font-size:.75rem; }
+  .bwin[data-window-kind="director-chat"] .chat-thread #director-chat-approval { max-width:100%; font-size:.6875rem; line-height:1.15; }
+  .bwin[data-window-kind="director-chat"] .chat-thread form [role="status"] { min-height:1.5rem; margin-top:.125rem; margin-bottom:.125rem; overflow:hidden; font-size:.625rem; line-height:1.1; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > form .mb-3 { margin-bottom:.25rem; }
+  .bwin[data-window-kind="director-chat"] .chat-thread > form .mt-1\.5 { margin-top:.125rem; }
 }
 
 /* Web <-> 3D: a short cross-fade with a slight depth shift (View Transitions, started by useUiMode). The 3D stage then fades in once
@@ -303,4 +520,367 @@
 @media (prefers-reduced-motion: reduce) {
   ::view-transition-old(root), ::view-transition-new(root), ::view-transition-group(bflow-mode-switch), .office-stage,
   .office-topbar > :not(.office-mode), .office-rail, [data-hud-bottom] { animation: none; }
+}
+@media (max-height:480px) and (min-width:768px) {
+  .office-3d .office-windows .bwin[data-window-kind="director-chat"][data-active="true"] { left:42vw!important; width:58vw!important; }
+  .office-3d .office-cameras { position:absolute; left:calc(42vw - 106px); top:-235px; bottom:auto; display:flex; flex-direction:column; width:64px; max-width:64px; max-height:calc(100dvh - 132px); overflow:visible; }
+  .office-3d .office-cameras > details > summary { width:44px; min-width:44px; max-width:44px; overflow:hidden; white-space:nowrap; font-size:9px; letter-spacing:-.03em; }
+}
+
+/* Keep the desktop strip above the taskbar at every viewport height. */
+.office-3d .office-rail { top:auto; bottom:64px; display:flex; width:fit-content; max-width:calc(100vw - 24px); max-height:56px; overflow-x:auto; overflow-y:hidden; }
+.office-3d:has(.bwin-app[data-display="maximized"]:not(.hidden)) .office-rail { display:none!important; }
+.office-3d .office-rail button { width:auto; min-height:42px; height:42px; padding:6px 10px; font-size:11px; }
+.office-3d .office-rail button svg { width:24px; height:24px; }
+.office-3d .taskbar-status { display:grid; }
+.office-3d [data-hud-bottom] { bottom:124px!important; }
+@media (max-width:767px) {
+  .office-3d .office-rail { bottom:60px; }
+  .office-3d:has(.bwin-app:not(.hidden)) .office-rail,
+  .office-3d:has(.office-windows .bwin:not([hidden])) .office-rail { display:none!important; }
+  .office-3d .taskbar-quick-chat { flex:1 1 80px; }
+}
+
+/* ==========================================================================
+   3D Game UI Overhaul — Cozy Tycoon / Tactical RPG HUD & Window Interior
+   ========================================================================== */
+
+/* 1. Tactile Game Window Chrome & Blueprint/Parchment Grid Interior */
+.office-3d .bwin {
+  border: 2px solid var(--win-ink);
+  border-radius: 10px;
+  box-shadow: 0 14px 32px rgb(31 24 20 / 0.24), 4px 4px 0 var(--win-ink);
+}
+.office-3d .bwin-titlebar {
+  min-height: 38px;
+  padding: 5px 8px;
+  box-shadow: inset 0 2px 0 rgb(255 255 255 / 0.28), inset 0 -1px 0 rgb(0 0 0 / 0.18);
+  letter-spacing: 0.04em;
+}
+.office-3d .bwin-title-icon {
+  width: 24px;
+  height: 24px;
+  padding: 2px;
+  border: 1.5px solid var(--win-ink);
+  border-radius: 5px;
+  background: rgb(255 255 255 / 0.92);
+  color: var(--win-ink);
+  box-shadow: 1px 1px 0 var(--win-ink);
+}
+.office-3d .bwin-body,
+.office-3d .bwin-app .workspace-main-content {
+  background-color: var(--win-body);
+  background-image: radial-gradient(rgb(31 24 20 / 0.075) 1px, transparent 0);
+  background-size: 14px 14px;
+}
+
+/* 2. Game Status Badges (RPG Rank / Quest State Chips) */
+.quest-progress {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: 999px;
+  background: var(--color-faint);
+}
+.quest-progress-fill {
+  height: 100%;
+  background: var(--color-success);
+  transition: width 220ms ease-out;
+}
+.agent-terminal-bar { display: none; }
+.agent-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border: 1.5px solid var(--win-ink, #1f1814);
+  border-radius: 999px;
+  background: #8c8a82;
+}
+.agent-status-dot--working,
+.agent-status-dot--accepted,
+.agent-status-dot--starting { background: #2cbf69; box-shadow: 0 0 0 2px rgb(44 191 105 / 0.22); }
+.agent-status-dot--idle,
+.agent-status-dot--done { background: #f2b705; }
+.agent-status-dot--blocked { background: #e67700; }
+.agent-status-dot--disconnected,
+.agent-status-dot--cancelled { background: #d9383a; }
+
+.office-3d .status-badge {
+  border: 2px solid var(--win-ink);
+  border-radius: 5px;
+  padding: 2px 8px;
+  font: 700 11px/1.35 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  box-shadow: 2px 2px 0 var(--win-ink);
+}
+.office-3d .status-badge--success {
+  background: #d8f5e2;
+  color: #114a24;
+  border-color: #145229;
+}
+.office-3d .status-badge--active {
+  background: #dcebfb;
+  color: #163a5f;
+  border-color: #1f4973;
+}
+.office-3d .status-badge--waiting {
+  background: #fff0c2;
+  color: #5c3b00;
+  border-color: #8a5a00;
+}
+.office-3d .status-badge--danger {
+  background: #fde2e2;
+  color: #6e1417;
+  border-color: #8f2427;
+}
+.office-3d .status-badge--muted {
+  background: #ece3d5;
+  color: #3d322a;
+  border-color: #5c4d42;
+}
+
+/* 3. Segmented Game XP / Quest Progress Bar in 3D Mode */
+.office-3d .quest-progress {
+  height: 11px;
+  border: 2px solid var(--win-ink);
+  border-radius: 5px;
+  background: #e4d8c5;
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.18), 1px 1px 0 var(--win-ink);
+}
+.office-3d .quest-progress-fill {
+  background-color: #26b562;
+  background-image: linear-gradient(
+    135deg,
+    rgb(255 255 255 / 0.22) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgb(255 255 255 / 0.22) 50%,
+    rgb(255 255 255 / 0.22) 75%,
+    transparent 75%,
+    transparent
+  );
+  background-size: 14px 14px;
+  border-right: 1.5px solid var(--win-ink);
+}
+
+/* 4. Elimination of Flat 2D Web Tables/Lists — Tactile Quest & Item Cards */
+.office-3d .bwin-body :is(.panel, .quest-step-banner, .quest-actions-card, [data-component="DecisionReview"] fieldset) {
+  border: 2px solid var(--win-ink);
+  border-radius: 8px;
+  background: #fffdf9;
+  box-shadow: 3px 3px 0 var(--win-ink);
+}
+.office-3d .bwin-body .quest-step-banner {
+  border-left: 6px solid var(--win-c-work);
+  background: linear-gradient(180deg, #fffdf9 0%, #f7efe2 100%);
+}
+.office-3d .bwin-body .quest-list {
+  display: grid;
+  gap: 10px;
+  border: 0;
+  margin-block: 8px;
+}
+.office-3d .bwin-body .quest-card {
+  border: 2px solid var(--win-ink) !important;
+  border-radius: 8px !important;
+  padding: 12px 14px !important;
+  background: #fffdf9 !important;
+  box-shadow: 3px 3px 0 var(--win-ink) !important;
+  transition: transform 90ms ease, box-shadow 90ms ease;
+}
+.office-3d .bwin-body .quest-card:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--win-ink) !important;
+  background: #ffffff !important;
+}
+.office-3d .bwin-body .quest-task-list {
+  display: grid;
+  gap: 8px;
+  border: 0;
+}
+.office-3d .bwin-body .quest-task-list > li {
+  border: 2px solid var(--win-ink);
+  border-radius: 7px;
+  padding: 8px 12px;
+  background: #fffdf9;
+  box-shadow: 2px 2px 0 var(--win-ink);
+  font-weight: 600;
+}
+.office-3d .bwin-body [data-component="DecisionInbox"] ul > li > button {
+  border: 2px solid var(--win-ink);
+  border-radius: 8px;
+  background: #fffdf9;
+  box-shadow: 3px 3px 0 var(--win-ink);
+  transition: transform 90ms ease, box-shadow 90ms ease;
+}
+.office-3d .bwin-body [data-component="DecisionInbox"] ul > li > button:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--win-ink);
+  background: #fff9eb;
+  color: var(--win-ink);
+}
+.office-3d .bwin-body [data-component="IssueQueue"] > ul {
+  display: grid;
+  gap: 10px;
+  border: 0;
+}
+.office-3d .bwin-body [data-component="IssueQueue"] > ul > li {
+  border: 2px solid var(--win-ink);
+  border-left: 5px solid var(--win-c-decide);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fffdf9;
+  box-shadow: 3px 3px 0 var(--win-ink);
+}
+
+/* 5. Squad Roster & Retro CRT Tactical Monitor in Nhân viên / Agent Inspector */
+.office-3d .bwin-body .agent-roster-list {
+  display: grid;
+  gap: 7px;
+  align-content: start;
+}
+.office-3d .bwin-body .agent-roster-list > li {
+  border: 0;
+}
+.office-3d .bwin-body .agent-roster-item {
+  border: 2px solid var(--win-ink);
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: #fffdf9;
+  box-shadow: 2px 2px 0 var(--win-ink);
+  transition: transform 80ms ease, background-color 80ms ease;
+}
+.office-3d .bwin-body .agent-roster-item:hover {
+  background: var(--win-panel);
+  color: var(--win-ink);
+}
+.office-3d .bwin-body .agent-roster-item[aria-pressed="true"] {
+  background: #ffe8a3;
+  border-color: var(--win-ink);
+  box-shadow: 3px 3px 0 var(--win-ink);
+}
+.office-3d .bwin-body .agent-detail-card {
+  border: 2px solid var(--win-ink);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fffdf9;
+  box-shadow: 3px 3px 0 var(--win-ink);
+}
+.office-3d .bwin-body .agent-terminal-frame {
+  margin-block: 6px;
+  border: 2px solid var(--win-ink);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #11171a;
+  box-shadow: 3px 3px 0 var(--win-ink);
+}
+.office-3d .bwin-body .agent-terminal-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 2px solid var(--win-ink);
+  background: #232d33;
+  color: #d7e3ea;
+  font: 700 10px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+}
+.office-3d .bwin-body .agent-terminal-dots {
+  display: inline-flex;
+  gap: 5px;
+}
+.office-3d .bwin-body .agent-terminal-dots > i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid rgb(0 0 0 / 0.45);
+}
+.office-3d .bwin-body .agent-terminal-dots > i:nth-child(1) { background: #ff5f56; }
+.office-3d .bwin-body .agent-terminal-dots > i:nth-child(2) { background: #ffbd2e; }
+.office-3d .bwin-body .agent-terminal-dots > i:nth-child(3) { background: #27c93f; }
+.office-3d .bwin-body .agent-terminal-log {
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 10px 12px !important;
+  background-color: #11171a !important;
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgb(255 255 255 / 0.02) 0px,
+    rgb(255 255 255 / 0.02) 1px,
+    transparent 1px,
+    transparent 3px
+  ) !important;
+  color: #8ce99a !important;
+  font: 500 12px/1.55 var(--font-mono) !important;
+  text-shadow: 0 0 6px rgb(140 233 154 / 0.2);
+  scrollbar-color: #3b536f #11171a;
+}
+
+/* 6. RPG Dialogue Cards in Director Chat & Agent Inspector */
+.office-3d .bwin-body [data-component="DirectorChat"] > header {
+  border-bottom: 2px solid var(--win-ink);
+  background: linear-gradient(180deg, #fffdf9 0%, var(--win-panel) 100%);
+}
+.office-3d .bwin-body .director-msg-bubble {
+  border: 2px solid var(--win-ink) !important;
+  border-radius: 8px !important;
+  padding: 10px 12px !important;
+  box-shadow: 2px 2px 0 var(--win-ink);
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+.office-3d .bwin-body .director-msg-bubble.is-director {
+  border-left: 5px solid var(--win-c-chat) !important;
+  background: #fffdf9 !important;
+  color: var(--win-ink) !important;
+}
+.office-3d .bwin-body .director-msg-bubble.is-user {
+  background: var(--color-steel) !important;
+  color: #ffffff !important;
+}
+.office-3d .bwin-body [data-component="DirectorChat"] > form {
+  border-top: 2px solid var(--win-ink);
+  background: var(--win-panel);
+}
+.office-3d .bwin-body [data-component="DirectorChat"] > form textarea {
+  border: 2px solid var(--win-ink);
+  border-radius: 6px;
+  background: #fffdf9;
+  box-shadow: inset 1px 1px 0 rgb(0 0 0 / 0.06);
+}
+.office-3d .bwin-body [data-component="AgentDialogue"] dl,
+.office-3d .bwin-body [aria-label^="Nhân viên "] > dl {
+  display: grid;
+  grid-template-columns: minmax(6.5rem, auto) minmax(0, 1fr);
+  gap: 6px 12px;
+  padding: 10px 12px;
+  border: 2px solid var(--win-ink);
+  border-radius: 8px;
+  background: #fffdf9;
+  box-shadow: 2px 2px 0 var(--win-ink);
+}
+.office-3d .bwin-body [data-component="AgentDialogue"] dt,
+.office-3d .bwin-body [aria-label^="Nhân viên "] > dl > dt {
+  margin: 0;
+  font: 700 11px/1.4 var(--font-mono);
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+.office-3d .bwin-body [data-component="AgentDialogue"] dd,
+.office-3d .bwin-body [aria-label^="Nhân viên "] > dl > dd {
+  margin: 0;
+  color: var(--win-ink);
+}
+
+/* 7. Tactile Pressable Arcade/Game Buttons inside 3D Windows */
+.office-3d .bwin-body button:not(:disabled):active,
+.office-3d .office-rail button:not(:disabled):active,
+.office-3d .bflow-taskbar button:not(:disabled):active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--win-ink);
 }

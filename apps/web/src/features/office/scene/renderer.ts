@@ -283,7 +283,11 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     const fits = (x: number, y: number, width: number, height: number): boolean =>
       x - width / 2 >= inset.left && x + width / 2 <= v.w - inset.right && y - height >= 0 && y <= v.h - inset.bottom;
     const tagFits = (text: string): boolean => fits(pt.x, pt.y, text.length * 6.8 + 12, 22);
-    for (const view of choreo.views()) {
+    const views = choreo.views().sort((a, b) => {
+      const rank = (id: string): number => (hoveredTarget?.kind === 'agent' && hoveredTarget.instanceId === id ? 0 : selectedTarget?.kind === 'agent' && selectedTarget.instanceId === id ? 1 : 2);
+      return rank(a.instanceId) - rank(b.instanceId);
+    });
+    for (const view of views) {
       const a = agentsById.get(view.instanceId);
       if (!a || !project(view.point.x, 2.15, view.point.z, v.w, v.h)) continue;
       let tag = tags.get(a.instanceId);
@@ -369,6 +373,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     if (data?.director) return { kind: 'director' };
     if (data?.queue) return { kind: 'queue' };
     if (data?.instanceId) return { kind: 'agent', instanceId: data.instanceId };
+    if (data?.object === 'counter' && lastModel?.director) return { kind: 'director' };
     if (data?.object) return { kind: 'object', object: data.object };
     return undefined;
   };
@@ -377,6 +382,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     if (data.director) return { kind: 'director' };
     if (data.queue) return lastModel?.director ? { kind: 'queue' } : undefined;
     if (data.instanceId) return { kind: 'agent', instanceId: data.instanceId };
+    if (data.object === 'counter' && lastModel?.director) return { kind: 'director' };
     if (data.object) return { kind: 'object', object: data.object };
     return undefined;
   };
@@ -400,9 +406,9 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     }
     dirty = true; wake();
   };
-  const highlight = (target?: OfficeTarget): void => { if (!immersive) return; selectedTarget = target; host.dataset.officeSelected = String(Boolean(target)); paintHighlight(hoveredTarget ?? selectedTarget); };
-  const preview = (target?: OfficeTarget): void => { if (!immersive) return; hoveredTarget = target; paintHighlight(hoveredTarget ?? selectedTarget); };
-  const setInteracting = (active: boolean): void => { if (!immersive) return; host.dataset.officeInteracting = String(active); host.dataset.officeState = active ? 'interacting' : selectedTarget ? 'selected' : 'overview'; };
+  const highlight = (target?: OfficeTarget): void => { selectedTarget = target; host.dataset.officeSelected = String(Boolean(target)); paintHighlight(hoveredTarget ?? selectedTarget); };
+  const preview = (target?: OfficeTarget): void => { hoveredTarget = target; paintHighlight(hoveredTarget ?? selectedTarget); };
+  const setInteracting = (active: boolean): void => { host.dataset.officeInteracting = String(active); host.dataset.officeState = active ? 'interacting' : selectedTarget ? 'selected' : 'overview'; };
   const positionOf = (target: OfficeTarget): Vec2 | undefined => {
     if (target.kind === 'agent') return choreo.views().find(v => v.instanceId === target.instanceId)?.point;
     if (target.kind === 'director') return directorPoint ?? cellCentre(OBJECT_CELLS.counter);
@@ -436,7 +442,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const pointers = new Map<number, { x: number; y: number }>();
   let pinchDist = 0;
   const spread = (): number => { const [a, b] = [...pointers.values()]; return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : 0; };
-  const resetPointers = (): void => { pointers.clear(); drag = undefined; pinchDist = 0; activeGesture = false; if (immersive && hoveredTarget) { hoveredTarget = undefined; paintHighlight(selectedTarget); } if (immersive && host.dataset.officeState === 'moving' && !move) host.dataset.officeState = host.dataset.officeInteracting === 'true' ? 'interacting' : host.dataset.officeSelected === 'true' ? 'selected' : 'overview'; };
+  const resetPointers = (): void => { pointers.clear(); drag = undefined; pinchDist = 0; activeGesture = false; if (hoveredTarget) { hoveredTarget = undefined; paintHighlight(selectedTarget); } if (host.dataset.officeState === 'moving' && !move) host.dataset.officeState = host.dataset.officeInteracting === 'true' ? 'interacting' : host.dataset.officeSelected === 'true' ? 'selected' : 'overview'; };
   const onDown = (e: PointerEvent): void => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (e.pointerType === 'mouse') resetPointers();
@@ -453,8 +459,8 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
         const target = e.target === canvas ? pick(e.clientX, e.clientY) : undefined;
         if (e.target === canvas) canvas.style.cursor = target ? 'pointer' : 'default';
         hoveredTarget = target;
-        if (immersive && target && !sameTarget(target, outlineTarget)) paintHighlight(target);
-        else if (immersive && !target && outlineTarget && !sameTarget(outlineTarget, selectedTarget)) paintHighlight(selectedTarget);
+        if (target && !sameTarget(target, outlineTarget)) paintHighlight(target);
+        else if (!target && outlineTarget && !sameTarget(outlineTarget, selectedTarget)) paintHighlight(selectedTarget);
       }
       return;
     }
@@ -497,7 +503,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const t = e.target;
     if (t instanceof HTMLElement && (t.isContentEditable || /^(input|textarea|select)$/i.test(t.tagName))) return;
-    if (immersive && e.key === 'Escape' && !e.defaultPrevented && !e.isComposing && (selectedTarget || host.dataset.officeInteracting === 'true')) { hoveredTarget = undefined; highlight(undefined); setInteracting(false); onDeselect?.(); host.dataset.officeState = 'overview'; return; }
+    if (e.key === 'Escape' && !e.defaultPrevented && !e.isComposing && (selectedTarget || host.dataset.officeInteracting === 'true')) { hoveredTarget = undefined; highlight(undefined); setInteracting(false); onDeselect?.(); host.dataset.officeState = 'overview'; return; }
     const action = cameraKey(e.key);
     if (!action) return;
     e.preventDefault();
@@ -572,13 +578,19 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     preview,
     setInteracting,
     cameraControl(action) {
-      if (!immersive) return;
       const step = 64;
       if (action === 'zoom-in') userMove(zoomBy(state, 1.2, reach()));
       else if (action === 'zoom-out') userMove(zoomBy(state, 1 / 1.2, reach()));
       else userMove(panByPixels(state, action === 'left' ? step : action === 'right' ? -step : 0, action === 'up' ? step : action === 'down' ? -step : 0, size(), reach()));
     },
-    setInset(next) { inset = next.right === 0 && next.bottom === 0 && next.left === 0 ? NO_INSET : next; dirty = true; wake(); },
+    setInset(next) {
+      const resolved = next.right === 0 && next.bottom === 0 && next.left === 0 ? NO_INSET : next;
+      if (resolved.right === inset.right && resolved.left === inset.left && resolved.bottom === inset.bottom) return;
+      inset = resolved;
+      if (selectedTarget) focus(selectedTarget);
+      dirty = true;
+      wake();
+    },
     setLabelSink(next) { sink = next; if (next && ready) next(projectLabels()); },
     setPaused(next) {
       if (next === paused) return;

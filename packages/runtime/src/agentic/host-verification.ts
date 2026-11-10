@@ -15,10 +15,10 @@ import { digest, json, record, strings, textField } from "./journal.js";
 import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, reworkVerificationBinding, parseRequiredFindingVerdicts, requiredReworkFindingIdsForGate, hasReworkAssignment, type ReworkResolutionDossier } from "./rework-causality.js";
 import { unwrap } from "./outbox.js";
 import { BehavioralMeasurementError, behavioralChecks, bindRegressionProfile, verificationGit, measureBehavior, measureRegression, parseBehavioralCommands, testFilePattern,
-  type BehavioralCommand, type BoundBehavioralCommand, type RegressionFailure, type RegressionMeasurement, type RtkOutputIntegration, type RunnerProfile } from "./behavioral-runner.js";
+  type BehavioralCommand, type BehavioralMeasurement, type BoundBehavioralCommand, type RegressionFailure, type RegressionMeasurement, type RtkOutputIntegration, type RunnerProfile } from "./behavioral-runner.js";
 import { RtkRequiredToolUnavailable } from "./behavioral-runner.js";
 import { assessMutation, createMutatedRevision, measureMutation, mutationChecks as mutationCheckDefinitions, type MutationCheck } from "./mutation-check.js";
-import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, automaticCheckMethod, isAutomaticStaticCommand, regressionChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
+import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, plannedTestDirectory, plannedTestDirectoryOnly, automaticChecks, automaticCheckMethod, isAutomaticStaticCommand, regressionChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
 import { captureTypecheck, captureTypeScriptSyntax } from "./typecheck.js";
 import { PolicyReviewPages, PolicyReviewPageInputSchema } from "./policy-review-pages.js";
 import { compactPolicyReviewDossier } from "./mcp-output-views.js";
@@ -35,6 +35,7 @@ import { exceedsAgyInlineReply } from "./agy-assignment-admission.js";
 import { z } from "zod";
 import { policyPhaseReviewAssignment, PolicyReviewSubmissionSchema } from "./policy-phase-review.js";
 import { appCheckDefinitions, appCheckIdentity, type AppCheckSuite } from "./app-check-config.js";
+import { TaskBlocker, blockerOf } from "./blockers.js";
 import { AppCheckBrowserLeases } from "./app-check-lease.js";
 import { buildAppEvidence, sanitizeAppEvidence, type AppEvidenceCheck } from "./app-check-evidence.js";
 import { splitAppCriteria, type AppCriterionBinding } from "./app-check-selection.js";
@@ -119,6 +120,19 @@ const includesTestIdentity = (names: readonly string[], target: string): boolean
   const normalizedTarget = target.normalize("NFC");
   return names.some(item => item.normalize("NFC") === normalizedTarget);
 };
+export { plannedTestDirectory, plannedTestDirectoryOnly };
+const profilePathInProject = (profile: import("./behavioral-runner.js").RunnerProfile, path: string): boolean =>
+  profile.adapter?.projectDirectory === undefined || profile.adapter.projectDirectory === "." ||
+  path.startsWith(`${profile.adapter.projectDirectory}/`);
+const inPlannedScope = (path: string, ownedPaths?: readonly string[]): boolean =>
+  (testFilePattern.test(path) || plannedTestDirectory(path)) &&
+  (ownedPaths === undefined || ownedPaths.some(prefix => path === prefix || path.startsWith(`${prefix}/`)));
+function uncoveredCriteria(specification: Specification, strategy: TestStrategy, method: string,
+  testResults: readonly { name: string; passed: boolean }[]): string[] {
+  return specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" &&
+    criterion.verificationMethod === method && !strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.some(name =>
+      testResults.some(result => includesTestIdentity([result.name], name)))).map(criterion => criterion.id);
+}
 
 export class HostVerification {
   private readonly gateReceipts = new Map<string, string>();
@@ -211,11 +225,18 @@ export class HostVerification {
     if (taskId !== undefined && !task) throw new Error("Unknown task");
     const dossier = record(task ? task.spec : run.workflowSpec);
     // Keep the initial trusted task baseline across rework attempts so rejected attempt-1 commits never become the baseline.
-    return { run, specification: SpecificationSchema.parse(dossier.specification), strategy: TestStrategySchema.parse(dossier.strategy), ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: task && Array.isArray(task.worktrees) && task.worktrees.length > 0 ? textField(record(task.worktrees[0]).baseCommitHash) : textField(run.baseRevision) };
+    return { run, specification: SpecificationSchema.parse(dossier.specification), strategy: TestStrategySchema.parse(dossier.strategy), ownedPaths: this.ownedPathsOf(run, taskId),
+      hasTaskWorktree: Boolean(task && Array.isArray(task.worktrees) && task.worktrees.length > 0),
+      originalRevision: task && Array.isArray(task.worktrees) && task.worktrees.length > 0 ? textField(record(task.worktrees[0]).baseCommitHash) : textField(run.baseRevision) };
   }
-  private resolve(input: { specification: Specification; strategy: TestStrategy; ownedPaths?: readonly string[] | undefined; originalRevision?: string }): BoundBehavioralCommand[] {
+  private resolve(input: { specification: Specification; strategy: TestStrategy; ownedPaths?: readonly string[] | undefined; originalRevision?: string;
+    changedPaths?: readonly string[] }): BoundBehavioralCommand[] {
     const rest = this.splitApp(input.specification, input.strategy);
-    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profilesForRevision(input.originalRevision), ...input, specification: rest.specification, strategy: rest.strategy }).map(command => input.originalRevision && command.checkoutDependencyRoots !== undefined ? { ...command, originalRevision: input.originalRevision } : command);
+    const common = { owner: this.runners.owner, profiles: this.runners.profilesForRevision(input.originalRevision), specification: rest.specification,
+      strategy: rest.strategy, ownedPaths: input.ownedPaths };
+    const commands = input.changedPaths === undefined ? resolveTaskCommands(common)
+      : resolveTaskCommands({ ...common, changedPaths: input.changedPaths }).commands;
+    return commands.map(command => input.originalRevision && command.checkoutDependencyRoots !== undefined ? { ...command, originalRevision: input.originalRevision } : command);
   }
   async authenticateGate(result: QualityGateResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateGate(result) : this.gateReceipts.get(result.evaluationId) === digest(result); }
   async authenticateEvidence(result: VerificationResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateEvidence(result) : this.evidenceReceipts.get(result.verificationId) === digest(result); }
@@ -235,6 +256,14 @@ export class HostVerification {
       exitCode = failure.code; output = (failure.stdout ?? "") + (failure.stderr ?? ""); }
     if ((await this.git(cwd, ["rev-parse", "HEAD"])).trim() !== revision || await this.git(cwd, ["status", "--porcelain=v1", "-z"])) throw new Error("Verification revision changed during capture");
     return { cwd, base, revision, command: whitespaceCommand, exitCode, output, diff };
+  }
+  private async observedChangedPaths(cwd: string, base: string, revision: string): Promise<string[]> {
+    await this.capture(cwd, base, revision);
+    const paths = (await this.git(cwd, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=ACMR", "-z", base, revision, "--"]))
+      .split("\0").filter(Boolean);
+    if ((await this.git(cwd, ["rev-parse", "HEAD"])).trim() !== revision || await this.git(cwd, ["status", "--porcelain=v1", "-z"]))
+      throw new Error("Verification revision changed while selecting committed test paths");
+    return paths;
   }
   /**
    * `auto:static` is only a syntax check: `git diff --check`, `node --check` for changed JavaScript and JSON parsing.
@@ -289,6 +318,33 @@ export class HostVerification {
     if (typeof value.output !== "string" || typeof value.diff !== "string" || !Number.isInteger(value.exitCode) || value.command !== whitespaceCommand) throw new Error("Invalid stored host observation");
     return { cwd: textField(value.cwd), base: textField(value.base), revision: textField(value.revision), command: whitespaceCommand,
       exitCode: Number(value.exitCode), output: value.output, diff: value.diff };
+  }
+  /** Criterion summaries are derived only from host captured failed tests, static output or owner app-check results. */
+  private phaseFailureCriteria(specification: Specification, strategy: TestStrategy, measurements: readonly unknown[],
+    appSuites: readonly unknown[] = [], staticAnalyses: readonly unknown[] = [], runnerFailedNames: readonly string[] = []): { criterionId: string; passed: false; summary: string }[] {
+    const failedNames = new Set(measurements.flatMap(value => {
+      const results = record(value).testResults;
+      return Array.isArray(results) ? results.map(record).filter(item => item.passed === false && typeof item.name === "string").map(item => String(item.name)) : [];
+    }));
+    const appFailures = new Map(appSuites.flatMap(value => {
+      const criteria = record(value).criteria;
+      return Array.isArray(criteria) ? criteria.map(record).filter(item => item.passed === false && typeof item.criterionId === "string")
+        .map(item => [String(item.criterionId), typeof item.summary === "string" ? item.summary : "owner app check failed"] as const) : [];
+    }));
+    const staticFailure = staticAnalyses.find(value => record(value).exitCode !== 0);
+    const output: { criterionId: string; passed: false; summary: string }[] = [];
+    for (const criterion of specification.acceptanceCriteria) {
+      if (criterion.required === false || criterion.status === "waived") continue;
+      const mapped = strategy.criterionMappings.find(item => item.criterionId === criterion.id)?.testNames ?? [];
+      const failed = mapped.filter(name => [...failedNames].some(actual => includesTestIdentity([name], actual)) ||
+        runnerFailedNames.some(actual => includesTestIdentity([name], actual)));
+      const app = appFailures.get(criterion.id);
+      const summary = app ?? (failed.length ? `Failed mapped tests: ${failed.join(", ")}` :
+        ["static_analysis", "typecheck"].includes(criterion.verificationMethod) && staticFailure ?
+          `Static analysis failed: ${String(record(staticFailure).output ?? "diagnostic unavailable").slice(0, 300)}` : undefined);
+      if (summary) output.push({ criterionId: criterion.id, passed: false, summary: summary.slice(0, 400) });
+    }
+    return output.slice(0, 32);
   }
   private async artifact(runId: string, taskId: string | undefined, body: unknown, artifactId?: string) {
     const bytes = Buffer.from(JSON.stringify(body)); const id = artifactId ?? `host-observation-${randomUUID()}`;
@@ -381,11 +437,33 @@ export class HostVerification {
       : [];
     if (!specification || !strategy) return [...owner, ...automaticChecks(this.runners.availableProfiles), ...regression];
     const runnerRest = this.splitApp(specification, strategy);
-    const commands = resolveTaskCommands({ owner: [], profiles, specification: runnerRest.specification, strategy: runnerRest.strategy });
-    const boundChecks = automaticChecks(commands).map(check => {
-      const command = commands.find(item => `host-behavioral-${item.id}` === check.id)!;
-      return { ...check, metadata: { ...check.metadata, boundRunnerIdentities: true },
-        configuration: json({ ...record(check.configuration), testNames: command.testNames }) };
+    const selectedProfiles = profiles.filter(profile => runnerRest.strategy.targetCommands.includes(profile.command) &&
+      runnerRest.specification.acceptanceCriteria.some(criterion => criterion.required !== false && criterion.status !== "waived" &&
+        criterion.verificationMethod === profile.method));
+    // Names stay per runner: Runtime later assigns each criterion to the gate whose names cover its mapping, so merging
+    // names across runners would make every runner claim every criterion. Prefer the plan-time binding by declared paths;
+    // a directory-only plan binds nothing, so a runner then owns only criteria it is the single matching runner for.
+    let pathBound: BoundBehavioralCommand[] = [];
+    try { pathBound = resolveTaskCommands({ owner: [], profiles, specification: runnerRest.specification, strategy: runnerRest.strategy }); }
+    catch { pathBound = []; }
+    const plannedDirectories = runnerRest.specification.affectedPaths.filter(plannedTestDirectory);
+    const claimedBy = (profile: RunnerProfile, criterion: Specification["acceptanceCriteria"][number]): boolean => {
+      const matching = selectedProfiles.filter(item => item.method === criterion.verificationMethod &&
+        plannedDirectories.some(path => profilePathInProject(item, path)));
+      return matching.length === 1 && matching[0] === profile;
+    };
+    const boundChecks = automaticChecks(selectedProfiles).map(check => {
+      const profile = selectedProfiles.find(item => `host-behavioral-${item.id}` === check.id)!;
+      const command = pathBound.find(item => `host-behavioral-${item.id}` === check.id);
+      const claimed = command ? [] : runnerRest.specification.acceptanceCriteria.filter(criterion => criterion.required !== false &&
+        criterion.status !== "waived" && criterion.verificationMethod === profile.method && claimedBy(profile, criterion)).map(criterion => criterion.id);
+      const names = command ? command.testNames : runnerRest.strategy.criterionMappings.filter(mapping => claimed.includes(mapping.criterionId))
+        .flatMap(mapping => mapping.testNames);
+      const criterionIds = command ? runnerRest.specification.acceptanceCriteria.filter(criterion => criterion.required !== false &&
+        criterion.status !== "waived" && criterion.verificationMethod === profile.method && runnerRest.strategy.criterionMappings.some(mapping =>
+          mapping.criterionId === criterion.id && mapping.testNames.length > 0 && mapping.testNames.every(name => command.testNames.includes(name)))).map(criterion => criterion.id) : claimed;
+      return { ...check, metadata: { ...check.metadata, boundRunnerIdentities: true, observedDiffIdentity: true },
+        configuration: json({ ...record(check.configuration), criterionIds, testNames: [...new Set(names)] }) };
     });
     const policyChecks = strategy.targetCommands.filter(isAutomaticStaticCommand).map(command => {
       const check = staticAnalysisCheckDefinition(command), method = automaticCheckMethod(command);
@@ -455,6 +533,19 @@ export class HostVerification {
       !(this.runners.automatic && ["typecheck", "static_analysis"].includes(c.verificationMethod)));
     if (!automated.length) return;
     const profiles = this.runners.automatic ? (this.runners.current?.status === "detected" ? this.runners.current.profiles : []) : [];
+    const onlyPlannedDirectory = this.runners.automatic && taskSpec.affectedPaths.some(path => plannedTestDirectory(path) && inPlannedScope(path, ownedPaths)) &&
+      !taskSpec.affectedPaths.some(path => testFilePattern.test(path) && !plannedTestDirectory(path));
+    if (onlyPlannedDirectory) {
+      for (const criterion of automated) {
+        const mapping = strategy.criterionMappings.find(item => item.criterionId === criterion.id);
+        const matched = profiles.filter(profile => strategy.targetCommands.includes(profile.command) && profile.method === criterion.verificationMethod &&
+          taskSpec.affectedPaths.some(path => plannedTestDirectory(path) && inPlannedScope(path, ownedPaths) &&
+            (profile.adapter?.projectDirectory === undefined || profile.adapter.projectDirectory === "." || path.startsWith(`${profile.adapter.projectDirectory}/`))));
+        if (!mapping?.testNames.length || matched.length !== 1) throw new WorkflowProposalRejected({ code: "missing_test_mapping",
+          reason: `Criterion ${criterion.id} needs mapped test names and one runner within its planned owned test directory`, options: [] });
+      }
+      return;
+    }
     let commands: BoundBehavioralCommand[];
     try {
       commands = resolveTaskCommands({
@@ -549,9 +640,9 @@ export class HostVerification {
     }
     const reject = (code: WorkflowRejectionCode, reason: string): never => { throw new WorkflowProposalRejected({ code, reason, options: [] }); };
     const profiles = detection.profiles, labels = [...profiles.map(profile => profile.command), ...AUTOMATIC_STATIC_COMMANDS].join(", ");
-    const testPaths = spec.affectedPaths.filter(path => testFilePattern.test(path));
+    const testPaths = spec.affectedPaths.filter(path => inPlannedScope(path));
     const ids = automated.map(criterion => criterion.id).join(", ");
-    if (!testPaths.length) reject("missing_test_paths", `Automated acceptance criteria (${ids}) need their committed test files listed in specification.affectedPaths. Add the exact test file paths (for example packages/x/test/feature.test.ts) to affectedPaths and propose again.`);
+    if (!testPaths.length) reject("missing_test_paths", `Automated acceptance criteria (${ids}) need planned test files or directories in specification.affectedPaths. Add a test directory or expected test file path and propose again.`);
     if (strategy) this.assertPolicyMethods(strategy, spec, realAppMethods);
     for (const criterion of automated) {
       const candidates = profiles.filter(item => item.method === criterion.verificationMethod);
@@ -560,12 +651,17 @@ export class HostVerification {
       if (!strategy) continue;
       const mapping = strategy.criterionMappings.find(item => item.criterionId === criterion.id);
       if (!mapping?.testNames.length) reject("missing_test_mapping", `Criterion ${criterion.id} has no criterionMappings entry with test names. Set criterionMappings to [{"criterionId":"${criterion.id}","testNames":[...]}] using the exact names the runner reports (vitest: describe titles plus the test title joined by one space; node --test: the test title).`);
+      if (testPaths.some(plannedTestDirectory)) {
+        const matches = candidates.filter(item => strategy.targetCommands.includes(item.command) && testPaths.some(path =>
+          profilePathInProject(item, path)));
+        if (matches.length !== 1) reject("missing_test_mapping", `Criterion ${criterion.id} needs one unambiguous selected runner for its planned test directory`);
+      }
       if (!strategy.targetCommands.includes(profile!.command)) reject("unknown_test_command", `Criterion ${criterion.id} needs ${profile!.command} among the strategy targetCommands. Add {"method":"${profile!.method}","command":"${profile!.command}","level":"${profile!.levels[0]}"} to the specification infrastructure.commands and propose again.`);
     }
     if (strategy) {
       for (const command of strategy.targetCommands) if (!isAutomaticStaticCommand(command) && !profiles.some(profile => profile.command === command)) reject("unknown_test_command", `targetCommands contains '${command}', which is not a detected runner label (${labels}). Use only detected labels, or remove the command, and propose again.`);
       if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
-      try { resolveTaskCommands({ owner: [], profiles, strategy, specification: spec }); }
+      try { if (!testPaths.some(plannedTestDirectory)) resolveTaskCommands({ owner: [], profiles, strategy, specification: spec }); }
       catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("runner_identity_unselectable")) {
@@ -583,8 +679,11 @@ export class HostVerification {
   private automaticGate(runner: AutomaticRunner): QualityGate {
     return this.gate(`host-behavioral-${runner.id}`, async context => {
       const dossier = await this.dossierFor(context.runId, context.taskId);
-      const bound = this.resolve(dossier).find(command => command.command === runner.command);
-      if (!bound) throw new Error(`${runner.command} has no test identities for this task: check criterion mappings, affectedPaths test files and ownership`);
+      const input = record(QualityGateContextSchema.parse(context).input);
+      const changedPaths = dossier.hasTaskWorktree ? await this.observedChangedPaths(textField(input.sourceWorktreePath), dossier.originalRevision,
+        textField(input.sourceRevision)) : undefined;
+      const bound = this.resolve({ ...dossier, ...(changedPaths ? { changedPaths } : {}) }).find(command => command.command === runner.command);
+      if (!bound && !dossier.hasTaskWorktree) throw new TaskBlocker("no_test_identities", `${runner.command} has no test identities for this task: check criterion mappings, affectedPaths test files and ownership`);
       return bound;
     });
   }
@@ -1065,27 +1164,47 @@ export class HostVerification {
       }
     };
   }
-  private gate(id: string, resolveCommand: (context: { runId: string; taskId?: string | undefined }) => Promise<BoundBehavioralCommand>): QualityGate {
+  private gate(id: string, resolveCommand: (context: { runId: string; taskId?: string | undefined }) => Promise<BoundBehavioralCommand | undefined>): QualityGate {
     return { id, evaluate: async raw => {
       try {
         const context = QualityGateContextSchema.parse(raw), config = record(context.definition.configuration), input = record(context.input);
         if (context.definition.id !== id) throw new Error("Behavioral check does not match owner configuration");
         const command = await resolveCommand(context);
+        if (!command) {
+          const dossier = await this.dossierFor(context.runId, context.taskId);
+          const uncovered = dossier.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" &&
+            criterion.verificationMethod === config.method);
+          const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId,
+            evaluationId: randomUUID(), status: "failed", findings: uncovered.map(criterion => QualityFindingSchema.parse({
+              code: "criterion_without_test", severity: "error", message: `Required criterion ${criterion.id} has no committed test in the task diff`,
+              details: { criterionId: criterion.id, fixableBy: "developer", observedNames: [] } })),
+            producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+            metadata: { testSelection: { sourceRevision: input.sourceRevision, baseRevision: dossier.originalRevision, observedTestPaths: [] } } });
+          await this.trustGate(result);
+          return { ok: true, value: result };
+        }
         if (config.command !== command.command || config.method !== command.method ||
             !Array.isArray(config.testNames) || config.testNames.some(name => !includesTestIdentity(command.testNames, String(name)))) throw new Error("Behavioral check does not match owner configuration");
         const measured = await measureBehavior(command, textField(input.sourceWorktreePath), textField(input.sourceRevision));
+        const dossier = command.checkoutDependencyRoots !== undefined ? await this.dossierFor(context.runId, context.taskId) : undefined;
+        const uncovered = dossier ? uncoveredCriteria(dossier.specification, dossier.strategy, command.method, measured.testResults) : [];
+        const findings = uncovered.map(criterionId => QualityFindingSchema.parse({ code: "criterion_without_test", severity: "error",
+          message: `Required criterion ${criterionId} has no executed mapped test in the host runner report`,
+          details: { criterionId, fixableBy: "developer", observedNames: measured.testNames } }));
         const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId, evaluationId: randomUUID(),
-          status: measured.failed ? "failed" : "passed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+          status: measured.failed || uncovered.length ? "failed" : "passed", findings, producedArtifacts: [], evaluatedAt: new Date().toISOString(),
           metadata: { verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
             sourceRevision: measured.sourceRevision, specFingerprint: input.specFingerprint, scope: input.scope, independentExecution: true, isolated: true,
             executorId: "bflow-host-behavioral-check", role: "quality_gate", method: command.method, command: command.command, exitCode: measured.outcome.exitCode,
-            testNames: measured.testNames, criteria: (config.criterionIds as string[]).map(criterionId => ({ criterionId, passed: measured.failed === 0, summary: `${measured.passed}/${measured.tests} observed tests passed` })),
+            testNames: measured.testNames, criteria: (config.criterionIds as string[]).map(criterionId => ({ criterionId, passed: measured.failed === 0 && !uncovered.includes(criterionId), summary: `${measured.passed}/${measured.tests} observed tests passed` })),
             summary: `${measured.passed}/${measured.tests} observed tests passed at ${measured.sourceRevision}` }, hostExecution: json(measured) } });
         await this.trustGate(result);
         return { ok: true, value: result };
       } catch (error) {
-        const details = error instanceof BehavioralMeasurementError ? { diagnostics: error.diagnostics } : undefined;
-        return { ok: false, error: { code: "validation", retryable: false, message: String(error), ...(details ? { details } : {}) } };
+        const blocker = blockerOf(error);
+        const details = { ...(error instanceof BehavioralMeasurementError ? { diagnostics: error.diagnostics } : {}),
+          ...(blocker ? { blocker: { code: blocker.code, fixableBy: blocker.fixableBy, nextAction: blocker.nextAction, details: blocker.details } } : {}) };
+        return { ok: false, error: { code: "validation", retryable: false, message: String(error), ...(Object.keys(details).length ? { details } : {}) } };
       }
     } };
   }
@@ -1128,10 +1247,21 @@ export class HostVerification {
       String(record(task.worktrees[0]).baseCommitHash).trim().length > 0
         ? textField(record(task.worktrees[0]).baseCommitHash)
         : textField(run.baseRevision);
-    const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: taskBase });
+    const diffPaths = this.runners.automatic && Array.isArray(task.worktrees) && task.worktrees.length > 0
+      ? await this.observedChangedPaths(cwd, taskBase, revision) : undefined;
+    // After Red the measured set is frozen: a supplemental test added later must not change the Green/Refactor identities.
+    // A changed, removed or reverted Red file still changes the blobs or names, so the Red comparison below rejects it.
+    const redPaths = new Set(prior.length === 0 ? [] : (Array.isArray(prior[0]!.metadata?.hostBehavioralMeasurements)
+      ? (prior[0]!.metadata!.hostBehavioralMeasurements as unknown[]) : []).flatMap(value => Object.keys(record(record(value).testBlobs))));
+    const changedPaths = diffPaths && redPaths.size > 0 ? diffPaths.filter(path => redPaths.has(path)) : diffPaths;
+    const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: taskBase,
+      ...(changedPaths ? { changedPaths } : {}) });
     // Real-app criteria need no runner command; a runner-verified criterion still does.
     const compilerCriteria = this.runners.automatic ? criteria.filter(criterion => ["typecheck", "static_analysis"].includes(criterion.verificationMethod)) : [];
-    if (criteria.some(criterion => criterion.verificationMethod === "manual_review") || (!commands.length && (criteria.length > 0 || appBindings.length === 0))) throw new Error("This strategy requires independent alternative evidence");
+    const runnerCriteria = criteria.filter(criterion => ["unit_test", "integration_test", "e2e_test"].includes(criterion.verificationMethod));
+    if (criteria.some(criterion => criterion.verificationMethod === "manual_review") ||
+        (!commands.length && (criteria.length > 0 || appBindings.length === 0) && !(this.runners.automatic && runnerCriteria.length)))
+      throw new Error("This strategy requires independent alternative evidence");
     const verificationId = `host-behavioral-${digest([runId, taskId, strategy.tddDecision.decisionId, phase, revision, commands, ...(reviewAssignment ? [reviewAssignment.stamp] : [])])}`;
     const replay = this.receipts ? await this.receipts.getEvidence(verificationId) : this.evidenceRecords.get(verificationId);
     if (replay) {
@@ -1153,12 +1283,13 @@ export class HostVerification {
       if (digest(current) !== digest(captured)) throw new Error("Policy review source changed after inspection");
       const judgments = this.judgments(review.criteria, allCriteria.map(c => c.id));
       if (!judgments.every(c => c.passed)) {
-        const evidence = await this.artifact(runId, taskId, { phase, observation: current, policyReview: reviewAssignment.stamp, criteria: judgments, accepted: false });
+        const evidence = await this.artifact(runId, taskId, { runId, taskId, attemptId: record(assignment.handle).attemptId,
+          sourceRevision: revision, phase, observation: current, policyReview: reviewAssignment.stamp, criteria: judgments, accepted: false });
         throw new HostBehavioralFailure("Independent manual review failed; request repairs", evidence);
       }
       manual = { captured, criteria: judgments };
     }
-    const measured = [];
+    const measured: BehavioralMeasurement[] = [];
     for (const command of commands) {
       try {
         const rtk = await this.rtk?.resolve({ role: binding.role, runId, taskId,
@@ -1172,7 +1303,11 @@ export class HostVerification {
         if (!(error instanceof NodeTapTestCodeFailure) && !(error instanceof RtkRequiredToolUnavailable && error.originalOutcome)) throw error;
         const observation = await this.capture(cwd, taskBase, revision);
         const originalOutcome = error instanceof NodeTapTestCodeFailure ? error.outcome : error.originalOutcome!;
-        const evidence = await this.artifact(runId, taskId, { phase, observation, verifiedBy: binding.agentId, accepted: false,
+        const attemptId = textField(record(assignment.handle).attemptId);
+        const runnerTestCodeFailure = error instanceof NodeTapTestCodeFailure && !(error instanceof RtkRequiredToolUnavailable);
+        const evidence = await this.artifact(runId, taskId, { runId, taskId, attemptId, sourceRevision: revision, phase, observation,
+          criteria: runnerTestCodeFailure ? this.phaseFailureCriteria(spec, strategy, [], [], [], error.failedTestNames) : [],
+          verifiedBy: binding.agentId, accepted: false,
           measurementFailure: { protocol: error instanceof BehavioralIdentityRepair ? error.protocol : error instanceof VitestTestCodeFailure ? "vitest_json" : error instanceof NodeTapTestCodeFailure ? "node_tap" : "rtk_required", summary: error.message,
             outcome: originalOutcome, ...(error instanceof NodeTapTestCodeFailure && error.rtk ? { rtk: error.rtk } : {}),
             ...(error instanceof RtkRequiredToolUnavailable ? { rawOutput: error.rawOutput ?? "", reasonCode: error.reasonCode } : {}) } });
@@ -1183,6 +1318,20 @@ export class HostVerification {
     }
     const observation = await this.capture(cwd, taskBase, revision);
     if (observation.exitCode !== 0) throw new Error("Committed diff integrity check failed");
+    const uncovered = runnerCriteria.filter(criterion => {
+      const mapping = strategy.criterionMappings.find(item => item.criterionId === criterion.id);
+      return !mapping?.testNames.some(name => measured.some(item => item.method === criterion.verificationMethod &&
+        item.testResults.some(result => includesTestIdentity([result.name], name))));
+    });
+    if (uncovered.length) {
+      const findings = uncovered.map(criterion => ({ code: "criterion_without_test", criterionId: criterion.id, fixableBy: "developer" as const }));
+      const evidence = await this.artifact(runId, taskId, { runId, taskId, attemptId: record(assignment.handle).attemptId,
+        sourceRevision: revision, phase, observation, measurements: measured,
+        criteria: uncovered.map(criterion => ({ criterionId: criterion.id, passed: false,
+          summary: "No mapped test was executed by the independent runner" })), findings, verifiedBy: binding.agentId, accepted: false });
+      throw new HostBehavioralFailure(`Required criteria have no executed mapped test: ${uncovered.map(item => item.id).join(", ")}`,
+        evidence);
+    }
     // Real-app criteria are measured on the same committed revision. A blocked prerequisite throws before any evidence is recorded.
     const appSuites: Extract<AppSuiteOutcome, { status: "completed" }>[] = [];
     for (const suite of this.appSuites.filter(item => appBindings.some(binding => binding.suiteId === item.id))) {
@@ -1201,7 +1350,10 @@ export class HostVerification {
     }
     // Red needs a runner assertion failure: an app check can also fail because the app does not start, which proves no target behavior.
     if (phase === "red" ? !measured.some(item => item.targetFailure) : (measured.some(item => item.failed) || appFailed)) {
-      const evidence = await this.artifact(runId, taskId, { phase, observation, measurements: measured, verifiedBy: binding.agentId, accepted: false });
+      const evidence = await this.artifact(runId, taskId, { runId, taskId, attemptId: record(assignment.handle).attemptId, sourceRevision: revision, phase, observation,
+        criteria: this.phaseFailureCriteria(spec, strategy, measured, appSuites),
+        appCheckFindings: appSuites.flatMap(suite => suite.criteria.map(criterion => ({ suiteId: suite.suiteId, criterionId: criterion.criterionId,
+          summary: criterion.summary.slice(0, 400) }))), measurements: measured, verifiedBy: binding.agentId, accepted: false });
       for (const item of measured) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, evidence);
       throw new HostBehavioralFailure(phase === "red" ? "Red requires an independently observed assertion failure" : "Behavioral acceptance failed; request repairs",
         evidence, measured.flatMap(item => (item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.compressedOutput
@@ -1218,7 +1370,8 @@ export class HostVerification {
       staticAnalyses.push({ command, exitCode: analysis.exitCode, output: analysis.output });
     }
     if (staticAnalyses.some(item => item.exitCode !== 0)) {
-      const evidence = await this.artifact(runId, taskId, { phase, observation, measurements: measured, staticAnalyses, verifiedBy: binding.agentId, accepted: false });
+      const evidence = await this.artifact(runId, taskId, { runId, taskId, attemptId: record(assignment.handle).attemptId, sourceRevision: revision, phase, observation,
+        criteria: this.phaseFailureCriteria(spec, strategy, measured, appSuites, staticAnalyses), measurements: measured, staticAnalyses, verifiedBy: binding.agentId, accepted: false });
       for (const item of measured) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, evidence);
       throw new HostBehavioralFailure(`Static analysis failed: ${staticAnalyses.filter(item => item.exitCode !== 0).map(item => `${item.command}: ${item.output}`).join("; ")}`, evidence, []);
     }
@@ -1358,7 +1511,15 @@ export class HostVerification {
     return json({...record(packet),noChangeDisputeProposalAllowed:unchanged&&complete&&hasCandidateGateReceipt(packet),submissionGuidance:"Historical host observations retain their original attempts. They do not replace Reviewer/QA verdicts. A withheld untrusted handover is not missing spec/lease authority. For an unchanged candidate, a complete all-disputed proposal may use status succeeded only when Runtime re-verifies matching independent host evidence; no finding is closed by the Developer. Cite the displayed receipt ID/digest for a disputed missing-evidence claim. A new source commit is not required merely to change revision when noChangeDisputeProposalAllowed is true; use status succeeded to propose independent adjudication, never to claim acceptance. Otherwise report blocked with complete findingResolutions; the host supplies blockage metadata."});
   }
   /** Capture objective revision/diff before the model evaluates it; the returned ID pins later judgment. */
-  private readonly reviews = new Map<string, { binding: PaneBinding; sourceMessageId: string; context: unknown; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();
+  private readonly reviews = new Map<string, {
+    binding: PaneBinding;
+    sourceMessageId: string;
+    context: ReturnType<typeof QualityGateContextSchema.parse>;
+    observation: Awaited<ReturnType<HostVerification["capture"]>>;
+    testIntegrityObservation?: TestIntegrityObservation | undefined;
+    qaBehavioralObservation?: JsonValue | undefined;
+    candidateBehavioralEvidence?: JsonValue | undefined;
+  }>();
   async inspectReview(binding: PaneBinding, input: unknown) {
     if (!["reviewer", "qa", "tester"].includes(binding.role)) throw new Error("Independent verification role required");
     const args = record(input), state = record(await this.runtime().inspect());
@@ -1371,45 +1532,77 @@ export class HostVerification {
     const details = record(context.input), config = record(context.definition.configuration);
     if (config.kind !== "review" || config.role !== binding.role) throw new Error("Review role mismatch");
     const observation = await this.capture(textField(details.sourceWorktreePath), textField(details.baseRevision), textField(details.sourceRevision));
-    let testIntegrityObservation: TestIntegrityObservation | undefined;
-    if (binding.role === "reviewer") {
-      const integrityReport = await this.measureIntegrity(context, observation.cwd, observation.base, observation.revision);
-      const integrityAfter = await this.capture(observation.cwd, observation.base, observation.revision);
-      if (digest(integrityAfter) !== digest(observation)) throw new Error("Review source changed during test integrity capture");
-      if (integrityReport.findings.length) {
-        const evidence = await this.artifact(context.runId, context.taskId, { report: integrityReport }, `test-integrity-${digest([context, integrityReport])}`);
-        testIntegrityObservation = TestIntegrityObservationSchema.parse({ report: integrityReport, evidence });
-        context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostTestIntegrityObservation: json(testIntegrityObservation) } });
-      }
-    }
-    let qaBehavioralObservation: JsonValue | undefined;
-    if (binding.role === "qa" && details.scope === "workflow") {
-      const dossier = await this.dossierFor(context.runId, context.taskId);
-      const age = out.message && typeof record(out.message).occurred_at === "string" ? Math.max(0, Date.now() - Date.parse(textField(record(out.message).occurred_at))) : 0;
-      const commands = boundQaReviewCommands(this.resolve(dossier), Math.min(540_000, context.definition.timeout.executionTimeoutMs - age - 30_000));
-      if (commands.length) {
-        const measurements = [];
-        for (const command of commands) {
-          const rtk = await this.rtk?.resolve({ role: binding.role, runId: context.runId, ...(context.taskId ? { taskId: context.taskId } : {}),
-            ...(typeof out.attemptId === "string" ? { attemptId: out.attemptId } : {}),
-            commandId: command.id, revision: observation.revision });
-          measurements.push(await measureBehavior(command, observation.cwd, observation.revision, rtk ? { rtk } : {}));
-        }
-        const after = await this.capture(observation.cwd, observation.base, observation.revision);
-        if (digest(after) !== digest(observation)) throw new Error("QA source changed during independent measurement");
-        const artifact = await this.artifact(context.runId, context.taskId, { scope: "workflow", sourceRevision: observation.revision, measurements, verifiedBy: binding.agentId });
-        for (const item of measurements) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
-        qaBehavioralObservation = json({ sourceRevision: observation.revision, passed: measurements.every(item => item.failed === 0 && item.outcome.exitCode === 0),
-          evidenceArtifact: artifact, measurements: measurements.map(item => ({ command: item.command, method: item.method, testNames: item.testNames,
-            tests: item.tests, passed: item.passed, failed: item.failed, exitCode: item.outcome.exitCode,
-            ...(item.rtk ? { rtk: item.rtk } : {}) })) });
-        context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostQaBehavioralObservation: qaBehavioralObservation } });
-      }
-    }
     const reworkResolution = this.reworkDossierFor(state, context.runId, context.taskId, context.attemptId);
-    if (reworkResolution) {
-      if (reworkResolution.submittedRevision !== observation.revision) throw new Error("Rework dossier revision mismatch");
-      context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostReworkVerification: reworkVerificationBinding(reworkResolution) } });
+    if (reworkResolution && reworkResolution.submittedRevision !== observation.revision) {
+      throw new Error("Rework dossier revision mismatch");
+    }
+    const sourceMessageId = textField(args.messageId);
+    const cachedEntry = [...this.reviews.entries()].find(([, rev]) =>
+      rev.sourceMessageId === sourceMessageId &&
+      digest(this.bindingIdentity(rev.binding)) === digest(this.bindingIdentity(binding)) &&
+      digest(rev.observation) === digest(observation)
+    );
+    let reviewId: string;
+    let testIntegrityObservation: TestIntegrityObservation | undefined;
+    let qaBehavioralObservation: JsonValue | undefined;
+    let candidateBehavioralEvidence: JsonValue | undefined;
+    if (cachedEntry) {
+      reviewId = cachedEntry[0];
+      context = cachedEntry[1].context;
+      testIntegrityObservation = cachedEntry[1].testIntegrityObservation;
+      qaBehavioralObservation = cachedEntry[1].qaBehavioralObservation;
+      candidateBehavioralEvidence = cachedEntry[1].candidateBehavioralEvidence;
+    } else {
+      if (binding.role === "reviewer") {
+        const integrityReport = await this.measureIntegrity(context, observation.cwd, observation.base, observation.revision);
+        const integrityAfter = await this.capture(observation.cwd, observation.base, observation.revision);
+        if (digest(integrityAfter) !== digest(observation)) throw new Error("Review source changed during test integrity capture");
+        if (integrityReport.findings.length) {
+          const evidence = await this.artifact(context.runId, context.taskId, { report: integrityReport }, `test-integrity-${digest([context, integrityReport])}`);
+          testIntegrityObservation = TestIntegrityObservationSchema.parse({ report: integrityReport, evidence });
+          context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostTestIntegrityObservation: json(testIntegrityObservation) } });
+        }
+      }
+      if (binding.role === "qa" && details.scope === "workflow") {
+        const dossier = await this.dossierFor(context.runId, context.taskId);
+        const age = out.message && typeof record(out.message).occurred_at === "string" ? Math.max(0, Date.now() - Date.parse(textField(record(out.message).occurred_at))) : 0;
+        const commands = boundQaReviewCommands(this.resolve(dossier), Math.min(540_000, context.definition.timeout.executionTimeoutMs - age - 30_000));
+        if (commands.length) {
+          const measurements = [];
+          for (const command of commands) {
+            const rtk = await this.rtk?.resolve({ role: binding.role, runId: context.runId, ...(context.taskId ? { taskId: context.taskId } : {}),
+              ...(typeof out.attemptId === "string" ? { attemptId: out.attemptId } : {}),
+              commandId: command.id, revision: observation.revision });
+            measurements.push(await measureBehavior(command, observation.cwd, observation.revision, rtk ? { rtk } : {}));
+          }
+          const after = await this.capture(observation.cwd, observation.base, observation.revision);
+          if (digest(after) !== digest(observation)) throw new Error("QA source changed during independent measurement");
+          const artifact = await this.artifact(context.runId, context.taskId, { scope: "workflow", sourceRevision: observation.revision, measurements, verifiedBy: binding.agentId });
+          for (const item of measurements) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
+          qaBehavioralObservation = json({ sourceRevision: observation.revision, passed: measurements.every(item => item.failed === 0 && item.outcome.exitCode === 0),
+            evidenceArtifact: artifact, measurements: measurements.map(item => ({ command: item.command, method: item.method, testNames: item.testNames,
+              tests: item.tests, passed: item.passed, failed: item.failed, exitCode: item.outcome.exitCode,
+              ...(item.rtk ? { rtk: item.rtk } : {}) })) });
+          context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostQaBehavioralObservation: qaBehavioralObservation } });
+        }
+      }
+      if (reworkResolution) {
+        context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostReworkVerification: reworkVerificationBinding(reworkResolution) } });
+      }
+      candidateBehavioralEvidence = details.scope === "task" ? await reviewCandidateEvidence({ context, state, store: this.store(),
+        authenticateEvidence: value => this.authenticateEvidence(value), authenticateGate: value => this.authenticateGate(value) }) : undefined;
+      if (candidateBehavioralEvidence) context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostCandidateBehavioralEvidence: candidateBehavioralEvidence } });
+      reviewId = randomUUID();
+      await this.receipts?.putObservation("review", reviewId, { binding, sourceMessageId, context, observation: json(observation) });
+      this.reviews.set(reviewId, {
+        binding,
+        sourceMessageId,
+        context,
+        observation,
+        testIntegrityObservation,
+        qaBehavioralObservation,
+        candidateBehavioralEvidence
+      });
     }
     const gateScope = this.reviewGateScope(state, context, binding.role);
     const reworkScope = reworkResolution
@@ -1424,19 +1617,6 @@ export class HostVerification {
       requiredTestIntegrityFindingIds: [...integrityIds],
       ...(integrityTotal !== integrityIds.length ? { requiredTestIntegrityFindingTotal: integrityTotal } : {})
     });
-    const candidateBehavioralEvidence = details.scope === "task" ? await reviewCandidateEvidence({ context, state, store: this.store(),
-      authenticateEvidence: value => this.authenticateEvidence(value), authenticateGate: value => this.authenticateGate(value) }) : undefined;
-    if (candidateBehavioralEvidence) context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostCandidateBehavioralEvidence: candidateBehavioralEvidence } });
-    const sourceMessageId = textField(args.messageId);
-    const existingReviewId = [...this.reviews.entries()].find(([, rev]) =>
-      rev.sourceMessageId === sourceMessageId &&
-      digest(this.bindingIdentity(rev.binding)) === digest(this.bindingIdentity(binding)) &&
-      digest(rev.context) === digest(context) &&
-      digest(rev.observation) === digest(observation)
-    )?.[0];
-    const reviewId = existingReviewId ?? randomUUID();
-    await this.receipts?.putObservation("review", reviewId, { binding, sourceMessageId, context, observation: json(observation) });
-    this.reviews.set(reviewId, { binding, sourceMessageId, context, observation });
     const fullIntegrityIds = testIntegrityObservation ? testIntegrityObservation.report.findings.map(f => f.id) : [];
     const fullReply = {
       reviewId,
@@ -1461,77 +1641,94 @@ export class HostVerification {
     let maxChars = typeof args.diffLimit === "number" && Number.isInteger(args.diffLimit) && args.diffLimit > 0
       ? Math.min(args.diffLimit, rawDiff.length - diffOffset)
       : Math.min(4500, rawDiff.length - diffOffset);
-    const buildBounded = (chars: number, compactDossier = false) => {
+    const buildBounded = (chars: number, compactDossier = false, compactContinuation = false) => {
       const endOffset = diffOffset + chars;
-      const boundedRework = compactDossier && reworkResolution
-        ? {
-            dossierId: reworkResolution.dossierId,
-            attempt: reworkResolution.attempt,
-            attemptId: reworkResolution.attemptId,
-            reworkGeneration: reworkResolution.reworkGeneration,
-            failedVerificationId: reworkResolution.failedVerificationId,
-            failedRevision: reworkResolution.failedRevision,
-            submittedRevision: reworkResolution.submittedRevision,
-            submissionStatus: reworkResolution.submissionStatus,
-            reworkContext: {
-              findings: reworkResolution.reworkContext.findings.map(f => ({
-                findingId: f.findingId,
-                code: f.code,
-                severity: f.severity,
-                message: f.message.slice(0, 160),
-                ...(f.location ? { location: f.location } : {}),
-                ...(f.criterionId ? { criterionId: f.criterionId } : {})
-              }))
-            },
-            findingResolutions: reworkResolution.findingResolutions.map(r => ({
-              findingId: r.findingId,
-              findingCode: r.findingCode,
-              disposition: r.disposition,
-              rootCause: r.rootCause.slice(0, 180),
-              hypothesisConfirmed: r.hypothesisConfirmed,
-              sourceLocations: r.sourceLocations,
-              repairSummary: r.repairSummary.slice(0, 180),
-              discriminatingCheck: {
-                kind: r.discriminatingCheck.kind,
-                ...(r.discriminatingCheck.target ? { target: r.discriminatingCheck.target.slice(0, 120) } : {}),
-                beforeOutcome: r.discriminatingCheck.beforeOutcome.slice(0, 140),
-                afterOutcome: r.discriminatingCheck.afterOutcome.slice(0, 140)
+      const boundedRework = compactContinuation
+        ? undefined
+        : compactDossier && reworkResolution
+          ? {
+              dossierId: reworkResolution.dossierId,
+              attempt: reworkResolution.attempt,
+              attemptId: reworkResolution.attemptId,
+              reworkGeneration: reworkResolution.reworkGeneration,
+              failedVerificationId: reworkResolution.failedVerificationId,
+              failedRevision: reworkResolution.failedRevision,
+              submittedRevision: reworkResolution.submittedRevision,
+              submissionStatus: reworkResolution.submissionStatus,
+              reworkContext: {
+                findings: reworkResolution.reworkContext.findings.map(f => ({
+                  findingId: f.findingId,
+                  code: f.code,
+                  severity: f.severity,
+                  message: f.message.slice(0, 160),
+                  ...(f.location ? { location: f.location } : {}),
+                  ...(f.criterionId ? { criterionId: f.criterionId } : {})
+                }))
               },
-              evidence: {
-                sourceRevision: r.evidence.sourceRevision,
-                summary: r.evidence.summary.slice(0, 140),
-                artifactId: r.evidence.artifactRef.artifactId
+              findingResolutions: reworkResolution.findingResolutions.map(r => ({
+                findingId: r.findingId,
+                findingCode: r.findingCode,
+                disposition: r.disposition,
+                rootCause: r.rootCause.slice(0, 180),
+                hypothesisConfirmed: r.hypothesisConfirmed,
+                sourceLocations: r.sourceLocations,
+                repairSummary: r.repairSummary.slice(0, 180),
+                discriminatingCheck: {
+                  kind: r.discriminatingCheck.kind,
+                  ...(r.discriminatingCheck.target ? { target: r.discriminatingCheck.target.slice(0, 120) } : {}),
+                  beforeOutcome: r.discriminatingCheck.beforeOutcome.slice(0, 140),
+                  afterOutcome: r.discriminatingCheck.afterOutcome.slice(0, 140)
+                },
+                evidence: {
+                  sourceRevision: r.evidence.sourceRevision,
+                  summary: r.evidence.summary.slice(0, 140),
+                  artifactId: r.evidence.artifactRef.artifactId
+                }
+              })),
+              verificationOutcome: {
+                status: reworkResolution.verificationOutcome.status,
+                openFindingIds: reworkResolution.verificationOutcome.openFindingIds,
+                closedFindingIds: reworkResolution.verificationOutcome.closedFindingIds
               }
-            })),
-            verificationOutcome: {
-              status: reworkResolution.verificationOutcome.status,
-              openFindingIds: reworkResolution.verificationOutcome.openFindingIds,
-              closedFindingIds: reworkResolution.verificationOutcome.closedFindingIds
+            }
+          : reworkResolution;
+      const dossierContext = compactContinuation
+        ? {
+            runId: context.runId,
+            ...(context.taskId ? { taskId: context.taskId } : {}),
+            ...(context.attemptId ? { attemptId: context.attemptId } : {}),
+            definition: { id: context.definition.id, name: context.definition.name },
+            artifacts: [],
+            input: {
+              scope: details.scope,
+              baseRevision: details.baseRevision,
+              sourceRevision: details.sourceRevision
             }
           }
-        : reworkResolution;
-      const dossierContext = compactDossier
-        ? { ...context, artifacts: context.artifacts.map(a => ({ artifactId: a.artifactId, kind: a.kind })) }
-        : context;
+        : compactDossier
+          ? { ...context, artifacts: context.artifacts.map(a => ({ artifactId: a.artifactId, kind: a.kind })) }
+          : context;
       const findingOffset = typeof args.integrityOffset === "number" && Number.isInteger(args.integrityOffset) && args.integrityOffset >= 0 ? args.integrityOffset : 0;
       const pageSize = isAgy ? 1 : 20;
-      const boundedIntegrity = testIntegrityObservation ? { ...testIntegrityObservation,
-        report: { ...testIntegrityObservation.report, findings: testIntegrityObservation.report.findings.slice(findingOffset, findingOffset + pageSize).map(finding => ({
-          ...finding, reason: finding.reason.slice(0, 512), ...(finding.before === undefined ? {} : { before: finding.before.slice(0, 256) }),
-          ...(finding.after === undefined ? {} : { after: finding.after.slice(0, 256) }) })) },
-        displayedExcerptsBounded: true,
-        reportDigest: digest(testIntegrityObservation.report), findingOffset, findingTotal: testIntegrityObservation.report.findings.length,
-        nextFindingOffset: findingOffset + pageSize < testIntegrityObservation.report.findings.length ? findingOffset + pageSize : null } : undefined;
+      const boundedIntegrity = compactContinuation
+        ? undefined
+        : testIntegrityObservation ? { ...testIntegrityObservation,
+            report: { ...testIntegrityObservation.report, findings: testIntegrityObservation.report.findings.slice(findingOffset, findingOffset + pageSize).map(finding => ({
+              ...finding, reason: finding.reason.slice(0, 512), ...(finding.before === undefined ? {} : { before: finding.before.slice(0, 256) }),
+              ...(finding.after === undefined ? {} : { after: finding.after.slice(0, 256) }) })) },
+            displayedExcerptsBounded: true,
+            reportDigest: digest(testIntegrityObservation.report), findingOffset, findingTotal: testIntegrityObservation.report.findings.length,
+            nextFindingOffset: findingOffset + pageSize < testIntegrityObservation.report.findings.length ? findingOffset + pageSize : null } : undefined;
       // The complete observation remains immutable in the receipt journal and ArtifactStore; response pages carry its digest.
-      const boundedContext = testIntegrityObservation ? { ...dossierContext, input: { ...record(context.input),
+      const boundedContext = !compactContinuation && testIntegrityObservation ? { ...dossierContext, input: { ...record(context.input),
         hostTestIntegrityObservation: { evidence: testIntegrityObservation.evidence, reportDigest: digest(testIntegrityObservation.report), findingTotal: testIntegrityObservation.report.findings.length } } } : dossierContext;
       const pageIntegrityIds = boundedIntegrity ? boundedIntegrity.report.findings.map(f => f.id) : [];
       return {
         reviewId,
-        ...(candidateBehavioralEvidence ? { candidateBehavioralEvidence } : {}),
+        ...(!compactContinuation && candidateBehavioralEvidence ? { candidateBehavioralEvidence } : {}),
         reviewRequirements: buildRequirements(pageIntegrityIds, fullIntegrityIds.length),
         ...(boundedIntegrity ? { testIntegrityObservation: boundedIntegrity } : {}),
-        ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}),
+        ...(!compactContinuation && qaBehavioralObservation ? { qaBehavioralObservation } : {}),
         ...(boundedRework ? { reworkResolution: boundedRework } : {}),
         context: boundedContext,
         observation: {
@@ -1544,12 +1741,13 @@ export class HostVerification {
         }
       };
     };
-    let bounded = buildBounded(maxChars, false);
+    const isDiffContinuation = isAgy && diffOffset > 0 && args.integrityOffset === undefined;
+    let bounded = buildBounded(maxChars, false, isDiffContinuation);
     const shouldCompactDossier = isAgy && exceedsAgyInlineReply(bounded) && Boolean(reworkResolution);
-    if (shouldCompactDossier) bounded = buildBounded(maxChars, true);
+    if (shouldCompactDossier) bounded = buildBounded(maxChars, true, isDiffContinuation);
     while (isAgy && maxChars > 512 && exceedsAgyInlineReply(bounded)) {
       maxChars = Math.max(512, Math.floor(maxChars * 0.75));
-      bounded = buildBounded(maxChars, shouldCompactDossier);
+      bounded = buildBounded(maxChars, shouldCompactDossier, isDiffContinuation);
     }
     return json(bounded);
   }

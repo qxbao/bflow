@@ -36,17 +36,22 @@ describe('§4.3 table rows', () => {
     ['sending', agent({ transport: t('idle'), work: [work({ delivery: 'sending' })] }), 'preparing', 'confirmed', 'Đang chờ giao'],
     ['idle no work', agent({ transport: t('idle') }), 'sleeping', 'inferred', 'Rảnh'],
     ['done no work', agent({ transport: t('done') }), 'sleeping', 'inferred', 'Rảnh'],
+    ['starting no work', agent({ transport: t('starting') }), 'preparing', 'confirmed', 'Đang khởi động'],
     ['transport unknown', agent({ transport: t('unknown') }), 'ghost', 'unknown', 'Chưa xác định'],
   ] as const)('%s', (_n, a, pose, certainty, label) => {
     const o = one(a as WebAgentView);
     expect([o.pose, o.certainty, o.statusText]).toEqual([pose, certainty, label]);
   });
 
-  test('pending decision of the agent run raises hand; other run does not', () => {
+  test('pending decision of the agent run raises hand when turn has not started or transport is blocked; active confirmed turn keeps typing', () => {
     const a = agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1', leaseExpiresAt: at(5000) })] });
     expect(one(a, { decisions: [decisionOf('fixture-run')] })).toMatchObject({ pose: 'hand_raised', certainty: 'inferred', statusText: 'Công việc có quyết định đang chờ' });
     expect(one(a, { decisions: [decisionOf('other')] }).pose).not.toBe('hand_raised');
     expect(one(a, { decisions: [decisionOf('fixture-run', 'approved')] }).pose).not.toBe('hand_raised');
+    const activeTurn = agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1', turnSeenAt: at(0), leaseExpiresAt: at(5000) })] });
+    expect(one(activeTurn, { decisions: [decisionOf('fixture-run')] })).toMatchObject({ pose: 'typing', certainty: 'inferred', statusText: 'Có dấu hiệu đang chạy' });
+    const blockedTurn = agent({ transport: t('blocked'), work: [work({ taskId: 'fixture-task-1', turnSeenAt: at(0), leaseExpiresAt: at(5000) })] });
+    expect(one(blockedTurn, { decisions: [decisionOf('fixture-run')] })).toMatchObject({ pose: 'hand_raised', certainty: 'inferred' });
   });
   test('a done agent with only released work does not raise a hand', () => {
     const a = agent({ transport: t('done'), work: [work({ delivery: 'released' })] });

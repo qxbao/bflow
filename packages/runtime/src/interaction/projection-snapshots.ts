@@ -13,7 +13,7 @@ export class ProjectionSnapshots {
     const key = JSON.stringify([path, repository]), cached = this.entries.get(key);
     if (cached?.bytes.equals(bytes)) return cached.state;
     const owned = Buffer.from(bytes);
-    const state = parseAgenticJournalState(JSON.parse(owned.toString("utf8")), repository);
+    const state = parseAgenticJournalState(JSON.parse(owned.toString("utf8")), repository, cached?.state);
     immutable(state);
     this.entries.delete(key);
     this.entries.set(key, { bytes: owned, state });

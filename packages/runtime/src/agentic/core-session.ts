@@ -9,7 +9,7 @@ import { unwrap } from "./outbox.js";
 import { eventTailCursor } from "../recovery.js";
 
 /** Process-local proof of a previously restored or successfully persisted aggregate; never reconstructed from a query projection. */
-export type CoreRestoreCache = Map<string, { snapshot: WorkflowRunSnapshot; engine: AgenticRuntimePorts["engine"]; runStore: AgenticRuntimePorts["runStore"]; definitionDigest: string; checkpointedVersion?: number }>;
+export type CoreRestoreCache = Map<string, { snapshot: WorkflowRunSnapshot; snapshotDigest?: string; engine: AgenticRuntimePorts["engine"]; runStore: AgenticRuntimePorts["runStore"]; definitionDigest: string; checkpointedVersion?: number }>;
 
 /** Core event batches are journaled before SQLite writes. Recovery replays authoritative events. */
 export class CoreSession {
@@ -18,9 +18,12 @@ export class CoreSession {
   private remember(snapshot: WorkflowRunSnapshot, checkpointedVersion?: number): void {
     const run = this.state.runs.find(item => item.runId === snapshot.runId);
     const priorCheckpointedVersion = checkpointedVersion ?? this.restored.get(snapshot.runId)?.checkpointedVersion;
-    if (run?.definition) this.restored.set(snapshot.runId, { snapshot: WorkflowRunSnapshotSchema.parse(snapshot),
-      engine: this.ports.engine, runStore: this.ports.runStore, definitionDigest: digest(run.definition),
-      ...(priorCheckpointedVersion !== undefined ? { checkpointedVersion: priorCheckpointedVersion } : {}) });
+    if (run?.definition) {
+      const parsed = WorkflowRunSnapshotSchema.parse(snapshot);
+      this.restored.set(snapshot.runId, { snapshot: parsed, snapshotDigest: digest(parsed),
+        engine: this.ports.engine, runStore: this.ports.runStore, definitionDigest: digest(run.definition),
+        ...(priorCheckpointedVersion !== undefined ? { checkpointedVersion: priorCheckpointedVersion } : {}) });
+    }
   }
   async flush(): Promise<void> {
     while (this.state.pendingCore.length) {
@@ -56,10 +59,16 @@ export class CoreSession {
       runId: run.runId, definition: run.definition, createdAt: run.delegation.requestedAt,
       idempotencyKey: `p19-create:${run.runId}`
     }));
-    const stored = StoredRunSchema.parse(rawStored), cached = this.restored.get(run.runId);
+    const cached = this.restored.get(run.runId);
+    if (memory && cached?.engine === this.ports.engine && cached.runStore === this.ports.runStore && cached.snapshotDigest !== undefined) {
+      const rawRecord = rawStored !== null && typeof rawStored === "object" ? (rawStored as Record<string, unknown>) : undefined;
+      if (rawRecord && cached.definitionDigest === digest(run.definition) && cached.definitionDigest === digest(rawRecord.definition) &&
+          cached.snapshotDigest === digest(memory) && cached.snapshotDigest === digest(rawRecord.snapshot)) return;
+    }
+    const stored = StoredRunSchema.parse(rawStored);
     if (memory && cached?.engine === this.ports.engine && cached.runStore === this.ports.runStore &&
         cached.definitionDigest === digest(run.definition) && cached.definitionDigest === digest(stored.definition) &&
-        digest(WorkflowRunSnapshotSchema.parse(memory)) === digest(cached.snapshot) &&
+        digest(WorkflowRunSnapshotSchema.parse(memory)) === (cached.snapshotDigest ?? digest(cached.snapshot)) &&
         digest(memory) === digest(stored.snapshot)) return;
     // Invalidate before recovery: a failed decode, failed append, changed port or divergent engine cannot retain reuse authority.
     this.restored.delete(run.runId);

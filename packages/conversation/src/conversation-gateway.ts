@@ -367,7 +367,10 @@ export class ConversationGateway {
     }
     // Native turn arbitration remains the existing Gateway boundary. Ordinary native
     // arrivals queue while this deterministic admission is active; model busy alone
-    // does not block forms. An already active native mutation wins this race.
+    // does not block forms. Wait briefly if a background queue flush or turn is just finishing.
+    for (let attempt = 0; (this.isProcessingTurn || this.isFlushingQueue) && attempt < 10; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
     if (this.isProcessingTurn || this.isFlushingQueue) return fail("conflict", "Conversation admission is already processing another turn");
     this.isProcessingTurn = true;
     try {
@@ -1031,9 +1034,13 @@ export class ConversationGateway {
           const msgValidation = this.validateConversationMessages(userMsg, agentReply);
           if (!msgValidation.ok) return msgValidation;
 
+          const cleanDraftInput = input.content
+            .replace(/<\/?pasted_content\b[^>]*>/gi, "")
+            .replace(/^\s*\[bflow-web:[^\s\]\r\n]*\]?\s*/i, "")
+            .trim() || input.content;
           const draft: ExtractedRequirementDraft = classification.requirementDraft ?? {
-            title: input.content.slice(0, 60),
-            objective: input.content,
+            title: cleanDraftInput.slice(0, 60),
+            objective: cleanDraftInput,
             kind: "feature",
             sddLevel: "lightweight",
             priority: "normal",

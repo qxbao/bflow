@@ -211,7 +211,15 @@ export class HostReceiptJournal {
   readonly directory: string;
   readonly repository: string;
   private readonly activityLog: { record(input: TaskActivityInput): Promise<boolean> };
+  private static readonly directoryNamesCache = new Map<string, { ino: number; mtimeMs: number; ctimeMs: number; size: number; names: ReadonlySet<string> }>();
   private readonly noticeCache = new Map<string, ConversationNotice>();
+  private readonly receiptCache = new Map<string, { mtimeMs: number; size: number; ino: number; id: string; payload: JsonValue }>();
+  private readonly settledNativeIntentIds = new Set<string>();
+  private readonly settledSpecialistStopIds = new Set<string>();
+  private readonly settledProviderErrorSignalIds = new Set<string>();
+  private readonly settledProviderFailureIds = new Set<string>();
+  private directoryPrepared = false;
+  private lastDirectoryStat?: { ino: number; mtimeMs: number; ctimeMs: number; size: number };
   private noticeAppends: Promise<unknown> = Promise.resolve();
   constructor(
     directory: string,
@@ -227,10 +235,18 @@ export class HostReceiptJournal {
     );
   }
   private async prepare(): Promise<void> {
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    if (!this.directoryPrepared) {
+      await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    }
     const stat = await lstat(this.directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.())
       throw new Error("Unsafe host receipt directory");
+    this.directoryPrepared = true;
+    this.lastDirectoryStat = { ino: stat.ino, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, size: stat.size };
+    const cached = HostReceiptJournal.directoryNamesCache.get(this.directory);
+    if (cached && (cached.ino !== stat.ino || cached.mtimeMs !== stat.mtimeMs || cached.ctimeMs !== stat.ctimeMs || cached.size !== stat.size)) {
+      HostReceiptJournal.directoryNamesCache.delete(this.directory);
+    }
   }
   private filename(kind: Kind, id: string): string { return `${kind}-${digest(textField(id))}.json`; }
   private parsePayload(kind: Kind, input: unknown): JsonValue {
@@ -375,15 +391,38 @@ export class HostReceiptJournal {
       let stat;
       try { stat = await lstat(this.directory); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
       if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()) throw new Error("Unsafe host receipt directory");
+      this.lastDirectoryStat = { ino: stat.ino, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, size: stat.size };
+      const cachedDir = HostReceiptJournal.directoryNamesCache.get(this.directory);
+      if (cachedDir && (cachedDir.ino !== stat.ino || cachedDir.mtimeMs !== stat.mtimeMs || cachedDir.ctimeMs !== stat.ctimeMs || cachedDir.size !== stat.size)) {
+        HostReceiptJournal.directoryNamesCache.delete(this.directory);
+      }
+    }
+    const name = this.filename(kind, id);
+    const cachedDir = HostReceiptJournal.directoryNamesCache.get(this.directory);
+    if (cachedDir) {
+      if (!cachedDir.names.has(name)) {
+        this.receiptCache.delete(name);
+        return undefined;
+      }
+      const cachedFast = this.receiptCache.get(name);
+      if (cachedFast && cachedFast.id === id) {
+        return json(cachedFast.payload);
+      }
     }
     let file;
-    try { file = await open(join(this.directory, this.filename(kind, id)), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    try { file = await open(join(this.directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { this.receiptCache.delete(name); return undefined; } throw error; }
     try {
       const stat = await file.stat();
       if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.() || stat.size > 16 * 1024 * 1024)
         throw new Error("Unsafe host receipt file");
-      return this.validate(JSON.parse(await file.readFile("utf8")), kind, id).payload;
+      const cached = this.receiptCache.get(name);
+      if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size && cached.ino === stat.ino && cached.id === id) {
+        return json(cached.payload);
+      }
+      const payload = this.validate(JSON.parse(await file.readFile("utf8")), kind, id).payload;
+      this.receiptCache.set(name, { mtimeMs: stat.mtimeMs, size: stat.size, ino: stat.ino, id, payload });
+      return json(payload);
     } finally { await file.close(); }
   }
   private async write(kind: Kind, id: string, input: unknown): Promise<boolean> {
@@ -402,8 +441,9 @@ export class HostReceiptJournal {
     } finally { await file.close(); }
     let created = true;
     try {
-      try { await link(path, join(this.directory, this.filename(kind, id))); }
+      try { await link(path, join(this.directory, this.filename(kind, id))); HostReceiptJournal.directoryNamesCache.delete(this.directory); }
       catch (error) {
+        HostReceiptJournal.directoryNamesCache.delete(this.directory);
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         created = false;
         if (digest(await this.read(kind, id)) !== digest(payload)) throw new Error("Conflicting immutable host receipt");
@@ -437,13 +477,17 @@ export class HostReceiptJournal {
   async pendingProviderErrorSignals() {
     const result = [];
     for (const id of await this.receiptIds("provider-error-signal")) {
-      if (await this.read("provider-error-signal-handled", id)) continue;
+      if (this.settledProviderErrorSignalIds.has(id)) continue;
+      if (await this.read("provider-error-signal-handled", id)) {
+        this.settledProviderErrorSignalIds.add(id);
+        continue;
+      }
       const value = record(await this.read("provider-error-signal", id));
       result.push({ id, binding: PaneBindingSchema.parse(value.binding), event: ProviderNativeFailureEventSchema.parse(value.event), observedAt: textField(value.observedAt) });
     }
     return result;
   }
-  async completeProviderErrorSignal(id: string) { await this.write("provider-error-signal-handled", id, { id }); }
+  async completeProviderErrorSignal(id: string) { await this.write("provider-error-signal-handled", id, { id }); this.settledProviderErrorSignalIds.add(id); }
   async authenticateProviderFailure(binding: PaneBinding, failure: ProviderFailureObservation): Promise<boolean> {
     const id = digest([binding.bindingId, failure.executionId, failure.evidenceDigest]);
     const value = await this.read("provider-failure", id);
@@ -452,13 +496,17 @@ export class HostReceiptJournal {
   async pendingProviderFailures() {
     const result: { id: string; binding: PaneBinding; failure: ProviderFailureObservation }[] = [];
     for (const id of await this.receiptIds("provider-failure")) {
-      if (await this.read("provider-failure-handled", id)) continue;
+      if (this.settledProviderFailureIds.has(id)) continue;
+      if (await this.read("provider-failure-handled", id)) {
+        this.settledProviderFailureIds.add(id);
+        continue;
+      }
       const value = record(await this.read("provider-failure", id));
       result.push({ id, binding: PaneBindingSchema.parse(value.binding), failure: ProviderFailureObservationSchema.parse(value.failure) });
     }
     return result;
   }
-  async completeProviderFailure(id: string) { await this.write("provider-failure-handled", id, { id }); }
+  async completeProviderFailure(id: string) { await this.write("provider-failure-handled", id, { id }); this.settledProviderFailureIds.add(id); }
   private bindingIdentity(binding: PaneBinding): string { return digest({ ...binding, transportState: undefined, lastHeartbeatAt: undefined }); }
   private legacyBindingIdentity(binding: PaneBinding): string { return digest({ ...binding, transportState: undefined }); }
   private isExpectedAgyTurnReceiptId(binding: PaneBinding, launchId: unknown, anchor: unknown, id: string): boolean {
@@ -474,15 +522,42 @@ export class HostReceiptJournal {
     await this.prepare();
     // Kinds can share a prefix, e.g. coordinator-stop and coordinator-stop-handled.
     const pattern = new RegExp(`^${kind}-[a-f0-9]{64}\\.json$`);
-    return (await readdir(this.directory)).filter(name => pattern.test(name));
+    const cached = HostReceiptJournal.directoryNamesCache.get(this.directory);
+    if (cached) {
+      return [...cached.names].filter(name => pattern.test(name));
+    }
+    const entries = await readdir(this.directory);
+    if (entries.length > 32 && this.lastDirectoryStat) {
+      HostReceiptJournal.directoryNamesCache.set(this.directory, {
+        ...this.lastDirectoryStat,
+        names: new Set(entries)
+      });
+    }
+    return entries.filter(name => pattern.test(name));
   }
   private async receiptId(kind: Kind, name: string): Promise<string> {
+    const cachedDir = HostReceiptJournal.directoryNamesCache.get(this.directory);
+    if (cachedDir) {
+      const cachedFast = this.receiptCache.get(name);
+      if (cachedFast && name === this.filename(kind, cachedFast.id)) return cachedFast.id;
+    }
     const file = await open(join(this.directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     let id: string;
-    try { const stat = await file.stat(); if (!stat.isFile() || stat.size > 16 * 1024 * 1024) throw new Error("Unsafe host receipt file");
-      id = textField(record(JSON.parse(await file.readFile("utf8"))).id); } finally { await file.close(); }
+    let stat;
+    let raw: unknown;
+    try {
+      stat = await file.stat();
+      if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.() || stat.size > 16 * 1024 * 1024) throw new Error("Unsafe host receipt file");
+      const cached = this.receiptCache.get(name);
+      if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size && cached.ino === stat.ino && name === this.filename(kind, cached.id)) {
+        return cached.id;
+      }
+      raw = JSON.parse(await file.readFile("utf8"));
+      id = textField(record(raw).id);
+    } finally { await file.close(); }
     if (name !== this.filename(kind, id)) throw new Error("Host receipt filename identity mismatch");
-    await this.read(kind, id);
+    const payload = this.validate(raw, kind, id).payload;
+    this.receiptCache.set(name, { mtimeMs: stat.mtimeMs, size: stat.size, ino: stat.ino, id, payload });
     return id;
   }
   private async coordinatorStarts(): Promise<CoordinatorTurnObservation[]> {
@@ -562,7 +637,11 @@ export class HostReceiptJournal {
   async pendingSpecialistStops(): Promise<{ stopId: string; binding: PaneBinding; observedAt: string; sourceMessageId?: string }[]> {
     const pending: { stopId: string; binding: PaneBinding; observedAt: string; sourceMessageId?: string }[] = [];
     for (const id of await this.receiptIds("specialist-stop")) {
-      if (await this.read("specialist-settled", id) !== undefined) continue;
+      if (this.settledSpecialistStopIds.has(id)) continue;
+      if (await this.read("specialist-settled", id) !== undefined) {
+        this.settledSpecialistStopIds.add(id);
+        continue;
+      }
       const raw = record(await this.read("specialist-stop", id));
       pending.push({ stopId: id, binding: PaneBindingSchema.parse(raw.binding), observedAt: textField(raw.observedAt),
         ...(raw.sourceMessageId === undefined ? {} : { sourceMessageId: textField(raw.sourceMessageId) }) });
@@ -571,6 +650,7 @@ export class HostReceiptJournal {
   }
   async completeSpecialistStop(stopId: string): Promise<void> {
     await this.write("specialist-settled", stopId, { stopId });
+    this.settledSpecialistStopIds.add(stopId);
   }
   async recordAgyAdmission(bindingInput: PaneBinding, launchId: string, messageInput: RoleMessage, envelopeDigest: string): Promise<{ admissionId: string; duplicate: boolean }> {
     return this.serializeAgy(async () => {
@@ -759,8 +839,18 @@ export class HostReceiptJournal {
   async unacknowledgedNativeDeliveries(): Promise<{ operationId: string; message: RoleMessage }[]> {
     const uncertain: { operationId: string; message: RoleMessage }[] = [];
     for (const operationId of await this.receiptIds("native-intent")) {
+      if (this.settledNativeIntentIds.has(operationId)) continue;
       const delivery = await this.nativeDelivery(operationId);
-      if (delivery?.status === "unknown_delivery" && !await this.nativeRejection(delivery.message.message_id)) uncertain.push({ operationId, message: delivery.message });
+      if (!delivery) continue;
+      if (delivery.status === "acknowledged") {
+        this.settledNativeIntentIds.add(operationId);
+        continue;
+      }
+      if (await this.nativeRejection(delivery.message.message_id)) {
+        this.settledNativeIntentIds.add(operationId);
+        continue;
+      }
+      uncertain.push({ operationId, message: delivery.message });
     }
     return uncertain;
   }
@@ -1206,11 +1296,12 @@ export class HostReceiptJournal {
   /** Notices not yet shown to the model, oldest first. A surfaced marker is a separate immutable receipt. */
   async unsurfacedConversationNotices(): Promise<ConversationNotice[]> {
     const notices: ConversationNotice[] = [];
-    for (const id of await this.receiptIds("conversation-notice")) {
+    for (const notice of await this.allConversationNotices()) {
+      const id = notice.messageId;
       if (await this.read("notice-surfaced", this.epochKey(id, await this.noticeEpoch(id))) !== undefined) continue;
-      notices.push(ConversationNoticeSchema.parse(await this.read("conversation-notice", id)));
+      notices.push(notice);
     }
-    return notices.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt) || a.messageId.localeCompare(b.messageId));
+    return notices;
   }
   /** Idempotent: a second call for the same notice keeps the first surfacing time. */
   async markConversationNoticesSurfaced(messageIds: readonly string[]): Promise<void> {
@@ -1226,11 +1317,11 @@ export class HostReceiptJournal {
    */
   async undisplayedUserFacingNotices(): Promise<(ConversationNotice & { surfacedAt: string; reblocks: number })[]> {
     const values: (ConversationNotice & { surfacedAt: string; reblocks: number })[] = [];
-    for (const id of await this.receiptIds("conversation-notice")) {
+    for (const notice of await this.allConversationNotices()) {
+      if (renderConversationNotice(notice).ackToken === undefined) continue;
+      const id = notice.messageId;
       const surfaced = await this.read("notice-surfaced", this.epochKey(id, await this.noticeEpoch(id)));
       if (surfaced === undefined || await this.read("notice-displayed", id) !== undefined) continue;
-      const notice = ConversationNoticeSchema.parse(await this.read("conversation-notice", id));
-      if (renderConversationNotice(notice).ackToken === undefined) continue;
       const surfacedAt = NoticeSurfacedSchema.parse(surfaced).surfacedAt ?? notice.receivedAt;
       values.push({ ...notice, surfacedAt, reblocks: await this.noticeReblockCount(id) });
     }
@@ -1258,10 +1349,10 @@ export class HostReceiptJournal {
   /** Display state of every user-decision notice, oldest wait first. Read-only. */
   async conversationNoticeStates(): Promise<ConversationNoticeState[]> {
     const states: ConversationNoticeState[] = [];
-    for (const id of await this.receiptIds("conversation-notice")) {
-      const notice = ConversationNoticeSchema.parse(await this.read("conversation-notice", id));
+    for (const notice of await this.allConversationNotices()) {
       const rendered = renderConversationNotice(notice);
       if (rendered.kind !== "user_decision") continue;
+      const id = notice.messageId;
       const resends = await this.noticeEpoch(id), key = this.epochKey(id, resends);
       const surfaced = await this.read("notice-surfaced", key), displayed = await this.read("notice-displayed", id) !== undefined;
       const resurfacedAt = resends === 0 ? undefined : NoticeResurfacedSchema.parse(await this.read("notice-resurfaced", key)).resurfacedAt;

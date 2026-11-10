@@ -23,7 +23,6 @@ function humanizeCheck(check:WebProjectInspection['checks'][number]):{title:stri
 
 export function Settings({api,project,refresh=()=>{}}:{api:ApiClient;project:WebProject;refresh?:()=>void}) {
  const navigate=useNavigate(),id=project.projectId;
- const build=document.querySelector<HTMLMetaElement>('meta[name="bflow-build"]')?.content;
  const key=`bflow:init:${id}`;
  const [inspection,setInspection]=useState<WebProjectInspection>(),[inspecting,setInspecting]=useState(false),[error,setError]=useState<unknown>(),[busy,setBusy]=useState(false),[license,setLicense]=useState(false),[update,setUpdate]=useState(false),[provider,setProvider]=useState(''),[skipGitNexus,setSkipGitNexus]=useState(false),[job,setJob]=useState<WebProjectInitialization>(),[operationId,setOperationId]=useState(()=>localStorage.getItem(key)??''),[confirmRemove,setConfirmRemove]=useState(false),[configRevision,setConfigRevision]=useState(0),[pollAttempt,setPollAttempt]=useState(0),[configDirty,setConfigDirty]=useState(false),[configFileRevision,setConfigFileRevision]=useState(''),[commitConfiguration,setCommitConfiguration]=useState(false);
  const refreshRef=useRef(refresh);refreshRef.current=refresh;
@@ -80,8 +79,8 @@ export function Settings({api,project,refresh=()=>{}}:{api:ApiClient;project:Web
  }
  async function unregister(){if(busy||running)return;setBusy(true);setError(undefined);try{await api.unregister(id);refresh();navigate('/');}catch(e){setError(e);}finally{setBusy(false);}}
  const failedChecks=inspection?.checks.filter(c=>c.state==='failed')??[],advisoryChecks=inspection?.checks.filter(c=>c.state==='warning'||c.state==='unsupported')??[],passedChecks=inspection?.checks.filter(c=>c.state==='passed')??[];
- return <><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Thông tin trên máy này</div><h1 data-component="Settings">Cài đặt dự án</h1>{build && /^[a-f0-9]{64}$/.test(build) && <p className="font-data text-xs text-muted" title={build}>Bản Web: {build.slice(0,12)}</p>}
- <nav aria-label="Các phần cài đặt" className="my-3 flex flex-wrap gap-x-5 gap-y-2 border-b border-line pb-2.5 font-data text-sm"><a href="#settings-readiness">Kiểm tra trước khi bắt đầu</a><a href="#settings-configuration">Cấu hình</a><a href="#settings-initialize">Khởi tạo</a><a href="#settings-remove" className="text-danger">Hủy đăng ký</a></nav>
+ return <><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Thông tin trên máy này</div><h1 data-component="Settings">Cài đặt dự án</h1>
+ <nav aria-label="Các phần cài đặt" className="settings-section-tabs my-3 flex flex-wrap gap-x-5 gap-y-2 border-b border-line pb-2.5 font-data text-sm"><a href="#settings-readiness">Kiểm tra trước khi bắt đầu</a><a href="#settings-configuration">Cấu hình</a><a href="#settings-initialize">Khởi tạo</a><a href="#settings-remove" className="text-danger">Hủy đăng ký</a></nav>
  {Boolean(error) && <p role="alert" className="my-3 border border-danger border-l-3 bg-surface p-3 text-sm">{explain(error)}</p>}
 
  <section id="settings-readiness" className="panel my-4 min-w-0 border border-line bg-surface p-3.5 sm:p-4">

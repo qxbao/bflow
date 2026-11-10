@@ -278,9 +278,9 @@ describe('app: the queue board opens the shared Classic panel, read-only until t
     await within(region).findByRole('button', { name: /^Director: Đang hoạt động/ });
     await waitFor(() => expect((screen.getByLabelText('Trò chuyện với Bflow') as HTMLInputElement).disabled).toBe(false));
     fireEvent.click(await within(region).findByRole('button', { name: 'Bảng sự cố (1 đang mở)' }));
-    const main = document.getElementById('main')!;
-    await waitFor(() => expect(main.querySelector('[data-component="IssueQueue"]')).not.toBeNull());
-    await within(main).findByText('Kiểm chứng không đạt sau 3 lượt');
+    const queue=await screen.findByRole('dialog',{name:'Sự cố'});
+    await waitFor(() => expect(queue.querySelector('[data-component="IssueQueue"]')).not.toBeNull());
+    await within(queue).findByText('Kiểm chứng không đạt sau 3 lượt');
     expect(server.state.posts).toEqual([]);
     expect(server.fetcher.mock.calls.filter(c => (c[1] as RequestInit | undefined)?.method === 'POST')).toEqual([]);
   });
@@ -288,10 +288,11 @@ describe('app: the queue board opens the shared Classic panel, read-only until t
     mountApp([]);
     const region = await screen.findByRole('region', { name: 'Bản văn bản của văn phòng' });
     fireEvent.click(await within(region).findByRole('button', { name: /^Director: Đang hoạt động/ }));
+    const director=await screen.findByRole('dialog',{name:'Director'});
     const main = document.getElementById('main')!;
-    await within(main).findByRole('heading', { name: 'Bàn Director' });
-    expect(within(main).getAllByText('Director đang hoạt động').length).toBeGreaterThan(0);
-    fireEvent.click(within(main).getByRole('button', { name: 'Mở trò chuyện với Director' }));
+    await within(director).findByRole('heading', { name: 'Bàn Director' });
+    expect(within(director).getAllByText('Director đang hoạt động').length).toBeGreaterThan(0);
+    fireEvent.click(within(director).getByRole('button', { name: 'Mở trò chuyện với Director' }));
     await waitFor(() => expect(main.querySelector('[data-component="DirectorChat"]')).not.toBeNull());
   });
 });

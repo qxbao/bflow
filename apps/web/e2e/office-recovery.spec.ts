@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { startAcceptanceHost, type AcceptanceHost } from './acceptance-fixture';
-import { browserOptions, enterVisual, mirror, openDock, recordWebGl, sceneReady, stableCount, workforceBody } from './office-fixture';
+import { browserOptions, closeDecisionReviewIfOpen, enterVisual, mirror, openDock, recordWebGl, sceneReady, stableCount, workforceBody } from './office-fixture';
 // V8.3: the W09 recovery scenarios of recovery.spec.ts through the 3D mode (same deterministic host, assertions on host-side effect logs),
 // plus the §8.3 browser/fault rows: uncertain delivery, lost WebGL context, expired session, a full developer pool and repeated mode switching.
 test.use(browserOptions());
@@ -42,15 +42,15 @@ test('3D AC08 response lost after commit, Local Server restart mid-operation and
   await openDecision(page);await page.getByRole('button', { name: 'Xem xét gói' }).click(); await page.getByRole('button', { name: 'Duyệt gói' }).click();
   await expect.poll(() => dropped).toBe(1);
   await expect.poll(async () => (await host.call('inspect')).effects.filter((k: string) => k === 'answer_decision').length).toBe(1);
-  await page.getByRole('button', { name: 'Quay lại công việc' }).click();
+  await closeDecisionReviewIfOpen(page);
   await openDock(page);
-  await expect(page.getByText(/Mất phản hồi|Chưa xác định kết quả|Đã áp dụng thao tác/).first()).toBeVisible();
+  await expect(page.getByRole('dialog',{name:'Thao tác đã gửi'}).getByText(/Mất phản hồi|Chưa xác định kết quả|Đã áp dụng thao tác/).first()).toBeVisible();
   await page.reload();
   // The reload keeps 3D and rebuilds the scene; the dock (HUD) recovers the operation by its stored ID without a second POST.
   await expect(page.getByRole('button', { name: '3D', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await sceneReady(page);
   await openDock(page);
-  await expect(page.getByText('Đã áp dụng thao tác. Trạng thái công việc được đọc riêng.').first()).toBeVisible({ timeout: 15000 });
+  await expect(page.getByRole('dialog',{name:'Thao tác đã gửi'}).getByText('Đã áp dụng thao tác. Trạng thái công việc được đọc riêng.').first()).toBeVisible({ timeout: 15000 });
   await stableCount(async () => (await host.call('inspect')).effects.filter((k: string) => k === 'answer_decision').length, 1);
   let state = await host.call('inspect');
   expect(state.effects.filter((k: string) => k === 'answer_decision')).toHaveLength(1);
@@ -96,11 +96,14 @@ test('3D AC08/AC05 two tabs with conflicting decisions commit exactly one; the o
   expect(state.effects).toEqual(['answer_decision']);
   expect(state.commands.map((c: any) => c.outcome)).toHaveLength(1);
   const winner = state.decisionOutcome === 'approved' ? a : b, loser = winner === a ? b : a;
-  for (const tab of [a,b]) if (await tab.getByRole('button',{name:'Quay lại công việc'}).isVisible().catch(()=>false)) await tab.getByRole('button',{name:'Quay lại công việc'}).click();
+  for (const tab of [a,b]) await closeDecisionReviewIfOpen(tab);
   await openDock(winner); await openDock(loser);
-  await expect(winner.getByText(/Đã áp dụng thao tác|Mất phản hồi/).first()).toBeVisible();
-  await expect(winner.getByText(`Quyết định gói: ${state.decisionOutcome === 'approved' ? 'Duyệt' : 'Từ chối'}`).first()).toBeVisible();
-  await expect(loser.getByText(/chưa được gửi|không được áp dụng/).first()).toBeVisible({ timeout: 10000 });
+  const winnerOperations=winner.getByRole('dialog',{name:'Thao tác đã gửi'}),loserOperations=loser.getByRole('dialog',{name:'Thao tác đã gửi'});
+  await expect(winnerOperations.getByText(/Đã áp dụng thao tác|Mất phản hồi/).first()).toBeVisible();
+  await expect(winnerOperations.getByText(`Quyết định gói: ${state.decisionOutcome === 'approved' ? 'Duyệt' : 'Từ chối'}`).first()).toBeVisible();
+  // Both tabs read the same durable host operation; the host has exactly one command and one outcome.
+  await expect(loserOperations.getByText(`Quyết định gói: ${state.decisionOutcome === 'approved' ? 'Duyệt' : 'Từ chối'}`).first()).toBeVisible();
+  expect(state.commands.map((command:any)=>command.outcome)).toEqual([state.decisionOutcome]);
   await context.close();
 });
 
@@ -137,7 +140,7 @@ test('3D unknown_delivery shows a "chưa xác định" label and offers no resen
   await expect(mirrorAgent).not.toContainText('Chưa xác định việc đã tới');
   // The next read reports an uncertain delivery.
   state = 'unknown_delivery';
-  await page.getByRole('button', { name: 'Tải lại dữ liệu' }).click();
+  await page.getByRole('navigation',{name:'Thanh tác vụ'}).getByRole('button', { name: 'Tải lại dữ liệu' }).click();
   await expect(mirrorAgent).toContainText('Chưa xác định việc đã tới');
   await expect(mirrorAgent).toContainText('Mức tin cậy: Chưa xác định');
   await expect(page.getByLabel('Trạng thái văn phòng')).toContainText('chưa rõ');
@@ -208,15 +211,15 @@ test('3D shows exactly the seated developers plus an overflow chip, without cras
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-renderer', 'ready');
   // Twenty-three: still twenty seats, and the chip names the three left out.
   developers = 23;
-  await page.getByRole('button', { name: 'Tải lại dữ liệu' }).click();
+  await page.getByRole('navigation',{name:'Thanh tác vụ'}).getByRole('button', { name: 'Tải lại dữ liệu' }).click();
   await expect(mirrorDevs()).toHaveCount(23);
   const chip = page.getByRole('button', { name: 'Còn 3 lập trình viên chưa hiện trong cảnh. Mở danh sách nhân viên' });
   await expect(chip).toHaveText('+3');
   await chip.click();
   // The panel lists exactly the unseated ones (23 - 20 seats), so exactly twenty characters stand in the scene.
-  const unseated = page.getByLabel('Lập trình viên chưa hiện trong cảnh');
-  await expect(unseated.getByRole('heading', { name: 'Lập trình viên chưa hiện trong cảnh' })).toBeVisible();
-  await expect(unseated.getByRole('button')).toHaveCount(3);
+  const unseated = page.getByRole('dialog',{name:'Lập trình viên'});
+  await expect(unseated.getByRole('region',{name:'Lập trình viên chưa hiện trong cảnh'})).toBeVisible();
+  await expect(unseated.getByRole('region',{name:'Lập trình viên chưa hiện trong cảnh'}).getByRole('button')).toHaveCount(3);
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-renderer', 'ready');
   expect(errors).toEqual([]);
 });

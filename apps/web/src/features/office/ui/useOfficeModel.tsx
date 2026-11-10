@@ -32,7 +32,8 @@ export interface OfficeModelState {
   unsupported: boolean;
 }
 
-const byBoundAt = (a: { boundAt: string; instanceId: string }, b: { boundAt: string; instanceId: string }): number => a.boundAt.localeCompare(b.boundAt) || a.instanceId.localeCompare(b.instanceId);
+const byBoundAt = (a: { allocation?: string; boundAt: string; instanceId: string }, b: { allocation?: string; boundAt: string; instanceId: string }): number =>
+  (a.allocation === 'active' ? 0 : 1) - (b.allocation === 'active' ? 0 : 1) || a.boundAt.localeCompare(b.boundAt) || a.instanceId.localeCompare(b.instanceId);
 
 /**
  * The office model of visual mode. Mounted only while visual mode shows, so Classic never reads /workforce. Reads follow the page
@@ -70,7 +71,8 @@ export function useOfficeModel({ api, id, session, connection, revision, directo
   const seated = useMemo(() => {
     if (!session) return undefined;
     const derived = deriveOffice({ session, runs: runs.data?.items ?? [], decisions: decisions.data?.items ?? [], ...(sorted ? { workforce: sorted } : {}), ...(director ? { director } : {}), connection, now: Date.now() });
-    return applySeats(seats.current, derived);
+    const activeIds = sorted ? new Set(sorted.agents.filter(a => a.allocation === 'active').map(a => a.instanceId)) : undefined;
+    return applySeats(seats.current, derived, activeIds);
   }, [session, runs.data, decisions.data, sorted, connection, director]);
   // Seats are remembered after commit, so rendering itself never mutates the ref.
   useEffect(() => { if (seated) seats.current = seated.seats; }, [seated]);

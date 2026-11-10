@@ -13,6 +13,12 @@ const RELEASED_RETENTION_MS = 60 * 60 * 1000;
 const WORK_KINDS: Record<string, WebAgentWork["kind"] | undefined> = {
   "task.assignment": "assignment", "delegation.request": "delegation", "verification.requested": "verification",
 };
+const workKindOf = (message: RoleMessage): WebAgentWork["kind"] | undefined => {
+  if (message.recipient.role === "coordinator" && (message.type === "task.status" || message.type === "approval.decision")) {
+    return "delegation";
+  }
+  return WORK_KINDS[message.type];
+};
 /** An outbound still holds its recipient while it is queued, in flight, uncertain or accepted. */
 const OPEN_STATUSES: ReadonlySet<Outbound["status"]> = new Set(["queued", "sending", "unknown_delivery", "accepted"]);
 const INBOUND_STATE = { received: "delivered", applied: "applied", rejected: "rejected" } as const;
@@ -109,7 +115,7 @@ export function projectWorkforce(s: ReadSources): WebWorkforceView {
 
   const workBy = new Map<string, WebAgentWork[]>();
   for (const out of outbound) {
-    const kind = WORK_KINDS[out.message.type];
+    const kind = workKindOf(out.message);
     // A control notice borrows its assignment's lease and recipient; it is the same unit of work, not a second one.
     if (!kind || out.parentAssignmentId !== undefined || !OPEN_STATUSES.has(out.status)) continue;
     const owner = resolve(out.message.recipient.role, out.handle?.target.agentId ?? out.message.recipient.agent_id);
@@ -131,7 +137,7 @@ export function projectWorkforce(s: ReadSources): WebWorkforceView {
     if (all.length > MAX_WORK) truncated = true;
     return {
       instanceId, role, ...(pane.roleProfile ? { profileId: pane.roleProfile.profileId } : {}),
-      displayName: display(s, profileName(pane) ?? role.charAt(0).toUpperCase() + role.slice(1), 200),
+      displayName: display(s, profileName(pane) ?? (role === "qa" ? "QA" : role.charAt(0).toUpperCase() + role.slice(1)), 200),
       ...(pane.paneGroup ? { group: pane.paneGroup } : {}), permanent: pane.permanent ?? false,
       provider: sliceSafe(pane.provider, 100), ...(pane.model ? { model: sliceSafe(pane.model, 200) } : {}),
       allocation,

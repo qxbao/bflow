@@ -93,7 +93,7 @@ export const DIRECTOR_OWN_TOOLS: readonly { name: string; description: string }[
   { name: "list_issues", description: "List the issue queue. Arguments: status (optional array of open|retrying|resolved|dismissed; default open and retrying)." },
   { name: "inspect_issue", description: "Read one queued issue with its evidence references. Arguments: issueId." },
   { name: "set_issue_status", description: "Mark a queued issue retrying, resolved or dismissed after you acted on it. Arguments: issueId, status." },
-  { name: "park_task", description: "Treo một task thuộc run Director sau khi Runtime xác nhận dừng execution, giữ worktree và đưa vào hàng đợi lỗi. Arguments: runId, taskId, reason." },
+  { name: "park_task", description: "Treo một task thuộc run Director sau khi Runtime xác nhận dừng execution, giữ worktree và đưa vào hàng đợi lỗi. Arguments: runId, taskId, reason, kind (optional: other | plan_mismatch; use plan_mismatch when Runtime reports Plan mismatch)." },
   { name: "unpark_task", description: "Mở lại task đã treo và lên lịch thử mới qua Runtime. Arguments: runId, taskId." },
   { name: "read_mailbox", description: "Read the Director mailbox page by page. Arguments: afterSeq (optional, default 0), audience (optional director|user, default director), limit (optional, at most 200). Items are summaries; use inspect tools for detail." },
   { name: "read_coordinator_guide", description: "Read the Coordinator planning guide that the Director follows when decomposing work. Arguments: none." },
@@ -133,7 +133,7 @@ const COORDINATOR_GUIDE_PREFIX = "Hướng dẫn lập kế hoạch của Coordi
 const COORDINATOR_GUIDE_MAX_BYTES = 64 * 1024;
 const SetStatusArgs = z.object({ issueId: z.string().min(1), status: z.enum(["retrying", "resolved", "dismissed"]) }).strict();
 const UnparkArgs = z.object({ runId: IdentifierSchema, taskId: IdentifierSchema }).strict();
-const ParkArgs = UnparkArgs.extend({ reason: z.string().trim().min(1).max(2000) }).strict();
+const ParkArgs = UnparkArgs.extend({ reason: z.string().trim().min(1).max(2000), kind: z.enum(["other", "plan_mismatch"]).optional() }).strict();
 
 const VerificationMethodSchema = AcceptanceCriterionSchema.innerType().shape.verificationMethod;
 const PrioritySchema = DelegationRequestSchema.innerType().shape.priority;
@@ -214,7 +214,7 @@ export class DirectorTools {
         if (parked.parked) {
           if (parked.episode === undefined) throw new Error("Runtime thiếu số lần treo task; chưa thể ghi issue");
           await this.store.upsertIssue({ issueId: `park:${args.runId}:${args.taskId}:${parked.episode}`,
-            runId: args.runId, taskKey: args.taskId, kind: "other", summary: args.reason,
+            runId: args.runId, taskKey: args.taskId, kind: args.kind ?? "other", summary: args.reason,
             suggestedAction: "Thử lại từ hàng đợi lỗi (set_issue_status retrying); Runtime tự mở lại task" });
         }
         return result;

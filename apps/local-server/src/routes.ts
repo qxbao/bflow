@@ -82,6 +82,8 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
       if(name==='operation'){res.setTimeout(40000);respond(await ctx.operations.read(id,params.operationId!,()=>{ctx.sessions.authenticate(req);},authentication));return;}
       // D-CD-01 Director routes (optional port; missing → operation_not_allowed). Old routes below are unchanged.
       if(DIRECTOR_ROUTES.has(name)){
+        if(name==='launchDirector'||name==='sendDirectorMessage')res.setTimeout(45000);
+        else if(name==='directorLaunchOptions')res.setTimeout(25000);
         await directorRoute({name,projectId:id,input,query:parsedQuery,req,res,authentication,director:ctx.director,respond,
           authorize:()=>{ctx.sessions.authenticate(req);},requireProject:()=>ctx.registry.require(id),critical:ctx.serialize,
           queue:(key,fn)=>serializeInteraction(ctx,key,fn),
@@ -135,14 +137,16 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
         const value=unwrap(WebWorkforceResultSchema.parse(await observeWithinDeadline(()=>read(id))));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
       }
       if(name==='workforceExcerpts'){
+        res.setTimeout(15000);
         if(!client.readWorkforceExcerpts)throw new HttpError('operation_not_allowed');
         const read=client.readWorkforceExcerpts.bind(client);
-        const value=unwrap(WebExcerptsResultSchema.parse(await observeWithinDeadline(()=>read(id))));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
+        const value=unwrap(WebExcerptsResultSchema.parse(await observeWithinDeadline(()=>read(id),12000)));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
       }
       if(name==='agentTranscript'){
+        res.setTimeout(15000);
         if(!client.readAgentTranscript)throw new HttpError('operation_not_allowed');
         const read=client.readAgentTranscript.bind(client);
-        const value=unwrap(WebTranscriptResultSchema.parse(await observeWithinDeadline(()=>read(id,params.instanceId!))));
+        const value=unwrap(WebTranscriptResultSchema.parse(await observeWithinDeadline(()=>read(id,params.instanceId!),12000)));
         if(value.projectId!==id||value.instanceId!==params.instanceId)throw new HttpError('unavailable');respond(value);return;
       }
       if(name==='activity'){

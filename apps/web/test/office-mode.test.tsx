@@ -39,7 +39,7 @@ test('mode switch preserves in-memory decision draft',async()=>{
   fireEvent.change(screen.getByLabelText(/Lý do/),{target:{value:'Nháp trong bộ nhớ'}});
   const marker=document.getElementById('main')!.querySelector('h1,h2')!;
   fireEvent.click(screen.getByRole('button',{name:'3D'}));
-  expect((screen.getByLabelText(/Lý do/) as HTMLTextAreaElement).value).toBe('Nháp trong bộ nhớ');
+  expect((await screen.findByLabelText(/Lý do/) as HTMLTextAreaElement).value).toBe('Nháp trong bộ nhớ');
   expect(marker.isConnected).toBe(true);
   fireEvent.click(screen.getByRole('button',{name:'Web'}));
   expect((screen.getByLabelText(/Lý do/) as HTMLTextAreaElement).value).toBe('Nháp trong bộ nhớ');
@@ -61,7 +61,7 @@ test('classic mode renders no visual chrome',async()=>{
 test('deep link /runs/:id opens overlay in visual mode',async()=>{
   writeMode('visual');installApi({'/api/v1/projects/p/session':readySession});app('/projects/p/runs/run');
   expect(await screen.findByRole('heading',{name:'Tìm sách nhanh hơn'})).toBeTruthy();
-  expect(screen.getByRole('button',{name:'Đóng bảng'})).toBeTruthy();expect(screen.getByRole('region',{name:'Văn phòng'})).toBeTruthy();
+  expect(screen.getByRole('dialog',{name:'Công việc / Chi tiết'})).toBeTruthy();expect(screen.getByRole('button',{name:'Đóng cửa sổ Công việc / Chi tiết'})).toBeTruthy();expect(screen.getByRole('region',{name:'Văn phòng'})).toBeTruthy();
   expect(document.getElementById('main')!.classList.contains('hidden')).toBe(false);
 });
 test('index path keeps the panel closed until Tổng quan opens it',async()=>{
@@ -69,7 +69,7 @@ test('index path keeps the panel closed until Tổng quan opens it',async()=>{
   const overview=await screen.findByRole('button',{name:'Tổng quan'});
   expect(document.getElementById('main')!.classList.contains('hidden')).toBe(true);
   fireEvent.click(overview);expect(document.getElementById('main')!.classList.contains('hidden')).toBe(false);
-  expect(await screen.findByRole('heading',{name:/Tổng quan/})).toBeTruthy();
+  expect(await within(document.getElementById('main')!).findByRole('heading',{name:'Tổng quan dự án'})).toBeTruthy();
 });
 test('Esc closes overlay and restores focus',async()=>{
   writeMode('visual');installApi({'/api/v1/projects/p/session':readySession});app('/projects/p');
@@ -102,7 +102,7 @@ test('Esc closes the panel after Overview was opened and then another route visi
   await waitFor(()=>expect(main().classList.contains('hidden')).toBe(false));
   await user.keyboard('{Escape}');
   await waitFor(()=>expect(main().classList.contains('hidden')).toBe(true));
-  expect(screen.queryByRole('heading',{name:/Tổng quan/})).toBeNull();
+  expect(main().classList.contains('hidden')).toBe(true);
 });
 test('Esc closes the panel while focus is in the HUD, and the sidebar Tổng quan link opens the overview',async()=>{
   writeMode('visual');installApi({'/api/v1/projects/p/session':readySession});app('/projects/p/runs/run');
@@ -114,7 +114,7 @@ test('Esc closes the panel while focus is in the HUD, and the sidebar Tổng qua
   const nav=within(screen.getByRole('navigation',{name:'Điều hướng chính'}));
   await user.click(nav.getByRole('link',{name:'Công việc'}));
   await user.click(nav.getByRole('link',{name:'Tổng quan'}));
-  expect(await screen.findByRole('heading',{name:/Tổng quan/})).toBeTruthy();expect(main().classList.contains('hidden')).toBe(false);
+  expect(await within(main()).findByRole('heading',{name:'Tổng quan'})).toBeTruthy();expect(main().classList.contains('hidden')).toBe(false);
 });
 test('visual HUD is pinned outside the panel and holds exactly one operations dock',async()=>{
   writeMode('visual');let saved:any;const posts:any[]=[];
@@ -127,9 +127,10 @@ test('visual HUD is pinned outside the panel and holds exactly one operations do
   for(const [label,value] of [['Tên công việc','Tìm sách'],['Mục tiêu','Tìm nhanh'],['Kết quả cần đạt (mỗi dòng một ý)','Tìm theo tên'],['Điều cần lưu ý (không bắt buộc)','Không đổi API']])fireEvent.change(await screen.findByLabelText(label!),{target:{value}});
   fireEvent.click(screen.getByRole('button',{name:'Tạo công việc'}));await waitFor(()=>expect(posts).toHaveLength(1));
   fireEvent.click(await screen.findByRole('button',{name:/Thao tác đã gửi/}));
-  const docks=await screen.findAllByRole('region',{name:'Theo dõi thao tác'});
+  const operationsWindow=await screen.findByRole('dialog',{name:'Thao tác đã gửi'});
+  const docks=within(operationsWindow).getAllByRole('region',{name:'Theo dõi thao tác'});
   expect(docks).toHaveLength(1);
   const bar=screen.getByRole('region',{name:'Thanh điều khiển'}),main=document.getElementById('main')!;
-  expect(bar.contains(docks[0]!)).toBe(true);expect(main.contains(docks[0]!)).toBe(false);expect(bar.contains(main)).toBe(false);
-  expect(bar.className).toMatch(/\bfixed\b/);expect(bar.className).toMatch(/z-30/);expect(main.className).toMatch(/bottom-0/);
+  expect(bar.contains(docks[0]!)).toBe(false);expect(main.contains(docks[0]!)).toBe(false);expect(bar.contains(main)).toBe(false);
+  expect(bar.className).toMatch(/\bfixed\b/);expect(bar.className).toMatch(/z-30/);expect(screen.getByRole('navigation',{name:'Thanh tác vụ'})).toBeTruthy();expect(main.style.height).toMatch(/680px|\d+px/);
 });

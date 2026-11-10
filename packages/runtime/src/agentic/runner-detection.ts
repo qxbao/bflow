@@ -43,7 +43,7 @@ export const PROFILE_TIMEOUT_MS = 180_000;
 export const PREPARE_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 4_194_304;
 const MAX_DEPENDENCY_ROOTS = 500;
-const SKIPPED_DIRECTORIES = new Set(["node_modules", ".git", ".bflow", ".claude", "dist", "coverage"]);
+const SKIPPED_DIRECTORIES = new Set(["node_modules", ".git", ".bflow", ".worktrees", "worktrees", ".gitnexus", ".superpowers", ".agents", ".claude", "dist", "coverage"]);
 const PERMITTED_LEVELS = {
   unit: ["unit", "regression"],
   integration: ["integration", "regression"]
@@ -136,6 +136,7 @@ async function walkRepository(fs: DetectionFs, root: string): Promise<{ dependen
   while (pending.length) {
     const relative = pending.pop()!;
     const entries = await fs.readdir(relative ? join(root, relative) : root);
+    if (relative && entries.some(entry => entry.name === ".git")) continue;
     for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
       if (entry.isSymbolicLink()) continue;
       const path = relative ? `${relative}/${entry.name}` : entry.name;
@@ -269,13 +270,13 @@ export async function disposeDetectedDependencies(): Promise<void> {
  */
 export async function detectTestRunners(
   repositoryRoot: string,
-  options: { nodeExecutable?: string; fs?: DetectionFs; adapters?: readonly RunnerAdapter[] } = {}
+  options: { nodeExecutable?: string; fs?: DetectionFs; adapters?: readonly RunnerAdapter[]; allowDependencyWarming?: boolean } = {}
 ): Promise<RunnerDetection> {
   const fs = options.fs ?? defaultFs;
   try {
     let javascriptDependencySource: string | undefined;
     let javascript = await detect(repositoryRoot, options.nodeExecutable ?? process.execPath, fs);
-    if (!options.fs && javascript.status === "unsupported") {
+    if (!options.fs && options.allowDependencyWarming !== false && javascript.status === "unsupported") {
       // Only a Runtime-owned, lock-verified public npm cache can be created automatically. Other ecosystems remain offline.
       const warmed = await warmNpmDependencies(repositoryRoot);
       if (warmed.status === "ready") {

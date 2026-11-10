@@ -30,6 +30,8 @@ export interface SpecificationPolicy {
   requestApproval(input: unknown, options: unknown): Promise<ApprovalRequest>;
   approve(input: unknown, request: unknown, decision: unknown): Promise<Specification>;
   assertImplementationReady(input: unknown, request: unknown, decision: unknown, workflow: unknown): Promise<void>;
+  /** Marks an approved specification replaced by its approved next version (scope amendment); the real engine provides it. */
+  supersede?(previousApproved: unknown, nextApproved: unknown): Promise<Specification>;
 }
 export interface StrategyPolicy {
   resolve(input: unknown): TestStrategy;
@@ -124,9 +126,15 @@ export interface DirectorRuntimePort {
   /** Durable, idempotent per park episode key. */
   upsertIssue(input: IssueInput): Promise<void>;
 }
+export type TaskEnvironmentReadiness =
+  | { status: "ready"; mode: "host_mounted_pinned"; checkedAt: string; checks: string[] }
+  | { status: "blocked"; checkedAt: string; code: string; reason: string; recovery: string };
 export interface AgenticRuntimePorts {
   /** Director session mode; absent in v2 (Conversation/Coordinator pane) sessions. */
   director?: DirectorRuntimePort;
+  /** Host-owned readiness for the accepted task's verification environment, before creating a Developer pane. */
+  preflightTaskEnvironment?: (input: { runId: string; taskId: string; attemptId: string; worktreePath: string;
+    specification: Specification; strategy: TestStrategy; ownedPaths: string[] }) => Promise<TaskEnvironmentReadiness>;
   /** Host-private routing; extension SDKs retain their own Core DAG and approval ownership. */
   workflowExtensionOwns?(runId: string): Promise<boolean>;
   workflowExtensionStarted?(runId: string): Promise<boolean>;
@@ -154,7 +162,7 @@ export interface AgenticRuntimePorts {
   panes: PanePolicy; policies: AgenticPolicies;
   pinDeveloperDispatch?: (request: AgentRequest, binding: PaneBinding) => Promise<void>;
   bindDeveloperExecutionScope?: (handle: AgentExecutionHandle, binding: PaneBinding) => Promise<void>;
-  stopDeveloperExecutionScope?: (handle: AgentExecutionHandle, binding: PaneBinding) => Promise<CancellationStopProof | undefined>;
+  stopDeveloperExecutionScope?: (handle: AgentExecutionHandle, binding?: PaneBinding | null) => Promise<CancellationStopProof | undefined>;
   stopUnboundDeveloperScope?: (binding: PaneBinding) => Promise<NamespaceExitProof | undefined>;
   /** Trusted host authentication of a Herdr-originated envelope, never an agent-supplied flag. */
   authenticateMessage(message: RoleMessage): Promise<boolean>;

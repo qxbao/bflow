@@ -144,10 +144,11 @@ const rows: Row[] = [
   { row: 9, name: 'start / stop / recovery stop: SessionActions in the server inspector', note: 'Entry: mirror "Máy chủ" opens the server inspector, which reuses SessionActions', go: async () => {
     await mount();
     await mirror(/Máy chủ/);
-    expect(await screen.findByRole('heading', { name: /Máy chủ \(phiên dự án\)/ })).toBeTruthy();
-    expect(within(main()).getByRole('button', { name: 'Dừng phiên' })).toBeTruthy();
-    expect(marked('SessionActions')).toHaveLength(1);
-    expect(panelOpen()).toBe(true);
+    const server=await screen.findByRole('dialog',{name:'Máy chủ'});
+    expect(await within(server).findByRole('heading', { name: /Máy chủ \(phiên dự án\)/ })).toBeTruthy();
+    expect(within(server).getByRole('button', { name: 'Dừng phiên' })).toBeTruthy();
+    expect(marked('SessionActions',server)).toHaveLength(1);
+    expect(panelOpen()).toBe(false);
   } },
   { row: 10, name: 'preparation preview: the Overview panel', go: async () => {
     await mount('/projects/p', { '/api/v1/projects/p/preview': { apiVersion: 1, projectId: 'p', available: true, summary: 'ok', blockers: [], observedAt: now } });
@@ -183,7 +184,7 @@ const rows: Row[] = [
   { row: 13, name: 'run list, search, filter: Runs via the task board', go: async () => {
     await mount('/projects/p', { '/api/v1/projects/p/runs?limit=25&search=&phase=': { apiVersion: 1, items: [run] } });
     await mirror(/Bảng nhiệm vụ/);
-    expect(await inMain().findByRole('heading', { name: 'Công việc' })).toBeTruthy();
+    expect(await inMain().findByRole('heading', { level:1,name: 'Công việc' })).toBeTruthy();
     expect(marked('Runs')).toHaveLength(1);
     expect(inMain().getByLabelText('Tìm công việc')).toBeTruthy();
     expect(inMain().getByRole('button', { name: 'Tìm kiếm' })).toBeTruthy();
@@ -223,7 +224,7 @@ const rows: Row[] = [
   { row: 18, name: 'review, approve, reject, request changes: the mailbox', go: async () => {
     await mount('/projects/p', { [RUN]: runWith({ availableActions: [decide] }) });
     await mirror(/Hộp thư/);
-    expect(await inMain().findByRole('heading', { name: 'Cần bạn quyết định' })).toBeTruthy();
+    expect(await inMain().findByRole('heading', { level:1,name: 'Cần bạn quyết định' })).toBeTruthy();
     expect(marked('Review')).toHaveLength(1);
     await waitFor(() => expect((inMain().getByRole('button', { name: 'Xem xét gói' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(inMain().getByRole('button', { name: 'Xem xét gói' }));
@@ -286,12 +287,13 @@ const rows: Row[] = [
     expect((await inMain().findByRole('alert')).textContent).toContain('lý do');
     expect(posts(api)).toHaveLength(0);
   } },
-  { row: 25, name: 'operations dock renders in the HUD, not the panel', go: async () => {
+  { row: 25, name: 'operations dock opens in its own tool window, not the app window', go: async () => {
     localStorage.setItem('bflow:web:operations:p:unpaired:create', '{broken');
     await mount();
     const bar = await screen.findByRole('region', { name: 'Thanh điều khiển' });
     fireEvent.click(await within(bar).findByRole('button', { name: /Thao tác đã gửi/ }));
-    await waitFor(() => expect(within(bar).getAllByRole('alert').length).toBeGreaterThan(0));
+    const operations=await screen.findByRole('dialog',{name:'Thao tác đã gửi'});
+    await waitFor(() => expect(within(operations).getAllByRole('alert').length).toBeGreaterThan(0));
     expect(main().querySelector('[role="alert"]')).toBeNull();
   } },
   { row: 26, name: 'a corrupt recovery code can be cleared from the dock', go: async () => {
@@ -299,7 +301,8 @@ const rows: Row[] = [
     await mount();
     const bar = await screen.findByRole('region', { name: 'Thanh điều khiển' });
     fireEvent.click(await within(bar).findByRole('button', { name: /Thao tác đã gửi/ }));
-    fireEvent.click(await within(bar).findByRole('button', { name: 'Xóa mã phục hồi bị hỏng' }));
+    const operations=await screen.findByRole('dialog',{name:'Thao tác đã gửi'});
+    fireEvent.click(await within(operations).findByRole('button', { name: 'Xóa mã phục hồi bị hỏng' }));
     await waitFor(() => expect(localStorage.getItem('bflow:web:operations:p:unpaired:create')).toBeNull());
   } },
   { row: 27, name: 'chat: the counter object and the HUD chat bar open ChatPage', go: async () => {
@@ -344,7 +347,7 @@ const rows: Row[] = [
     await waitFor(() => expect(api.fetcher.mock.calls.some(c => String(c[0]).includes('/runs?limit=25'))).toBe(true));
     const count = (): number => api.fetcher.mock.calls.filter(c => String(c[0]).includes('/session') && String(c[0]).includes('/projects/p/')).length;
     const before = count();
-    await rail('Tải lại dữ liệu');
+    fireEvent.click(within(screen.getByRole('navigation',{name:'Thanh tác vụ'})).getByRole('button',{name:'Tải lại dữ liệu'}));
     await waitFor(() => expect(count()).toBeGreaterThan(before));
   } },
   { row: 31, name: 'read problems in the panel (ReadProblems) with a retry', go: async () => {
@@ -392,19 +395,19 @@ test.each(rows.map(r => [r.row, r.name, r] as const))('parity row %i: %s', async
   }
 }, 20000);
 
-const overviewCamera = (): void => { fireEvent.click(within(screen.getByRole('group', { name: 'Góc nhìn camera' })).getByRole('button', { name: 'Toàn cảnh' })); };
-test('Toàn cảnh closes a route panel and returns to the index', async () => {
+const closeAllWindows = (): void => { fireEvent.click(screen.getByRole('button', { name: '◆ Bflow' })); fireEvent.click(screen.getByRole('button', { name: 'Đóng mọi cửa sổ' })); };
+test('Đóng mọi cửa sổ closes a route panel and returns to the index', async () => {
   await openRunViaRail();
   expect(panelOpen()).toBe(true);
-  overviewCamera();
+  closeAllWindows();
   await waitFor(() => expect(panelOpen()).toBe(false));
   expect(where).toBe('/projects/p');
 });
-test('Toàn cảnh closes an open inspector', async () => {
+test('Đóng mọi cửa sổ closes an open inspector', async () => {
   await mount();
   await mirror(/Máy chủ/);
-  expect(await screen.findByRole('heading', { name: /Máy chủ \(phiên dự án\)/ })).toBeTruthy();
-  overviewCamera();
+  expect(await within(await screen.findByRole('dialog',{name:'Máy chủ'})).findByRole('heading', { name: /Máy chủ \(phiên dự án\)/ })).toBeTruthy();
+  closeAllWindows();
   await waitFor(() => expect(panelOpen()).toBe(false));
 });
 
@@ -441,6 +444,8 @@ test('hostile displayName and run title stay inert text in the HUD, the mirror a
   const mirrorRegion = screen.getByRole('region', { name: 'Bản văn bản của văn phòng' });
   const entry = await within(mirrorRegion).findByRole('button', { name: /\(Lập trình viên\)/ });
   fireEvent.click(entry);
-  expect(await within(main()).findByText(hostile)).toBeTruthy();
+  await waitFor(()=>expect(document.querySelector('#office-windows [data-window-kind="agent"]')).not.toBeNull());
+  const agentWindow=document.querySelector<HTMLElement>('#office-windows [data-window-kind="agent"]')!;
+  expect(within(agentWindow).getByText(hostile)).toBeTruthy();
   expect(document.body.querySelector('img[src="x"], script, b, [onerror]')).toBeNull();
 });

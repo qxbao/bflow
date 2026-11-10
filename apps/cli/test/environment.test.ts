@@ -14,6 +14,8 @@ import { createWebWorkspaceServices } from "../src/web-workspace-services.js";
 import { interactionProjectId } from "@bflow/runtime";
 import { startupSessionWasCleanedUp } from "../src/environment.js";
 import type { LifecycleHost } from "../src/agentic-host.js";
+import { armCodexDirectorWatch, readCodexDirectorWatchStatus } from "../src/director-wake.js";
+import { readUserStopIntent, writeUserStopIntent } from "../src/user-stop-intent.js";
 
 const now = "2026-10-16T00:00:00.000Z";
 const linuxIt = it.skipIf(process.platform !== "linux");
@@ -1030,6 +1032,95 @@ describe("P12 repository environment lifecycle", () => {
     await expect(lifecycle.down(true)).rejects.toThrow(/dev-1 on task task-multiply.*cannot be retried/);
     expect(fixture.manager.down).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
     expect((await lifecycle.down(false, 3000, true)).status).toBe("down");
+  });
+  linuxIt("records a durable user stop intent before the barrier and cancels the Codex Director watcher", async () => {
+    await lifecycle.up();
+    await armCodexDirectorWatch({ root: dir, sessionName: repository.sessionName, threadId: "123e4567-e89b-42d3-a456-426614174000",
+      cursor: "m4.i0.b2.rZmVlZDox", spawn: async () => {} });
+    let seenAtBarrier: unknown;
+    lifecycle = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => { seenAtBarrier = await readUserStopIntent(dir, repository.id, repository.sessionName); return { ok: true, value: undefined }; } } });
+    expect((await lifecycle.down(true)).status).toBe("down");
+    expect(seenAtBarrier).toMatchObject({ source: "cli" });
+    expect(await readUserStopIntent(dir, repository.id, repository.sessionName)).toMatchObject({ version: 1, source: "cli", repositoryId: repository.id });
+    expect(await readCodexDirectorWatchStatus(dir, repository.sessionName)).toBe("cancelled");
+  });
+  linuxIt("records the Web origin and operation id of a stop", async () => {
+    await lifecycle.up();
+    await lifecycle.down(true, undefined, false, { source: "web", operationId: "op-web-1" });
+    expect(await readUserStopIntent(dir, repository.id, repository.sessionName)).toMatchObject({ source: "web", operationId: "op-web-1" });
+  });
+  linuxIt("clears the stop intent when the stop is refused with nothing changed", async () => {
+    await lifecycle.up();
+    lifecycle = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime([activeRun]) } });
+    await expect(lifecycle.down()).rejects.toThrow("1 active runs");
+    expect(await readUserStopIntent(dir, repository.id, repository.sessionName)).toBeUndefined();
+  });
+  linuxIt("keeps the stop intent when a failure happens after the barrier", async () => {
+    await lifecycle.up();
+    lifecycle = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime([activeRun]),
+      quiesce: async () => ({ ok: true, value: undefined }),
+      checkpoint: async () => ({ ok: false, error: { code: "corruption", retryable: false, message: "checkpoint disk failure" } }) } });
+    await expect(lifecycle.down(true)).rejects.toThrow("checkpoint disk failure");
+    expect(await readUserStopIntent(dir, repository.id, repository.sessionName)).toBeDefined();
+  });
+  linuxIt("restores operation.json to its prior state when the quiesce barrier refuses the stop", async () => {
+    await lifecycle.up();
+    const path = join(dir, ".bflow/state/operation.json");
+    const refusing = () => new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => ({ ok: false, error: { code: "validation", retryable: false, message: "Host requires activation/reconciliation before safe shutdown" } }) } });
+    // No prior record: the refused stop must not leave a `stopping` record behind.
+    await expect(readFile(path, "utf8")).rejects.toThrow();
+    await expect(refusing().down(true)).rejects.toThrow("requires activation/reconciliation before safe shutdown");
+    await expect(readFile(path, "utf8")).rejects.toThrow();
+    // A prior record (with its process receipt) comes back unchanged.
+    const before = { repositoryId: repository.id, sessionName: repository.sessionName, phase: "ready", serverPid: 4242 };
+    await writeFile(path, JSON.stringify(before));
+    await expect(refusing().down(true)).rejects.toThrow("requires activation/reconciliation before safe shutdown");
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual(before);
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+    // Nothing changed, so the refused stop does not leave a user stop intent behind.
+    expect(await readUserStopIntent(dir, repository.id, repository.sessionName)).toBeUndefined();
+  });
+  linuxIt("keeps the stopping phase when a failure happens after the barrier stood", async () => {
+    await lifecycle.up();
+    lifecycle = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime([activeRun]),
+      quiesce: async () => ({ ok: true, value: undefined }),
+      checkpoint: async () => ({ ok: false, error: { code: "corruption", retryable: false, message: "checkpoint disk failure" } }) } });
+    await expect(lifecycle.down(true)).rejects.toThrow("checkpoint disk failure");
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("stopping");
+  });
+  describe("up after a user stop", () => {
+    const stopIntent = () => ({ version: 1 as const, repositoryId: repository.id, sessionName: repository.sessionName, source: "web" as const, requestedAt: now });
+    const up = (args: string[], env: Record<string, string>) => runCli(["up", "--json", ...args], { cwd: dir, env,
+      environment: { runner, integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) } } });
+    linuxIt("refuses `up` from an agent context and leaves the stop intent", async () => {
+      await writeUserStopIntent(dir, stopIntent());
+      for (const env of [{ BFLOW_DIRECTOR_TOKEN: "t.x" }, { BFLOW_DIRECTOR_PROVIDER: "codex" }, { CODEX_THREAD_ID: "123e4567-e89b-42d3-a456-426614174000" }]) {
+        const result = await up([], env);
+        expect(result.ok).toBe(false);
+        expect(JSON.parse(result.stdout).error).toMatchObject({ code: "validation", details: { code: "session_stopped_by_user" } });
+        expect(JSON.parse(result.stdout).error.message).toMatch(/^session_stopped_by_user:/);
+      }
+      expect(fixture.manager.up).not.toHaveBeenCalled();
+      expect(await readUserStopIntent(dir, repository.id, repository.sessionName)).toBeDefined();
+    });
+    linuxIt("`up --restart` from an agent context clears the intent and starts", async () => {
+      await writeUserStopIntent(dir, stopIntent());
+      expect((await up(["--restart"], { BFLOW_DIRECTOR_TOKEN: "t.x" })).ok).toBe(true);
+      expect(await readUserStopIntent(dir, repository.id, repository.sessionName)).toBeUndefined();
+      expect(fixture.manager.up).toHaveBeenCalled();
+    });
+    linuxIt("a plain terminal `up` clears the intent and starts as before", async () => {
+      await writeUserStopIntent(dir, stopIntent());
+      expect((await up([], {})).ok).toBe(true);
+      expect(await readUserStopIntent(dir, repository.id, repository.sessionName)).toBeUndefined();
+    });
+    linuxIt("`status` reports the user stop", async () => {
+      await writeUserStopIntent(dir, stopIntent());
+      const status = await lifecycle.status();
+      expect(status.issues.join("\n")).toContain("đã được người dùng dừng");
+    });
   });
   linuxIt("never bypasses checkpoints with --yes", async () => {
     await lifecycle.up(); lifecycle = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime([activeRun]) } });

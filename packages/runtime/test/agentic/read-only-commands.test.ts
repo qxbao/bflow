@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentRole } from "@bflow/contracts";
-import { evaluateNativeCommand, guardNativeShell, nativeShellCommand, tokenizeCommand } from "../../src/agentic/read-only-commands.js";
+import { evaluateNativeCommand, guardNativeShell, nativeShellCommand, tokenizeCommand, checkNativeTaskEnvironment } from "../../src/agentic/read-only-commands.js";
 
 const permits = (role: AgentRole, command: string): boolean => evaluateNativeCommand(role, command).permitted;
 const reason = (role: AgentRole, command: string): string => {
@@ -185,10 +189,10 @@ describe("native read-only command allowlist", () => {
 describe("developer build and test commands", () => {
   it.each([
     "npm test", "pnpm test -- --reporter dot", "yarn test", "npm run test", "pnpm run build", "yarn run typecheck",
-    "pnpm exec vitest run packages/runtime", "npm exec tsc --noEmit", "npx vitest run", "npx tsc -p tsconfig.json --noEmit",
-    "npx jest", "npx mocha", "node --test test/a.test.js", "tsc --noEmit -p packages/runtime", "go test ./...",
+    "pnpm exec vitest run packages/runtime", "npm exec tsc --noEmit", "npx --no-install vitest run", "npx --no-install tsc -p tsconfig.json --noEmit",
+    "npx --no-install jest", "npx --no-install mocha", "node --test test/a.test.js", "tsc --noEmit -p packages/runtime", "go test ./...",
     "cargo test --workspace", "pytest -q tests", "python -m pytest -q", "python3 -m pytest tests",
-    "pnpm test | tail -50", "npx vitest run --config vitest.config.ts"
+    "pnpm test | tail -50", "npx --no-install vitest run --config vitest.config.ts"
   ])("permits %s only for Developer", command => {
     expect(permits("developer", command)).toBe(true);
     for (const role of NON_CONVERSATION.filter(role => role !== "developer")) expect(permits(role, command), role).toBe(false);
@@ -210,11 +214,11 @@ describe("developer build and test commands", () => {
     ["pnpm test --dir ..", "pnpm option '--dir'"],
     ["npm test --prefix ..", "npm option '--prefix'"],
     ["npm test -g", "npm option '-g'"],
-    ["npx --yes cowsay", "npx '--yes' is not permitted"],
-    ["npx cowsay", "npx 'cowsay' is not permitted"],
-    ["npx -p evil vitest", "npx '-p' is not permitted"],
-    ["npx --package=evil vitest", "npx '--package=evil' is not permitted"],
-    ["npx vitest --watch", "npx option '--watch'"],
+    ["npx --yes cowsay", "npx requires --no-install"],
+    ["npx cowsay", "npx requires --no-install"],
+    ["npx -p evil vitest", "npx requires --no-install"],
+    ["npx --package=evil vitest", "npx requires --no-install"],
+    ["npx --no-install vitest --watch", "npx option '--watch'"],
     ["tsc -w", "tsc option '-w'"],
     ["node script.js", "node is permitted only as 'node --test ...'"],
     ["node -e x","node is permitted only as"],
@@ -271,6 +275,26 @@ describe("native shell tool inputs", () => {
     const decision = guardNativeShell("conversation", "Bash", { command: "cat README.md" });
     expect(decision.permitted ? "" : decision.reason).toContain("Conversation has no native shell");
     expect(evaluateNativeCommand("conversation", "git status").permitted).toBe(false);
+  });
+
+  it("blocks package-manager and npx execution before side effects, while keeping dependency-free node --test", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-native-env-"));
+    try {
+      const marker = join(root, "package-manager-ran");
+      await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: `touch ${marker}` }, dependencies: { vitest: "2.1.9" } }));
+      const manager = await checkNativeTaskEnvironment("developer", "Bash", { command: "pnpm test" }, root);
+      expect(manager.permitted).toBe(false);
+      expect(manager.permitted ? "" : manager.reason).toContain("check_work");
+      const npx = await checkNativeTaskEnvironment("developer", "Bash", { command: "npx --no-install vitest run" }, root);
+      expect(npx.permitted).toBe(false);
+      expect(npx.permitted ? "" : npx.reason).toContain("check_work");
+      expect((await checkNativeTaskEnvironment("developer", "Bash", { command: "tsc --noEmit" }, root)).permitted).toBe(false);
+      expect((await checkNativeTaskEnvironment("developer", "Bash", { command: "node --test test/basic.test.js" }, root)).permitted).toBe(false);
+      await unlink(join(root, "package.json"));
+      expect((await checkNativeTaskEnvironment("developer", "Bash", { command: "node --test test/basic.test.js" }, root)).permitted).toBe(true);
+      expect((await checkNativeTaskEnvironment("developer", "Bash", { command: "npx vitest run" }, root)).permitted).toBe(false);
+      expect(existsSync(marker)).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("tokenizes quotes without a shell", () => {

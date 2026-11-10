@@ -110,7 +110,7 @@ test('3D hostile project name, run title and agent name stay inert text in the s
   expect(await page.getByLabel('Cảnh văn phòng').locator('[data-kind] *').count()).toBe(0);
   // Inspector: the agent display name and the run title on the task board are text too.
   await mirrorRegion.getByRole('button', { name: /\(Điều phối viên\)/ }).focus(); await page.keyboard.press('Enter');
-  await expect(page.locator('#main')).toContainText(name);
+  await expect(page.locator('#office-windows [data-window-kind="agent"]')).toContainText(name);
   await mirror(page, /Bảng nhiệm vụ/);
   await expect(page.locator('#main')).toContainText(title);
   expect(await page.locator('img[src="x"], b, [onerror], script:not([src])').count()).toBe(0);

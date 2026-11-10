@@ -479,3 +479,31 @@ it('refreshes inactive source snapshots only from explicit resolved startup and 
  const next=await ensureAgenticHost({repositoryPath:root,sessionId:'resolved-restart',herdrBinary:binary,executionResolution:source});cleanup.push(()=>next.shutdown().catch(()=>undefined));
  expect(await next.quiesce()).toMatchObject({ok:true});await next.shutdown();
 });
+
+it('allows ensureAgenticHost against a live host after a repository commit when repositoryRoot is tracked live',async()=>{
+ const {execFile}=await import('node:child_process');const {promisify}=await import('node:util');const git=promisify(execFile);
+ const {readExecutionRepositorySnapshot}=await import('../../src/agentic/execution-binding.js');
+ const root=await realpath(await mkdtemp(join(tmpdir(),'bflow-live-repo-commit-')));cleanup.push(()=>rm(root,{recursive:true,force:true}));
+ await git('git',['init','-b','main'],{cwd:root});
+ await git('git',['config','user.email','test@example.com'],{cwd:root});
+ await git('git',['config','user.name','Test'],{cwd:root});
+ await writeFile(join(root,'README.md'),'initial\n');
+ await git('git',['add','README.md'],{cwd:root});
+ await git('git',['commit','-m','initial'],{cwd:root});
+ const binary=join(root,'herdr.mjs');await writeFile(binary,'#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({running:false})+"\\n");\n',{mode:0o700});
+ const sourcePath=join(root,'source.json');await writeFile(sourcePath,'{"model":"agy"}');
+ const makeSource=async()=>({
+   schemaVersion:3 as const,
+   repositoryRoot:root,
+   plan:{schemaVersion:3 as const,resolverVersion:'1',policyVersion:'1',repository:await readExecutionRepositorySnapshot(root),mode:'intake' as const},
+   files:[{component:'project-config',path:sourcePath,format:'json' as const}]
+ });
+ const first=await ensureAgenticHost({repositoryPath:root,sessionId:'live-commit',herdrBinary:binary,executionResolution:await makeSource()});
+ cleanup.push(()=>first.shutdown().catch(()=>undefined));
+ await writeFile(join(root,'README.md'),'updated after commit\n');
+ await git('git',['add','README.md'],{cwd:root});
+ await git('git',['commit','-m','second'],{cwd:root});
+ const reconnected=await ensureAgenticHost({repositoryPath:root,sessionId:'live-commit',herdrBinary:binary,executionResolution:await makeSource()});
+ expect(await reconnected.quiesce()).toMatchObject({ok:true});
+ await reconnected.shutdown();
+});

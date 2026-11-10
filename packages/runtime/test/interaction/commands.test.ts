@@ -152,3 +152,12 @@ it("closes a queued decision when authoritative run cancellation prevents its ef
   expect(await observeStructuredDecision(command as never, undefined, [], async () => ({ ...f.view, sdlcStatus: "cancelled", availableActions: [] })))
     .toMatchObject({ ok: false, error: { details: { reason: "stale_version" } } });
 });
+it("settles a retryable Conversation turn-processing conflict as unavailable with retryable: true", async () => {
+  const f = await setup();
+  const busyService = new HostStructuredCommands({
+    ...f.port,
+    admit: async () => ({ ok: false as const, error: { code: "conflict" as const, retryable: true as const, message: "Conversation admission is already processing another turn" } }),
+  });
+  const res = await busyService.execute(f.command, f.proof());
+  expect(res).toMatchObject({ ok: true, value: { state: "failed", error: { code: "unavailable", retryable: true } } });
+});

@@ -65,6 +65,8 @@ Conversation nhận yêu cầu, Coordinator khảo sát và đề xuất đặc 
 
 Conversation dùng nhãn như `Việc #2` và mã thẻ như `#3`. Trả lời theo đúng lựa chọn/hạn của thẻ, hoặc hỏi “xem chi tiết #3”; bạn không cần tự chép run/approval ID nội bộ. NFR liên quan phải có oracle và điều kiện được chấp nhận trước khi đo; số mẫu trong skill không là SLA. [Conversation updates](conversation-updates.md) · [NFR/test design](../nfr-and-test-design.md).
 
+> **Trải nghiệm trực quan với Văn phòng 3D:** Thay vì thao tác dòng lệnh với `bflow attach`, bạn có thể mở `bflow web` để giao việc, theo dõi tiến độ và phê duyệt trực tiếp trên trình duyệt hoặc trải nghiệm không gian [Văn phòng 3D](web-manual.md#không-gian-văn-phòng-3d--làm-việc-trực-tiếp-cùng-director) sống động. Khởi động thêm `bflow director start` để trao đổi trực tiếp với Director.
+
 ## 4. Theo dõi, xử lý blocker và kết thúc
 
 Trong terminal khác:

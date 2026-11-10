@@ -9,7 +9,7 @@
 [![pnpm](https://img.shields.io/badge/pnpm-12.5.1-F69220?logo=pnpm&logoColor=white)](package.json)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
-[Bắt đầu](#bắt-đầu) · [Luồng thực thi](#luồng-thực-thi) · [Tài liệu](docs/README.md) · [Giới hạn hiện tại](docs/known-limitations-v3.md)
+[Bắt đầu](#bắt-đầu) · [Văn phòng 3D](#không-gian-văn-phòng-3d-bflow-3d) · [Luồng thực thi](#luồng-thực-thi) · [Tài liệu](docs/README.md) · [Giới hạn hiện tại](docs/known-limitations-v3.md)
 
 </div>
 
@@ -25,9 +25,56 @@ Bạn mô tả công việc trong một cuộc hội thoại. Bflow đưa yêu c
 | Chọn provider theo vai trò | Claude Code, Codex và Agy qua adapter; model, effort và profile riêng cho từng role |
 | Dùng lại công cụ đã thiết lập | Shared MCP Gateway cho DeepWiki, GitNexus, MemPalace và browser; RTK xử lý output CLI |
 | Tiếp tục sau gián đoạn | SQLite event log, checkpoint, artifact có checksum và đối soát delivery |
-| Làm việc trên trình duyệt | `bflow web`: UI tiếng Việt cục bộ để quản lý dự án, theo dõi công việc, trả lời quyết định và chat với Conversation ([cẩm nang có ảnh hướng dẫn](docs/guide/web-manual.md)) |
+| Làm việc trên trình duyệt & Văn phòng 3D | `bflow web` + `bflow director start`: không gian Văn phòng 3D tiếng Việt cục bộ để quản lý dự án, quan sát trực tiếp đội ngũ AI làm việc song song, duyệt thiết kế/bàn giao và trao đổi cùng Director ([cẩm nang có ảnh hướng dẫn](docs/guide/web-manual.md)) |
 
-**Trạng thái:** đã có mã nguồn và kiểm thử tích hợp cục bộ cho Runtime/platform (bao gồm GitNexus và browser MCP resource transactions, regression scope, test-integrity gate, task handovers, read-only telemetry, local web, execution preview, specialist profiles, provider failover có phê duyệt, custom skill import, gói bàn giao offline, agent cứu hộ `BFLOWSOS` và các đợt hardening Slices 1–8 / UX ổn định giao diện web). Đã có bằng chứng live SDLC đơn provider qua `bflow web` trên repo độc lập (`completed`/`succeeded`, [báo cáo](docs/reliability/web-ux-stabilization.md)) cùng các báo cáo probe có phạm vi riêng; nghiệm thu đầy đủ ma trận SDLC đa provider/Chrome thật và chiến dịch lỗi khi đang chạy vẫn còn mở. Xem [trạng thái triển khai](docs/implementation-status.md). Agy hiện chưa dùng được cho vai trò Conversation hoặc chế độ unattended.
+**Trạng thái:** đã có mã nguồn và kiểm thử tích hợp cục bộ cho Runtime/platform (bao gồm GitNexus và browser MCP resource transactions, regression scope, test-integrity gate, task handovers, read-only telemetry, local web 3D + Director, execution preview, specialist profiles, provider failover có phê duyệt, custom skill import, gói bàn giao offline, agent cứu hộ `BFLOWSOS` và các đợt hardening Slices 1–9 / tối ưu hoá token & tốc độ runtime). Đã có bằng chứng live SDLC đầu-cuối qua `bflow web` (cả trên Claude Code `v2.1.316` lẫn luồng 3 cấp độ Nhỏ/Trung bình/Lớn chạy hoàn toàn bằng `agy` kết hợp Văn phòng 3D + `bflow director start`, `completed`/`succeeded`, [báo cáo](docs/reliability/web-ux-stabilization.md)); nghiệm thu ma trận kết hợp chéo nhiều provider và chiến dịch lỗi giữa turn vẫn còn mở. Xem [trạng thái triển khai](docs/implementation-status.md).
+
+## Không gian Văn phòng 3D (Bflow 3D)
+
+Bflow mang đến trải nghiệm **Văn phòng 3D (Bflow 3D HUD)** trực tiếp trên trình duyệt web cục bộ (`bflow web`), kết hợp cùng trợ lý điều phối cấp cao **Director (`bflow director start`)**. Thay vì chỉ theo dõi các dòng log terminal dòng lệnh chạy cuộn liên tục, bạn có thể trực tiếp quan sát toàn bộ đội ngũ trợ lý AI làm việc, phối hợp và tương tác trong một không gian mô phỏng 3D sống động như một tựa game quản lý chiến thuật.
+
+<div align="center">
+
+<img src="docs/assets/guide/web-3d-office-overview.png" alt="Không gian Văn phòng 3D Bflow — Toàn cảnh các phòng ban và đội ngũ AI" width="100%">
+
+*Toàn cảnh Văn phòng 3D Bflow: Các phòng ban chuyên trách, bảng nhiệm vụ Quest Board, khu giải trí Creative Space và hồ bơi ngoài trời*
+
+</div>
+
+### Các khu vực chức năng trong Văn phòng 3D
+
+- **Phòng Giám đốc (Director Office) & Director Team:** Nơi **Director** tiếp nhận chỉ thị chiến lược từ bạn, phân tích yêu cầu tổng thể, điều phối vòng đời SDLC và hỗ trợ giải quyết vướng mắc qua khung thoại phong cách RPG (*RPG Dialogue Card*). Đội ngũ Director Team làm việc tại bàn máy chủ trung tâm với ghế da đen giám đốc.
+- **Khu vực Lập trình (Developer Zone):** Dãy bàn làm việc với PC và ghế nhựa đỏ đặc trưng. Mỗi Developer được cấp riêng một **Git worktree độc lập** để lập trình song song. Trên đầu mỗi nhân vật hiển thị **bóng thoại terminal trực tiếp** (*terminal snapshot*), giúp bạn theo dõi ngay suy nghĩ và câu lệnh AI đang chạy theo thời gian thực mà không làm gián đoạn tiến trình.
+- **Khu vực Đảm bảo Chất lượng (QA / Reviewer):** Các vai trò phản biện độc lập — **Reviewer** (tóc đỏ crimson, kính tròn) và **QA** (tóc dựng đen) — giám sát tính toàn vẹn mã nguồn, thẩm định các bài test hồi quy và đảm bảo không có việc suy giảm tiêu chuẩn chất lượng (`host-test-integrity`).
+- **Bảng nhiệm vụ (Task Board) & Bàn họp lớn:** Thể hiện đồ thị phân rã tác vụ (DAG) trực quan dạng *Quest Board*, hiển thị trạng thái các nhiệm vụ con kèm thanh tiến độ XP xanh lá (`2/2 nhiệm vụ hoàn thành`).
+- **Khu vực Sáng tạo & Giải trí (Creative Space & Swimming Pool):** Điểm nhấn độc đáo mô phỏng đời sống văn phòng thực tế — gồm **4 bàn bi-a**, máy chơi game arcade, quầy bar uốn cong có **Bartender** phục vụ liên tục, và hồ bơi ngoài trời (*Swimming Pool*) kèm cầu nhảy. Khi chưa có việc (`idle`), các AI agent tự động di chuyển đến khu giải trí để thư giãn, và lập tức quay về bàn làm việc ngay khi có tác vụ mới!
+
+<div align="center">
+
+<img src="docs/assets/web-manual/bflow-3d-parallel-execution.png" alt="Developer lập trình song song trong Git worktree riêng với bóng thoại terminal trực tiếp" width="100%">
+
+*Developer đang lập trình song song trong worktree riêng với bóng thoại tiến độ thời gian thực, trong khi các vai trò khác thư giãn tại Creative Space*
+
+</div>
+
+### Trải nghiệm điều khiển thông minh
+
+- **Chuyển đổi tức thì Web ↔ 3D:** Nút bấm chuyển chế độ tích hợp hiệu ứng chuyển cảnh mượt mà (*View Transitions*). Chế độ Web 2D cổ điển nhẹ nhàng, gọn gàng; chế độ 3D mang lại trải nghiệm sống động, quan sát trực quan.
+- **Hệ thống cửa sổ Retro (Office HUD):** Các cửa sổ chức năng (*Tổng quan, Công việc, Quyết định, Trò chuyện, Sự cố, Nhân viên, Cài đặt*) được thiết kế dạng cửa sổ game viền đậm sắc nét, hỗ trợ kéo thả, thu phóng và ghim góc tiện lợi.
+- **Màn hình CRT Terminal an toàn:** Xem bản chụp terminal thời gian thực của từng nhân viên qua màn hình phosphor xanh cổ điển, tự động che mờ thông tin nhạy cảm (`[redacted]`).
+- **Tiếp cận toàn diện (Accessibility):** Bản dựng 3D đi kèm bản văn bản ẩn đạt chuẩn ARIA, hỗ trợ thao tác hoàn toàn bằng bàn phím (`Tab`, `F6`, phím mũi tên) và chế độ giảm chuyển động (`prefers-reduced-motion`).
+
+### Khởi động nhanh Bflow 3D
+
+```bash
+# 1. Mở giao diện Web & Văn phòng 3D trên trình duyệt (mặc định tại http://127.0.0.1:4317)
+bflow web
+
+# 2. Khởi động trợ lý điều phối cấp cao Director trong văn phòng 3D
+bflow director start
+```
+
+> Hướng dẫn từng bước thao tác và hình ảnh chi tiết các màn hình, xem tại [Cẩm nang sử dụng Bflow Web & Văn phòng 3D](docs/guide/web-manual.md#không-gian-văn-phòng-3d--làm-việc-trực-tiếp-cùng-director).
 
 ## Bắt đầu
 

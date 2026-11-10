@@ -59,6 +59,37 @@ beforeAll(async () => {
 const choose = (s: AutoParkState) => selectAutoParkCandidates(s, policy, Date.now());
 
 describe("selectAutoParkCandidates", () => {
+  function phaseMismatchState() {
+    const s = structuredClone(base), run = s.runs[0]!, current = s.snapshots["run-1"]!.tasks[0]!;
+    const assignment = s.outbound.find(out => out.message.type === "task.assignment")!;
+    const phase = structuredClone(assignment);
+    phase.message.message_id = "phase-mismatch";
+    phase.message.type = "verification.requested";
+    phase.message.payload = { kind: "conditional_evidence", taskId: "implement", phase: "red", sourceRevision: "a".repeat(40),
+      implementationAttemptId: current.attemptId };
+    phase.status = "released"; phase.taskId = "implement";
+    delete phase.handle; delete phase.lease; delete phase.assignment; delete phase.request;
+    phase.phaseFailure = { summary: "missing test", repairable: false, applied: true,
+      blocker: { code: "declared_test_missing", fixableBy: "director", fingerprint: "1".repeat(64),
+        specDigest: "2".repeat(64), strategyDigest: "3".repeat(64), sourceRevision: "a".repeat(40) } };
+    s.outbound.push(phase);
+    run.pendingAction!.sourceMessageId = phase.message.message_id;
+    run.pendingAction!.reason = "Plan mismatch (declared_test_missing): missing test";
+    return s;
+  }
+  it("parks a current non-resumable phase blocker without spending resume attempts", () => {
+    const s = phaseMismatchState();
+    s.runs[0]!.pendingAction!.resumeAttempts = 0;
+    expect(choose(s)).toMatchObject([{ taskId: "implement", kind: "plan_mismatch" }]);
+  });
+  it("does not park a phase without a blocker or while a human approval waits", () => {
+    const s = phaseMismatchState();
+    delete s.outbound.at(-1)!.phaseFailure!.blocker;
+    expect(choose(s)).toEqual([]);
+    s.outbound.at(-1)!.phaseFailure!.blocker = phaseMismatchState().outbound.at(-1)!.phaseFailure!.blocker;
+    s.runs[0]!.approval = { approvalId: "pending", status: "pending", target: { type: "task", taskId: "implement" } } as any;
+    expect(choose(s)).toEqual([]);
+  });
   it.each([
     ["stall", "transport_failure", "Task không trả kết quả"],
     ["structural delivery", "transport_failure", "Recipient pane unavailable"],
@@ -82,6 +113,20 @@ describe("selectAutoParkCandidates", () => {
     expect(choose(s)[0]?.kind).toBe("other");
     run.pendingAction!.invalidAssignment!.implementationAttemptId = "stale-attempt";
     expect(choose(s)).toEqual([]);
+  });
+  it("does not auto-park a newer Core attempt because its pending blocker points to old writer A", () => {
+    const s = structuredClone(base), source = s.outbound.find(out => out.message.type === "task.assignment")!;
+    const current = s.snapshots["run-1"]!.tasks.find(task => task.taskId === "implement")!;
+    const currentAttempt = current.attemptId!;
+    source.attemptId = "writer-a";
+    if (source.handle) source.handle.attemptId = "writer-a";
+    current.attemptId = "writer-b";
+    s.runs[0]!.pendingAction!.sourceMessageId = source.message.message_id;
+    expect(choose(s)).toEqual([]);
+    // Uncertain old work remains a fence even though it cannot drive B's business park.
+    source.status = "unknown_delivery";
+    expect(selectAutoParkStopCandidates(s, policy, Date.now())).toEqual([]);
+    expect(currentAttempt).toBeTruthy();
   });
   it("does not treat other failover holds as an exhausted provider budget", () => {
     const s = structuredClone(base);

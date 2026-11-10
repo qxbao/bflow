@@ -202,11 +202,13 @@ export class HostStructuredCommands {
   }
   private async settle(operation: WebOperation, principal: WebPrincipal, result: OperationResult<WebOperationResult>): Promise<void> {
     const uncertain = !result.ok && ["unknown_delivery", "timeout", "corruption", "transport_unavailable", "cancelled"].includes(result.error.code);
+    const retryableConflict = !result.ok && result.error.code === "conflict" && result.error.retryable === true &&
+      (result.error.details as { reason?: unknown } | undefined)?.reason !== "stale_version";
     const value = result.ok ? { ...operation, state: "applied", result: result.value } : uncertain
       ? { ...operation, state: "reconciliation_required" }
-      : { ...operation, state: "failed", error: { apiVersion: 1, code: result.error.code === "conflict" ? "stale_version" : "operation_not_allowed",
+      : { ...operation, state: "failed", error: { apiVersion: 1, code: retryableConflict ? "unavailable" : result.error.code === "conflict" ? "stale_version" : "operation_not_allowed",
         message: operation.operationKind === "issue_retry" || operation.operationKind === "issue_dismiss"
-          ? "Director issue queue refused this exact command." : "Conversation refused this exact interaction.", retryable: false, operationId: operation.operationId, correlationId: operation.operationId } };
+          ? "Director issue queue refused this exact command." : "Conversation refused this exact interaction.", retryable: retryableConflict, operationId: operation.operationId, correlationId: operation.operationId } };
     await this.ports.store.settle(principal.principalId, operation.operationId, WebOperationSchema.parse(value));
   }
   async readOperation(principalId: string, commandId: string): Promise<OperationResult<WebOperation>> {

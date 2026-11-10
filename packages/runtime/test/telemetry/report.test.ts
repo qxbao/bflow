@@ -22,6 +22,18 @@ const build = (events: unknown[], extra = {}) => buildWorkflowTelemetry({ runId:
   source: "legacy", complete: true, taskIds: ["task-1"], ...extra });
 
 describe("workflow telemetry projection", () => {
+  it("counts journal blockers and skipped resumes without exposing blocker details", async () => {
+    const outbound = [
+      { message: { run_id: "run-1", message_id: "phase-1", type: "verification.requested", occurred_at: at(2) },
+        phaseFailure: { blocker: { code: "declared_test_missing", fixableBy: "director", details: { paths: ["SECRET-PATH"] } } } },
+      { message: { run_id: "run-1", message_id: "resume-1", type: "task.status", payload: {
+        kind: "resume_run", nonResumablePhaseFailures: [{ requestId: "phase-1", code: "declared_test_missing" }] } } }
+    ] as any;
+    const store = { get: async () => ({ ok: true as const, value: null }), readEvents: async () => ({ ok: true as const, value: { items: [] } }) };
+    const report = await readWorkflowTelemetry(store as any, "run-1", { asOf: at(60), outbound });
+    expect(report.blockers).toEqual([{ code: "declared_test_missing", fixableBy: "director", count: 1, lastAt: at(2), resumeSkipped: 1 }]);
+    expect(JSON.stringify(report)).not.toContain("SECRET-PATH");
+  });
   it("measures closed task intervals and produces the same report after duplicate, reordered replay/restart", () => {
     const events = [created, transition(2, "task-1", "pending", "ready"),
       transition(3, "task-1", "ready", "running"), transition(4, "task-1", "running", "succeeded")];

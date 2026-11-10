@@ -3,7 +3,7 @@ import { z } from "zod";
 import { record, strings, textField } from "./journal.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 import { AssessmentSpecificationSchema, assessmentErrorAt } from "./assessment-input.js";
-import { InspectInputSchema, summarizeInspectRun, summarizeInspectState } from "./mcp-output-views.js";
+import { InspectInputSchema } from "./mcp-output-views.js";
 
 // Keep tool-argument paths distinct from the nested public contract fields. The Runtime
 // also validates direct callers; provider discovery is guidance, never ingress proof.
@@ -35,6 +35,7 @@ export const COORDINATOR_TOOLS = [
   { name: "reconcile_cancellation", description: "Re-observe an already cancelled run. A Developer at rest has its pane closed and its worktree kept, then the run finishes cancelling; the result lists anything still blocking. Parameters: runId." },
   { name: "repository_setup", description: "Set up the repository yourself before implementation starts; never ask the user to run these. operation: git_status, git_log(limit?), npm_init, npm_install_dev(packages; lifecycle scripts are disabled and node_modules/ is ignored first), gitignore_add(patterns), create_directories(paths; adds .gitkeep), git_add(paths), git_commit(message). No shell. Each change is logged against runId; protected paths and hooks are refused." },
   { name: "reresolve_execution_plan", description: "After a commit moved the repository under an accepted run: rebind its pinned repository snapshot, move an unstarted run to the new HEAD, and clear a plan-drift blocker. Other changed inputs stay blocked. Grants no approval. Parameters: runId." },
+  { name: "amend_task_scope", description: "Fix a plan mismatch inside the run instead of starting a new one. Only for a task stopped by a Plan mismatch escalation / nonResumablePhaseFailures, or parked as plan_mismatch. Parameters: runId, taskId, reason (min 10 chars), changes[] of {kind: drop_planned_paths|add_paths_within_ownership|set_test_names}. drop_planned_paths removes only test files the Runtime recorded as missing from the commit; add_paths_within_ownership stays inside current ownership; set_test_names edits the mapped test names of one existing criterion. Acceptance criteria are never changed or waived and the TDD decision cannot weaken. Ownership cannot be widened or narrowed here (that is a requirement revision). It never re-measures: afterwards call resume_run (escalated run) or, for a parked task, the Director reopens it with set_issue_status retrying." },
   { name: "withdraw_workflow_proposal", description: "Withdraw a design proposal still awaiting human approval so you can run repository_setup and call propose_workflow again; the new proposal gets a new approval card and the user is told which card replaced which. Parameters: runId, reason." }
 ] as const;
 
@@ -50,7 +51,7 @@ export class CoordinatorTools {
     const alreadyRunning = this.pendingTick !== undefined;
     if (!this.pendingTick) {
       this.tickError = undefined;
-      const task = this.runtime.tick();
+      const task = this.runtime.tick({ returnState: false });
       this.pendingTick = task;
       void task.then(() => { if (this.pendingTick === task) this.pendingTick = undefined; }, error => {
         this.tickError = String(error); if (this.pendingTick === task) this.pendingTick = undefined;
@@ -82,11 +83,7 @@ export class CoordinatorTools {
           ...(typeof args.cursor === "string" && args.cursor.trim() === "" ? { cursor: undefined } : {})
         };
         const query = InspectInputSchema.parse(normalizedArgs);
-        const raw = await this.runtime.inspect(query.runId);
-        if (query.view === undefined && query.taskId === undefined && query.cursor === undefined) {
-          return raw;
-        }
-        return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
+        return this.runtime.inspect(query);
       }
       case "report_progress": return this.runtime.reportProgress(textField(args.runId ?? args.run_id), textField(args.headline), args.questions === undefined || args.questions === null ? [] : strings(args.questions));
       case "assess": {
@@ -109,14 +106,17 @@ export class CoordinatorTools {
       case "resume_run": {
         const runId = textField(args.runId ?? args.run_id);
         const actionIdVal = args.actionId ?? args.action_id;
+        const resumeOptions = principal.principal === "director"
+          ? { conversationUserMessageId: `director-resume-${Date.now()}` }
+          : {};
         if (actionIdVal === undefined || actionIdVal === null || (typeof actionIdVal === "string" && actionIdVal.trim() === "")) {
           const inspected = record(await this.runtime.inspect(runId));
           const pending = inspected.pendingAction !== null && typeof inspected.pendingAction === "object"
             ? record(inspected.pendingAction)
             : undefined;
-          return this.runtime.resumeBlockedRun(runId, pending?.actionId !== undefined ? textField(pending.actionId) : "");
+          return this.runtime.resumeBlockedRun(runId, pending?.actionId !== undefined ? textField(pending.actionId) : "", resumeOptions);
         }
-        return this.runtime.resumeBlockedRun(runId, textField(actionIdVal));
+        return this.runtime.resumeBlockedRun(runId, textField(actionIdVal), resumeOptions);
       }
       case "authorize_implementation": return this.runtime.authorizeImplementation(textField(args.runId ?? args.run_id), textField(args.taskId ?? args.task_id));
       case "accept_conflict_resolution": return this.runtime.acceptConflictResolution(textField(args.runId ?? args.run_id), textField(args.taskKey ?? args.task_key), textField(args.resolutionCommitHash ?? args.resolution_commit_hash));
@@ -124,13 +124,16 @@ export class CoordinatorTools {
       case "park_task": {
         if (principal.principal !== "director") throw new Error("Chỉ Director được treo task qua tool này");
         return JsonValueSchema.parse(await this.runtime.parkTask({ runId: textField(args.runId ?? args.run_id),
-          taskId: textField(args.taskId ?? args.task_id), reason: textField(args.reason), kind: "other", source: "director" }));
+          taskId: textField(args.taskId ?? args.task_id), reason: textField(args.reason),
+          kind: args.kind === "plan_mismatch" ? "plan_mismatch" : "other", source: "director" }));
       }
       case "unpark_task": {
         if (principal.principal !== "director") throw new Error("Chỉ Director được mở lại task qua tool này");
         return JsonValueSchema.parse(await this.runtime.unparkTask({ runId: textField(args.runId ?? args.run_id),
           taskId: textField(args.taskId ?? args.task_id), source: "director" }));
       }
+      case "amend_task_scope": return this.runtime.amendTaskScope({ ...args, runId: textField(args.runId ?? args.run_id), taskId: textField(args.taskId ?? args.task_id) },
+        { source: principal.principal === "director" ? "director" : "coordinator" });
       case "reconcile_cancellation": return JsonValueSchema.parse(await this.runtime.reconcileCancellation(textField(args.runId ?? args.run_id)));
       case "repository_setup": {
         const { runId, run_id: runIdAlias, ...setup } = args;

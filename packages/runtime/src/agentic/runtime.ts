@@ -30,7 +30,7 @@ import {
   type ArtifactReference, type CancellationRequest, type GitChangeSet, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification, type AcceptanceCriterion,
   type PaneBinding, type TaskDefinition, type AgentRole, type VerificationCycle, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
-import { AgenticJournal, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, isInProcessDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
+import { AgenticJournal, ScopeAmendmentRecordSchema, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, isInProcessDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
   type ConflictResolverAttempt, type IngressDiagnostic, type Outbound, type ReviewTiming, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
 import { evaluateFastPath } from "./fast-path.js";
 import {
@@ -69,6 +69,9 @@ import {
 } from "./rework-causality.js";
 import { InspectInputSchema, summarizeInspectRun, summarizeInspectState, type InspectInput } from "./mcp-output-views.js";
 import { parseAppCheckIdentity } from "./app-check-config.js";
+import { BLOCKERS, isResumable, type TaskBlocker } from "./blockers.js";
+import { blockerFingerprint, inputsChanged, priorSameFingerprint } from "./no-progress.js";
+import { AmendTaskScopeInputSchema, ScopeAmendmentRefusal, assertScopeInvariants, planScopeAmendment } from "./scope-amendment.js";
 import {
   PROTOTYPE_TASK, PrototypeSubmissionSchema, acceptPrototypeScope, admitPrototypeVersion, assertPrototypeDecision, closePrototype, currentScope,
   pendingPrototypeApprovals, prototypeApproval, prototypeDecisionRefusal, prototypeDesignInput, prototypeManifest, prototypeView, settlePrototypeDecision,
@@ -96,6 +99,17 @@ const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "completed_with_p
 /** An escalated run can still resume, so it is not here: its human decisions stay answerable. */
 const ENDED_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled"];
 const REPOSITORY_SETUP_LOG_LIMIT = 200;
+
+function nonResumablePhaseFailures(state: JournalState, run: RunRecord) {
+  return state.outbound.filter(item => {
+    const blocker = item.phaseFailure?.blocker;
+    if (item.message.run_id !== run.runId || !item.phaseFailure?.applied || item.phaseFailure.retryAuthorized ||
+        !blocker || isResumable(blocker)) return false;
+    const task = run.tasks.find(task => task.taskId === record(item.message.payload).taskId);
+    return task !== undefined && !inputsChanged(blocker, task);
+  }).map(item => ({ requestId: item.message.message_id, code: item.phaseFailure!.blocker!.code,
+    nextAction: BLOCKERS[item.phaseFailure!.blocker!.code].nextAction }));
+}
 
 function sliceUtf16(text: string, maxUnits: number): string {
   if (maxUnits <= 0) return "";
@@ -346,6 +360,10 @@ export class AgenticWorkflowRuntime {
   async continueProviderFailovers(): Promise<void> {
     await this.initialize();
     if (this.quiesced) return;
+    const hasPending = await this.journal.project(state =>
+      state.runs.some(run => run.tasks.some(task => (task.failovers ?? []).some(entry => !["dispatched", "cancelled"].includes(entry.phase))))
+    );
+    if (!hasPending) return;
     await this.transaction(async (state, save, core, outbox) => { await this.providerFailovers(state, save, core, outbox).continue(); });
   }
   /** Stop new scheduling before lifecycle checkpointing; retain in-flight receipts and worktrees. */
@@ -435,8 +453,11 @@ export class AgenticWorkflowRuntime {
   }
   private now(): string { return (this.ports.clock?.() ?? new Date()).toISOString(); }
   /** Lock-free best-effort diagnostic context derived only from the latest committed journal snapshot. */
-  taskLogAssignmentContext(binding: PaneBinding): TaskLogAssignment | undefined {
-    return taskLogAssignmentContextFromSnapshot(this.taskLogAssignmentSnapshot, binding);
+  taskLogAssignmentContext(
+    binding: PaneBinding,
+    filter?: { runId?: string; taskId?: string; assignmentMessageId?: string; correlationId?: string }
+  ): TaskLogAssignment | undefined {
+    return taskLogAssignmentContextFromSnapshot(this.taskLogAssignmentSnapshot, binding, filter);
   }
   private refreshTaskLogAssignmentSnapshot(state: JournalState): void {
     this.taskLogAssignmentSnapshot = state.outbound.flatMap(item => item.handle && ["accepted", "released"].includes(item.status)
@@ -456,16 +477,36 @@ export class AgenticWorkflowRuntime {
       return request.success && request.data.runId === runId;
     }));
   }
+  private snapshotActivityState(state: Readonly<JournalState>) {
+    return {
+      events: new Set(state.pendingCore.flatMap(batch => batch.events.map(event => event.eventId))),
+      runs: new Map(state.runs.map(run => [run.runId, {
+        status: run.status,
+        error: run.error,
+        decisionJson: JSON.stringify(run.decision),
+        tasks: new Map(run.tasks.map(task => [task.taskId, {
+          failoverDigests: new Map((task.failovers ?? []).map(entry => [entry.switchId, digest(entry)])),
+          resultRequestId: task.result?.requestId,
+          resultStatus: task.result?.status,
+          cycleStatus: task.cycle?.status,
+          cycleHistoryLen: task.cycle?.history.length,
+          evidenceIds: new Set((Array.isArray(task.spec.strategy.metadata?.tddEvidence) ? task.spec.strategy.metadata.tddEvidence : [])
+            .flatMap(item => typeof item === "object" && item !== null && !Array.isArray(item) && typeof item.verificationId === "string" ? [item.verificationId] : []))
+        }]))
+      }])),
+      out: new Map(state.outbound.map(item => [item.message.message_id, { status: item.status, error: item.error }])),
+      inbox: new Set(state.inbox.map(item => item.message.message_id))
+    };
+  }
   private async transaction<T>(action: (state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox) => Promise<T>, recoverPhases = true): Promise<T> {
     const nativeCancellations = new Map<string, string>();
     let result: T;
     try { result = await this.journal.exclusive(async (state, save) => {
       this.nativeCancellationEffects.set(state, nativeCancellations);
       this.refreshTaskLogAssignmentSnapshot(state);
-      let previous = structuredClone(state);
+      let previous = this.snapshotActivityState(state);
       const logChanges = async () => {
-        const oldEvents = new Set(previous.pendingCore.flatMap(batch => batch.events.map(event => event.eventId)));
-        for (const batch of state.pendingCore) for (const event of batch.events) if (!oldEvents.has(event.eventId) && event.type !== "command.completed") {
+        for (const batch of state.pendingCore) for (const event of batch.events) if (!previous.events.has(event.eventId) && event.type !== "command.completed") {
           const payload = typeof event.payload === "object" && event.payload !== null && !Array.isArray(event.payload) ? event.payload as Record<string, unknown> : {};
           const kind = event.type.startsWith("approval.") ? "approval" : event.type.startsWith("quality_gate.") ? "verification" :
             event.type === "agent.delivery_uncertain" ? "error" : event.type === "agent.delivery_reconciled" ? "recovery" :
@@ -475,37 +516,35 @@ export class AgenticWorkflowRuntime {
             ...(event.taskId ? { taskId: event.taskId } : {}), ...(typeof payload.attemptId === "string" ? { attemptId: payload.attemptId } : {}),
             ...(outcome ? { outcome } : {}) });
         }
-        const oldRuns = new Map(previous.runs.map(run => [run.runId, run.status]));
         for (const run of state.runs) {
-          const before = oldRuns.get(run.runId);
+          const beforeRun = previous.runs.get(run.runId);
+          const before = beforeRun?.status;
           if (before === undefined) await this.activityLog.record({ kind: "admission", role: "runtime", action: "run_admitted", runId: run.runId, outcome: run.status });
           else if (before !== run.status) await this.activityLog.record({ kind: run.status === "cancelled" ? "cancellation" : run.status === "awaiting_approval" ? "approval" : ["completed", "completed_with_parked", "failed", "escalated"].includes(run.status) ? "result" : "progress",
             role: "runtime", action: "run_status_changed", runId: run.runId, outcome: `${before} -> ${run.status}` });
-          const beforeRun = previous.runs.find(item => item.runId === run.runId);
           if (run.error && beforeRun?.error !== run.error)
             await this.activityLog.record({ kind: "error", role: "runtime", action: "run_error_recorded", runId: run.runId, outcome: "A Runtime workflow error was recorded; inspect the authorized run diagnostics." });
           for (const task of run.tasks) {
-            const beforeTask = beforeRun?.tasks.find(item => item.taskId === task.taskId);
+            const beforeTask = beforeRun?.tasks.get(task.taskId);
             for (const entry of task.failovers ?? []) {
-              const prior = beforeTask?.failovers?.find(item => item.switchId === entry.switchId);
-              if (digest(prior) !== digest(entry)) await this.activityLog.record({ kind: "recovery", role: "runtime", action: "provider_failover",
+              const priorDigest = beforeTask?.failoverDigests.get(entry.switchId);
+              if (priorDigest !== digest(entry)) await this.activityLog.record({ kind: "recovery", role: "runtime", action: "provider_failover",
                 runId: run.runId, taskId: task.taskId, attemptId: entry.sourceHandle.attemptId,
                 outcome: `${entry.failure.kind}; ${entry.phase}; policy=${entry.policy.policyVersion}; ${entry.current.provider} -> ${entry.destination?.provider ?? "pending"}; usage=unknown`,
                 ...(entry.reason ? { reason: entry.reason } : {}) });
             }
             if (!beforeTask) await this.activityLog.record({ kind: "specification", role: "runtime", action: "task_specification_accepted",
               runId: run.runId, taskId: task.taskId, outcome: `${task.spec.specification.level}/${task.spec.strategy.tddDecision.mode}` });
-            if (!beforeTask || beforeTask.result?.requestId !== task.result?.requestId || beforeTask.result?.status !== task.result?.status) {
+            if (!beforeTask || beforeTask.resultRequestId !== task.result?.requestId || beforeTask.resultStatus !== task.result?.status) {
               if (task.result) await this.activityLog.record({ kind: task.result.status === "blocked" || task.result.status === "failed" || task.result.status === "timed_out" ? "error" : "transport",
                 role: "runtime", action: `agent_result:${task.result.status}`, runId: run.runId, taskId: task.taskId, attemptId: task.result.attemptId,
                 outcome: "Authenticated result received; independent acceptance may still be pending" });
             }
-            if (beforeTask?.cycle?.status !== task.cycle?.status || beforeTask?.cycle?.history.length !== task.cycle?.history.length)
+            if (beforeTask?.cycleStatus !== task.cycle?.status || beforeTask?.cycleHistoryLen !== task.cycle?.history.length)
               await this.activityLog.record({ kind: "verification", role: "runtime", action: "verification_cycle_changed", runId: run.runId, taskId: task.taskId,
                 outcome: task.cycle?.status ?? "started" });
-            const beforeEvidence = Array.isArray(beforeTask?.spec.strategy.metadata?.tddEvidence) ? beforeTask.spec.strategy.metadata.tddEvidence : [];
             const currentEvidence = Array.isArray(task.spec.strategy.metadata?.tddEvidence) ? task.spec.strategy.metadata.tddEvidence : [];
-            const priorEvidenceIds = new Set(beforeEvidence.flatMap(item => typeof item === "object" && item !== null && !Array.isArray(item) && typeof item.verificationId === "string" ? [item.verificationId] : []));
+            const priorEvidenceIds = beforeTask?.evidenceIds ?? new Set<string>();
             for (const evidence of currentEvidence) {
               if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) continue;
               const receipt = evidence as Record<string, unknown>, phase = typeof receipt.metadata === "object" && receipt.metadata !== null && !Array.isArray(receipt.metadata)
@@ -515,29 +554,27 @@ export class AgenticWorkflowRuntime {
                 await this.activityLog.record({ kind: "tdd", role: "runtime", action: `tdd_evidence_accepted:${phaseName}`, runId: run.runId, taskId: task.taskId });
             }
           }
-          if (beforeRun && JSON.stringify(beforeRun.decision) !== JSON.stringify(run.decision) && run.decision)
+          if (beforeRun && beforeRun.decisionJson !== JSON.stringify(run.decision) && run.decision)
             await this.activityLog.record({ kind: "approval", role: "runtime", action: "approval_decision_recorded", runId: run.runId, outcome: run.decision.decision });
         }
-        const oldOut = new Map(previous.outbound.map(item => [item.message.message_id, item]));
         for (const item of state.outbound) {
-          const before = oldOut.get(item.message.message_id);
+          const before = previous.out.get(item.message.message_id);
           if (before?.status === item.status && before?.error === item.error) continue;
           const type = item.message.type;
           await this.activityLog.record({ kind: type === "task.assignment" ? "assignment" : type === "verification.requested" ? "verification" : type === "approval.request" ? "approval" : "planning",
             role: "runtime", action: before ? `${type}:${before.status}->${item.status}` : type,
             ...(item.message.run_id ? { runId: item.message.run_id } : {}), taskId: taskLogBusinessTaskId(item) ?? item.taskId, attemptId: item.attemptId, outcome: item.status });
         }
-        const oldInbox = new Set(previous.inbox.map(item => item.message.message_id));
-        for (const item of state.inbox) if (!oldInbox.has(item.message.message_id)) await this.activityLog.record({
+        for (const item of state.inbox) if (!previous.inbox.has(item.message.message_id)) await this.activityLog.record({
           kind: item.message.type.includes("approval") ? "approval" : item.message.type.includes("verification") || item.message.type === "review.verdict" ? "verification" : item.message.type === "implementation.submitted" ? "transport" : "progress",
           role: item.message.sender.role, action: item.message.type, ...(item.message.run_id ? { runId: item.message.run_id } : {}), outcome: item.status });
-        previous = structuredClone(state);
+        previous = this.snapshotActivityState(state);
       };
       const saveAndLog = async () => { await save(); this.refreshTaskLogAssignmentSnapshot(state); await logChanges(); };
       const core = new CoreSession(this.ports, state, saveAndLog, this.coreRestoreCache);
       await core.restore();
       const outbox = new HerdrOutbox(this.ports, state, saveAndLog, { directorMailbox: this.ports.director !== undefined });
-      if (recoverPhases) await this.recoverPhaseFailures(state, saveAndLog, outbox);
+      if (recoverPhases) await this.recoverPhaseFailures(state, saveAndLog, outbox, core);
       return action(state, saveAndLog, core, outbox);
     }); }
     finally {
@@ -673,16 +710,110 @@ export class AgenticWorkflowRuntime {
         sdlcStatus: run.status, result: message.payload, next: "Call inspect to read the durable inbox, then continue the workflow or report a blocker." },
       artifact_references: message.artifact_references, occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
   }
+  private hasMissingCoordinatorWakeups(state: Readonly<JournalState>): boolean {
+    if (state.outbound.some(item => {
+      if (item.phaseFailure && !item.phaseFailure.applied) {
+        return state.runs.some(r => r.runId === item.message.run_id);
+      }
+      if (item.phaseRetirement && item.status !== "cancelled") {
+        return true;
+      }
+      if (!item.phaseFailure?.retryAuthorized && !item.phaseRetirement?.resumeAuthorizedBy && !item.leaseReacquisition) {
+        return false;
+      }
+      const run = state.runs.find(r => r.runId === item.message.run_id);
+      if (!run || run.cancelled || run.status !== "implementing") return false;
+      if (item.leaseReacquisition) return true;
+      const payload = record(item.message.payload);
+      const task = run.tasks.find(t => t.taskId === payload.taskId);
+      if (!task) return false;
+      if (task.writerReleased || task.result !== undefined) {
+        if (this.ports.automaticAlternativeEvidence && task.result?.status === "succeeded" && task.spec.strategy.tddDecision.mode !== "required") {
+          let evidenceComplete = false;
+          try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); evidenceComplete = true; } catch { /* still needed */ }
+          if (!evidenceComplete && !state.outbound.some(out => out.message.run_id === run.runId &&
+              out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence" &&
+              record(out.message.payload).taskId === task.taskId && !out.phaseFailure && !out.phaseRetirement && out.status !== "cancelled")) {
+            return true;
+          }
+        }
+        return false;
+      }
+      const phase = typeof payload.phase === "string" ? payload.phase : "";
+      const id = `phase-notice-${digest([run.runId, task.taskId, phase, item.message.message_id])}`;
+      const notice = state.outbound.find(out => out.message.message_id === id);
+      if (!notice) return true;
+      if (notice.status === "cancelled" && !notice.request && !notice.handle && Boolean(notice.error?.includes("parent lease is expired"))) return true;
+      if (notice.status === "sending" || notice.status === "unknown_delivery") return false;
+      // A delivered notice is retained, but an expired writer lease on its parent still needs the wake transaction's lease continuation.
+      const parent = state.outbound.find(out => out.message.run_id === run.runId && out.message.type === "task.assignment" &&
+        out.taskId === task.taskId && out.status === "accepted" && out.handle?.attemptId === payload.implementationAttemptId);
+      return Boolean(parent?.lease && Date.parse(parent.lease.expiresAt) <= Date.parse(this.now()));
+    })) return true;
+    if (state.runs.some(run =>
+      (run.nativeDeliveries ?? []).some(entry => this.durablySettledNative(state, entry.message)) ||
+      (run.pendingAction?.kind === "reconcile_delivery" && run.pendingAction.state === "pending" && !run.cancelled && (
+        (() => {
+          const action = run.pendingAction!;
+          const intent = (run.nativeDeliveries ?? []).find(entry => entry.message.message_id === action.sourceMessageId);
+          return intent ? this.durablySettledNative(state, intent.message) : state.inbox.some(item =>
+            item.message.message_id === action.sourceMessageId && item.message.run_id === run.runId &&
+            item.message.correlation_id === run.delegation.correlationId && item.message.idempotency_key !== undefined && ["received", "applied", "rejected"].includes(item.status));
+        })()
+      ))
+    )) return true;
+    for (const item of state.inbox) {
+      if (item.status !== "applied") continue;
+      const message = item.message;
+      if (isConversationContext(message)) {
+        if (!message.run_id) continue;
+        const run = state.runs.find(candidate => candidate.runId === message.run_id);
+        if (!run || run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status) ||
+            message.correlation_id !== run.delegation.correlationId) continue;
+        const wakeId = `p19-wake-${digest([run.runId, message.message_id])}`;
+        if (!state.outbound.some(out => out.message.message_id === wakeId)) return true;
+        continue;
+      }
+      if (message.recipient.role === "coordinator" && message.sender.role !== "coordinator" && message.sender.role !== "conversation") {
+        if (!message.run_id || !message.causation_id || !["spec.draft", "task.status", "verification.escalation"].includes(message.type)) continue;
+        const source = state.outbound.find(out => out.message.message_id === message.causation_id && out.message.run_id === message.run_id &&
+          out.message.recipient.role === message.sender.role && out.handle?.target.agentId === message.sender.agent_id &&
+          out.handle?.target.paneId === message.sender.pane_id && ["accepted", "released"].includes(out.status));
+        if (!source) continue;
+        const run = state.runs.find(candidate => candidate.runId === message.run_id);
+        if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || run.status === "awaiting_approval" ||
+            Object.values(run.userDecisions ?? {}).some(decision => decision.status === "pending")) continue;
+        const wakeId = `p19-wake-${digest([run.runId, message.message_id])}`;
+        if (!state.outbound.some(out => out.message.message_id === wakeId)) return true;
+      }
+    }
+    return false;
+  }
   /** Reconstruct a lost deterministic wake from an already-applied, correlated result during recovery. */
   async recoverMissingCoordinatorWakeups(): Promise<JsonValue> {
     // `received` is the durable inbox write-ahead before semantic application. The envelope was parsed and authenticated
     // before that write. Reapply all business validators, deferring blocked/terminal runs until an authorized resume.
-    const received = await this.transaction(async state => state.inbox.filter(item => item.status === "received" &&
-        (isCancellationHandoff(item.message) || state.outbound.some(out => out.reviewReplacement && out.message.message_id === item.message.causation_id) || !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
-          TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message) &&
-          !this.acceptsPausedUserDecision(run, item.message) &&
-          !(run.status === "escalated" && isConversationContext(item.message))))))
-      .map(item => RoleMessageSchema.parse(item.message)));
+    const initial = await this.journal.project(state => {
+      const received = state.inbox.filter(item => item.status === "received" &&
+          (isCancellationHandoff(item.message) || state.outbound.some(out => out.reviewReplacement && out.message.message_id === item.message.causation_id) || !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
+            TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message) &&
+            !this.acceptsPausedUserDecision(run, item.message) &&
+            !(run.status === "escalated" && isConversationContext(item.message))))))
+        .map(item => RoleMessageSchema.parse(item.message));
+      const rawDeliveredApprovals = received.length > 0 ? [] : state.outbound.filter(out => out.message.sender.role === "conversation" && out.message.recipient.role === "coordinator" &&
+        out.message.type === "approval.decision" && (out.handle !== undefined && ["accepted", "released"].includes(out.status) ||
+          out.delivery === "director_mailbox" && out.status === "delivered") &&
+        !state.inbox.some(item => item.message.message_id === out.message.message_id ||
+          (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
+        state.runs.some(run => run.runId === out.message.run_id && !run.cancelled &&
+          (!TERMINAL_RUN_STATUSES.includes(run.status) || this.acceptsPausedUserDecision(run, out.message))))
+        .map(out => ({ mailbox: out.delivery === "director_mailbox", message: out.message }));
+      const needsWakeTransaction = received.length === 0 && rawDeliveredApprovals.length === 0
+        ? this.hasMissingCoordinatorWakeups(state)
+        : false;
+      return { received, rawDeliveredApprovals, needsWakeTransaction };
+    });
+    const received = initial.received;
     let replayed = 0;
     for (const message of received) {
       try {
@@ -697,20 +828,30 @@ export class AgenticWorkflowRuntime {
         await this.reportInboundFailure(message, String(error));
       }
     }
-    const deliveredApprovals = await this.transaction(async state => {
-      const result = await this.ports.panes?.getManifest?.();
-      const sender = result?.ok ? SessionManifestSchema.parse(result.value).panes.find(pane => pane.role === "conversation") : undefined;
-      return state.outbound.filter(out => out.message.sender.role === "conversation" && out.message.recipient.role === "coordinator" &&
-        out.message.type === "approval.decision" && (out.handle !== undefined && ["accepted", "released"].includes(out.status) ||
-          out.delivery === "director_mailbox" && out.status === "delivered") &&
-        !state.inbox.some(item => item.message.message_id === out.message.message_id ||
-          (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
-        state.runs.some(run => run.runId === out.message.run_id && !run.cancelled &&
-          (!TERMINAL_RUN_STATUSES.includes(run.status) || this.acceptsPausedUserDecision(run, out.message))))
-        .map(out => ({ mailbox: out.delivery === "director_mailbox", message: RoleMessageSchema.parse(sender && (!out.message.sender.pane_id || !out.message.sender.agent_id)
-          ? { ...out.message, sender: { ...out.message.sender, pane_id: out.message.sender.pane_id ?? sender.paneId, agent_id: out.message.sender.agent_id ?? sender.agentId } }
-          : out.message) }));
-    });
+    const rawDeliveredApprovals = received.length === 0
+      ? initial.rawDeliveredApprovals
+      : await this.journal.project(state =>
+          state.outbound.filter(out => out.message.sender.role === "conversation" && out.message.recipient.role === "coordinator" &&
+            out.message.type === "approval.decision" && (out.handle !== undefined && ["accepted", "released"].includes(out.status) ||
+              out.delivery === "director_mailbox" && out.status === "delivered") &&
+            !state.inbox.some(item => item.message.message_id === out.message.message_id ||
+              (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
+            state.runs.some(run => run.runId === out.message.run_id && !run.cancelled &&
+              (!TERMINAL_RUN_STATUSES.includes(run.status) || this.acceptsPausedUserDecision(run, out.message))))
+            .map(out => ({ mailbox: out.delivery === "director_mailbox", message: out.message }))
+        );
+    const sender = rawDeliveredApprovals.length > 0
+      ? await (async () => {
+          const result = await this.ports.panes?.getManifest?.();
+          return result?.ok ? SessionManifestSchema.parse(result.value).panes.find(pane => pane.role === "conversation") : undefined;
+        })()
+      : undefined;
+    const deliveredApprovals = rawDeliveredApprovals.map(out => ({
+      mailbox: out.mailbox,
+      message: RoleMessageSchema.parse(sender && (!out.message.sender.pane_id || !out.message.sender.agent_id)
+        ? { ...out.message, sender: { ...out.message.sender, pane_id: out.message.sender.pane_id ?? sender.paneId, agent_id: out.message.sender.agent_id ?? sender.agentId } }
+        : out.message)
+    }));
     for (const { message, mailbox } of deliveredApprovals) {
       try {
         if (!await this.ports.authorizeHuman(ApprovalDecisionSchema.parse(message.payload))) {
@@ -724,6 +865,10 @@ export class AgenticWorkflowRuntime {
         await this.reportInboundFailure(message, String(error));
       }
     }
+    const needsWakeTransaction = received.length === 0 && rawDeliveredApprovals.length === 0
+      ? initial.needsWakeTransaction
+      : await this.journal.project(state => this.hasMissingCoordinatorWakeups(state));
+    if (!needsWakeTransaction) return json({ recovered: replayed });
     return this.transaction(async (state, save, _core, outbox) => {
       let recovered = 0;
       for (const item of state.inbox.filter(entry => entry.status === "applied" && entry.message.recipient.role === "coordinator" &&
@@ -1268,7 +1413,7 @@ export class AgenticWorkflowRuntime {
       await this.drainCancellationControls(state, save, core, outbox);
       await outbox.flush((out, handle) => this.bind(state, core, out, handle));
       const queuedBefore = new Set(state.outbound.filter(out => out.status === "queued").map(out => out.message.message_id));
-      await this.recoverPhaseFailures(state, save, outbox);
+      await this.recoverPhaseFailures(state, save, outbox, core);
       if (state.outbound.some(out => out.status === "queued" && !queuedBefore.has(out.message.message_id))) {
         await outbox.flush((out, handle) => this.bind(state, core, out, handle));
       }
@@ -1288,7 +1433,7 @@ export class AgenticWorkflowRuntime {
     this.inProcessDelivery ??= (async () => {
       try {
         if (this.quiesced) return;
-        const pending = await this.journal.exclusive(async state =>
+        const pending = await this.journal.project(state =>
           state.outbound.filter(out => isInProcessDelivery(out) && out.status === "sending").map(out => ({ message: out.message, mailbox: out.delivery === "director_mailbox" })));
         for (const { message, mailbox } of pending) {
           let error: string | undefined, terminal = false;
@@ -1363,7 +1508,7 @@ export class AgenticWorkflowRuntime {
    * (Conversation cannot be reached through the failing inbox) and dedupes by message_id.
    */
   async failedConversationDeliveries(): Promise<{ message: RoleMessage; error: string; attempts: number }[]> {
-    return this.journal.exclusive(async state => state.outbound.filter(out => out.status === "failed" && isConversationDelivery(out) && out.delivery === undefined)
+    return this.journal.project(state => state.outbound.filter(out => out.status === "failed" && isConversationDelivery(out) && out.delivery === undefined)
       .map(out => ({ message: out.message, error: out.error ?? "Conversation delivery failed", attempts: out.deliveryAttempts ?? 0 })));
   }
   private readonly gateWaiters = new Map<string, { runId: string; accept(result: QualityGateResult): void; reject(error: Error): void }>();
@@ -1591,10 +1736,12 @@ export class AgenticWorkflowRuntime {
     const context = await this.journal.exclusive(async state => {
       const run = state.runs.find(run => run.runId === runId);
       return { status: run?.status, supersededApprovalIds: run?.supersededApprovals?.map(item => item.approvalId) ?? [],
-        reviewTimings: structuredClone(run?.reviewTimings ?? []) };
+        reviewTimings: structuredClone(run?.reviewTimings ?? []),
+        outbound: structuredClone(state.outbound.filter(out => out.message.run_id === runId &&
+          (out.phaseFailure?.blocker || out.message.type === "task.status" && record(out.message.payload).kind === "resume_run"))) };
     });
     const report = await readWorkflowTelemetry(this.ports.runStore, runId, { source: "agentic", asOf,
-      supersededApprovalIds: context.supersededApprovalIds, reviewTimings: context.reviewTimings });
+      supersededApprovalIds: context.supersededApprovalIds, reviewTimings: context.reviewTimings, outbound: context.outbound });
     report.hostWorkStatus = context.status ?? null;
     if (report.coverage.events === 0 && context.status && ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(context.status)) {
       report.outcome = context.status; report.outcomeSource = "host_journal";
@@ -1603,18 +1750,56 @@ export class AgenticWorkflowRuntime {
   }
   async inspect(runIdOrQuery?: string | InspectInput): Promise<JsonValue> {
     if (typeof runIdOrQuery === "string" || runIdOrQuery === undefined) {
-      return this.journal.exclusive(async state => json(runIdOrQuery ? publicExecutionRun(this.run(state, runIdOrQuery)) : {
+      return this.journal.project(state => (runIdOrQuery ? publicExecutionRun(this.run(state, runIdOrQuery)) : {
         runs: state.runs.map(publicExecutionRun), outbound: state.outbound, inbox: state.inbox
-      }));
+      }) as unknown as JsonValue);
     }
     const query = InspectInputSchema.parse(runIdOrQuery);
-    const raw = await this.journal.exclusive(async state => json(query.runId ? publicExecutionRun(this.run(state, query.runId)) : {
-      runs: state.runs.map(publicExecutionRun), outbound: state.outbound, inbox: state.inbox
+    return this.journal.project(state => {
+      const raw = query.runId ? publicExecutionRun(this.run(state, query.runId)) : {
+        runs: state.runs.map(publicExecutionRun), outbound: state.outbound, inbox: state.inbox
+      };
+      if (query.view === undefined && query.taskId === undefined && query.cursor === undefined) {
+        return raw as unknown as JsonValue;
+      }
+      return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
+    });
+  }
+  /** Lightweight read-only projection of active accepted task assignments for provider failure polling. */
+  async acceptedTaskAssignments(): Promise<Array<{ selector: string; handle: AgentExecutionHandle }>> {
+    return this.journal.project(state =>
+      state.outbound
+        .filter(out => out.status === "accepted" && out.message.type === "task.assignment" && Boolean(out.handle))
+        .map(out => ({ selector: out.selector, handle: out.handle! }))
+    );
+  }
+  /** Read-only bounded projection for Director progress snapshots (`bflow progress` and `/api/v1/projects/:id/director`). */
+  async inspectDirectorProgressState(): Promise<unknown> {
+    return this.journal.project(state => ({
+      runs: state.runs.slice(-100).map(run => ({
+        runId: run.runId,
+        status: run.status,
+        cancelled: run.cancelled,
+        delegation: { title: run.delegation.title },
+        ...(run.workflowSpec ? { workflowSpec: { specification: { title: run.workflowSpec.specification.title } } } : {}),
+        ...(run.definition ? { definition: { id: run.definition.id, name: run.definition.name,
+          tasks: run.definition.tasks.map(t => ({ id: t.id, role: t.role })) } } : {}),
+        ...(run.approval ? { approval: { approvalId: run.approval.approvalId } } : {}),
+        ...(run.decision ? { decision: { approvalId: run.decision.approvalId } } : {}),
+        ...(run.userDecisions ? { userDecisions: Object.fromEntries(Object.entries(run.userDecisions).map(([k, v]) => [k, { status: v.status }])) } : {}),
+        tasks: run.tasks.map(task => ({
+          taskId: task.taskId,
+          ...(task.parked ? { parked: task.parked } : {}),
+          ...(task.result ? { result: { status: task.result.status } } : {}),
+          ...(task.cycle ? { cycle: { status: task.cycle.status } } : {}),
+          outboundIds: task.outboundIds,
+          spec: { specification: { title: task.spec.specification.title } }
+        }))
+      }))
     }));
-    if (query.view === undefined && query.taskId === undefined && query.cursor === undefined) {
-      return raw;
-    }
-    return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
+  }
+  async inspectRunSessionId(runId: string): Promise<string | undefined> {
+    return this.journal.project(state => state.runs.find(run => run.runId === runId)?.delegation.sessionId);
   }
   /** Owner startup only, before intake; use the full locked journal, never a compact diagnostic view. */
   async recoverUnqueuedWebCancellations(store: WebOperationStore): Promise<string[]> {
@@ -1644,18 +1829,68 @@ export class AgenticWorkflowRuntime {
     });
   }
   /** Facts the host watchdog needs about one run. Derived from durable state only; activity ignores Conversation-bound notices. */
-  private runFacts(state: JournalState, run: RunRecord): RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] } {
+  private runFacts(state: JournalState, run: RunRecord, currentSnapshot?: WorkflowRunSnapshot): RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] } {
     const now = Date.parse(this.now());
     // A Director mailbox write is not a role handoff: a queued or delivered wake owes no correlated result (R-B2-5).
     const handoffs = state.outbound.filter(out => out.message.run_id === run.runId && out.message.recipient.role !== "conversation" &&
       out.delivery !== "director_mailbox");
-    const messages = [...state.outbound.map(out => out.message), ...state.inbox.map(item => item.message)]
+    const messages = [...state.outbound.map(out => out.message), ...state.inbox.filter(item => item.status === "applied").map(item => item.message)]
       .filter(message => message.run_id === run.runId && message.recipient.role !== "conversation");
+    const currentTaskById = new Map((currentSnapshot?.tasks ?? []).map(task => [task.taskId, task]));
+    const countsAsBusinessActivity = (message: RoleMessage) => {
+      const payload = record(message.payload);
+      if (message.type === "task.status" && payload.kind === "result_reminder") {
+        const reminder = state.outbound.find(out => out.message.message_id === message.message_id);
+        const source = message.causation_id ? state.outbound.find(out => out.message.message_id === message.causation_id) : undefined;
+        // This is a once-only recovery wait, not delivery evidence. Preserve its
+        // anchor when transport releases the source or cancels the reminder.
+        const parentMatches = source !== undefined && (reminder?.parentAssignmentId === source.message.message_id ||
+          reminder?.parentAssignmentId === undefined && message.sender.role === "runtime");
+        return !!reminder && !!source && reminder.message.run_id === run.runId &&
+          parentMatches &&
+          message.message_id === this.holderReminderId(run, source) && payload.runId === run.runId &&
+          payload.sourceMessageId === source.message.message_id && payload.taskId === source.taskId &&
+          !!source.handle &&
+          message.recipient.role === source.message.recipient.role &&
+          message.recipient.agent_id === source.handle.target.agentId && message.recipient.pane_id === source.handle.target.paneId &&
+          this.isCurrentBusinessHolder(source, currentSnapshot);
+      }
+      if (message.type === "task.status" && payload.kind === "policy_phase_outcome") return false;
+      const own = state.outbound.find(out => out.message.message_id === message.message_id);
+      if (own && !this.isCurrentBusinessHolder(own, currentSnapshot)) return false;
+      const source = message.causation_id ? state.outbound.find(out => out.message.message_id === message.causation_id) : undefined;
+      if (source && !this.isCurrentBusinessHolder(source, currentSnapshot)) return false;
+      const taskId = typeof payload.taskId === "string" ? payload.taskId : source?.taskId;
+      const current = typeof taskId === "string" ? currentTaskById.get(taskId) : undefined;
+      if (current && message.type === "verification.requested" && payload.kind === "conditional_evidence")
+        return payload.implementationAttemptId === current.attemptId;
+      if (current && typeof payload.implementationAttemptId === "string") return payload.implementationAttemptId === current.attemptId;
+      return true;
+    };
+    const cycleTimes = [
+      ...run.tasks.flatMap(task => [
+        task.cycle?.updatedAt,
+        ...(task.cycle?.history ?? []).map(entry => entry.completedAt)
+      ]),
+      run.workflowCycle?.updatedAt,
+      ...(run.workflowCycle?.history ?? []).map(entry => entry.completedAt),
+      run.workflowChange?.createdAt
+    ].filter((value): value is string => typeof value === "string").map(value => Date.parse(value));
     const times = [
       Date.parse(run.delegation.requestedAt),
       ...(run.lastWorkflowRejection?.rejectedAt ? [Date.parse(run.lastWorkflowRejection.rejectedAt)] : []),
-      ...messages.map(message => Date.parse(message.occurred_at ?? ""))
+      ...state.outbound
+        .filter(out => out.message.run_id === run.runId && out.message.type === "delegation.accepted")
+        .map(out => Date.parse(out.message.occurred_at ?? "")),
+      ...cycleTimes,
+      ...messages.filter(countsAsBusinessActivity).map(message => Date.parse(message.occurred_at ?? ""))
     ].filter(Number.isFinite);
+    const awaitingIntegration =
+      run.status === "implementing" &&
+      !run.workflowCycle &&
+      run.tasks.length > 0 &&
+      run.tasks.every(task => task.cycle?.status === "passed") &&
+      (currentSnapshot === undefined || currentSnapshot.tasks.every(task => task.status === "succeeded"));
     const pendingDecisionRequests = Object.values(run.userDecisions ?? {}).filter(entry => entry.status === "pending")
       .map(entry => ({ request: ApprovalRequestSchema.parse(entry.request), correlationId: run.delegation.correlationId }));
     const parentRunId = typeof run.delegation.metadata?.parentRunId === "string" ? run.delegation.metadata.parentRunId : undefined;
@@ -1666,7 +1901,8 @@ export class AgenticWorkflowRuntime {
       (!supersededApprovalId || record(out.message.payload).approvalId === supersededApprovalId)) : [];
     const holders = [
       ...handoffs.filter(out => this.outboundOwesResult(state, run, out) ||
-        out.message.recipient.role === "coordinator" && out.status === "accepted" && out.handle !== undefined),
+        out.message.recipient.role === "coordinator" && out.status === "accepted" && out.handle !== undefined)
+        .filter(out => this.isCurrentBusinessHolder(out, currentSnapshot)),
       ...parentApprovalHolders
     ];
     return {
@@ -1683,7 +1919,7 @@ export class AgenticWorkflowRuntime {
         `${out.message.recipient.role}:${out.handle!.target.paneId}`, { role: out.message.recipient.role, paneId: out.handle!.target.paneId! }])).values()],
       // Deterministic checks/test suites may legitimately run longer than the stall window without any message.
       runtimeWork: run.tasks.some(task => task.verificationPending) || run.workflowVerificationPending === true ||
-        state.pendingVerifications.some(item => pendingRunId(item) === run.runId && !item.stuck),
+        awaitingIntegration || state.pendingVerifications.some(item => pendingRunId(item) === run.runId && !item.stuck),
       reportedBlocker: run.pendingAction?.state === "pending",
       pendingDecisions: pendingDecisionRequests.map(item => ({ approvalId: item.request.approvalId, requestedAt: item.request.requestedAt })),
       pendingDecisionRequests
@@ -1694,16 +1930,54 @@ export class AgenticWorkflowRuntime {
    * then calls the report methods below one at a time.
    */
   async watchdogSnapshot(sessionId: string): Promise<(RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] })[]> {
-    return this.transaction(async state => {
+    return this.transaction(async (state, _save, core) => {
       const facts: (RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] })[] = [];
       for (const run of state.runs.filter(item => item.delegation.sessionId === sessionId)) {
         try {
           if (await this.ports.workflowExtensionStarted?.(run.runId)) continue;
-          facts.push(this.runFacts(state, run));
+          facts.push(this.runFacts(state, run, run.coreCreated ? await core.snapshot(run.runId) : undefined));
         } catch { /* Unreadable state is not evidence of a stall. */ }
       }
       return facts;
     });
+  }
+  /** Business liveness follows Core's pinned attempt; old executions remain in the separate reconciliation fence. */
+  private isCurrentBusinessHolder(out: Outbound, snapshot?: WorkflowRunSnapshot): boolean {
+    if (!snapshot) return true;
+    const taskId = out.message.type === "verification.requested" ? record(out.message.payload).taskId : out.taskId;
+    if (typeof taskId !== "string") return true;
+    const current = snapshot.tasks.find(task => task.taskId === taskId);
+    if (!current?.attemptId) return true;
+    if (out.message.type === "task.assignment") {
+      if (current.agentExecution) return out.handle?.executionId === current.agentExecution.executionId &&
+        out.handle.requestId === current.agentExecution.requestId;
+      return out.handle?.attemptId === current.attemptId || out.attemptId === current.attemptId;
+    }
+    if (out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence")
+      return !out.phaseFailure && !out.phaseRetirement && record(out.message.payload).implementationAttemptId === current.attemptId;
+    return true;
+  }
+  /** Clear only an exact obsolete task blocker after Core proves a newer task attempt is authoritative. */
+  private clearSupersededTaskBlocker(state: JournalState, run: RunRecord, snapshot?: WorkflowRunSnapshot): boolean {
+    const action = run.pendingAction;
+    if (!snapshot || !action || action.state !== "pending" || action.kind !== "resume_coordinator" ||
+        run.approval?.status === "pending" && run.decision?.approvalId !== run.approval.approvalId ||
+        Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) return false;
+    const source = state.outbound.find(item => item.message.message_id === action.sourceMessageId && item.message.run_id === run.runId);
+    if (!source || !["task.assignment", "verification.requested"].includes(source.message.type)) return false;
+    const payload = record(source.message.payload), taskId = source.message.type === "task.assignment" ? source.taskId : payload.taskId;
+    if (typeof taskId !== "string") return false;
+    const current = snapshot.tasks.find(item => item.taskId === taskId);
+    if (!current?.attemptId) return false;
+    const blockedAttempt = source.message.type === "task.assignment"
+      ? source.handle?.attemptId ?? source.attemptId
+      : payload.kind === "conditional_evidence" ? payload.implementationAttemptId : undefined;
+    if (typeof blockedAttempt !== "string" || blockedAttempt === current.attemptId) return false;
+    if (run.error !== action.reason) return false;
+    if (run.status === "escalated" && action.previousStatus) run.status = action.previousStatus;
+    delete run.pendingAction;
+    delete run.error;
+    return true;
   }
   /** R-B2-15: Core stays blocked; only parked tasks and their pending descendants remain. No integration or cleanup follows. */
   private completeWithParked(state: JournalState, outbox: HerdrOutbox, run: RunRecord, snapshot: WorkflowRunSnapshot): boolean {
@@ -1749,7 +2023,11 @@ export class AgenticWorkflowRuntime {
             if (originalError === undefined) delete out.error; else out.error = originalError;
             if (out.parkStop && !out.parkStop.proof && out.parkStop.observations < CANCEL_STOP_OBSERVATION_LIMIT) {
               out.parkStop.observations++; await save();
-              const observed = await this.stopObserved({ ...out });
+              const binding = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope
+                ? await this.resolveDeveloperExecutionBinding(out) : undefined;
+              const scoped = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope && (!binding || ownsCancellationPane(out.handle!, binding))
+                ? await this.ports.stopDeveloperExecutionScope(out.handle!, binding).catch(() => undefined) : undefined;
+              const observed = scoped ? { proof: CancellationStopProofSchema.parse(scoped) } : await this.stopObserved({ ...out });
               if (observed.proof) out.parkStop.proof = observed.proof;
               await save();
             }
@@ -1820,8 +2098,16 @@ export class AgenticWorkflowRuntime {
         if (!out.parkStop.proof && out.parkStop.observations < CANCEL_STOP_OBSERVATION_LIMIT) {
           out.parkStop.observations++;
           await save();
+          const binding = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope
+            ? await this.resolveDeveloperExecutionBinding(out) : undefined;
+          const scoped = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope && (!binding || ownsCancellationPane(out.handle!, binding))
+            ? await this.ports.stopDeveloperExecutionScope(out.handle!, binding).catch(() => undefined) : undefined;
+          // A scoped proof is accepted only for this exact execution handle, observed after acceptance; otherwise the stop stays unconfirmed.
+          const scopedProof = scoped ? CancellationStopProofSchema.parse(scoped) : undefined;
+          const scopedProofOwned = scopedProof !== undefined && digest(scopedProof.handle) === digest(out.handle!) &&
+            Date.parse(scopedProof.observedAt) >= Date.parse(out.handle!.acceptedAt);
           // Observe a copy: an unconfirmed park does not overwrite the original assignment's diagnostic/error.
-          const observed = await this.stopObserved({ ...out });
+          const observed: { proof?: typeof scopedProof } = scopedProof ? (scopedProofOwned ? { proof: scopedProof } : {}) : await this.stopObserved({ ...out });
           // Journal validation reconstructs nested proof records on save; always update the currently owned record.
           if (observed.proof) out.parkStop.proof = observed.proof;
           await save();
@@ -1946,7 +2232,7 @@ export class AgenticWorkflowRuntime {
 
   /** One recovery pass over durable, already-authorized park intents. Failed settlement keeps both task and outbound fenced. */
   private async recoverParkSettlements(): Promise<void> {
-    const pending = await this.journal.exclusive(async state => state.runs.filter(run => !run.cancelled && !ENDED_RUN_STATUSES.includes(run.status))
+    const pending = await this.journal.project(state => state.runs.filter(run => !run.cancelled && !ENDED_RUN_STATUSES.includes(run.status))
       .flatMap(run => run.tasks.flatMap(task => task.parkSettlement ? [{ runId: run.runId, taskId: task.taskId, ...task.parkSettlement.park }] : [])));
     for (const item of pending) {
       try { await this.parkTask({ runId: item.runId, taskId: item.taskId, reason: item.reason, kind: item.kind, source: item.source,
@@ -2058,15 +2344,18 @@ export class AgenticWorkflowRuntime {
    * later episode, or a stall without any holder, becomes a bounded `auto_resume` Coordinator action.
    */
   async reportRunStalled(runId: string, episodeKey: string): Promise<void> {
-    await this.transaction(async (state, save, _core, outbox) => {
+    await this.transaction(async (state, save, core, outbox) => {
       const run = state.runs.find(item => item.runId === runId);
       if (!run) return;
-      const facts = this.runFacts(state, run);
+      const snapshot = run.coreCreated ? await core.snapshot(run.runId) : undefined;
+      this.clearSupersededTaskBlocker(state, run, snapshot);
+      const facts = this.runFacts(state, run, snapshot);
       if (!facts.live || facts.awaitingHuman || facts.activeHandoff || facts.runtimeWork || facts.pendingDecisions.length) return;
       const idleSince = new Date(facts.lastActivityAt).toISOString();
       // The holder is the role whose accepted handoff is still open while its pane is not working: it stopped without reporting.
       // Same holders as RunFacts: only obligations still owing a correlated result (an answered assignment is not a holder).
       const holders = state.outbound.filter(out => out.message.run_id === run.runId && out.message.recipient.role !== "conversation" &&
+        this.isCurrentBusinessHolder(out, snapshot) &&
         (this.outboundOwesResult(state, run, out) || out.message.recipient.role === "coordinator" && out.status === "accepted" && out.handle !== undefined));
       const holder =
         holders.find(out => out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence") ??
@@ -2354,7 +2643,7 @@ export class AgenticWorkflowRuntime {
             const parent = [...state.outbound].reverse().find(item => item.message.type === "task.assignment" &&
               item.message.run_id === run.runId && item.taskId === task.taskId && item.status === "accepted" && item.handle);
             if (this.canEnqueueTaskNotice(state, parent)) {
-              this.phaseNotice(state, outbox, run, task, phase, "passed",
+              await this.phaseNotice(state, outbox, run, task, phase, "passed",
                 "Independent policy phase recorded. Continue the accepted TDD sequence; do not modify frozen Red tests.", result.verificationId);
             } else if (!parent?.cancelRequested) {
               this.escalateExpiredWriterNotice(
@@ -2598,12 +2887,18 @@ export class AgenticWorkflowRuntime {
         const red = VerificationResultSchema.parse(evidence[0]);
         const outcomeId = `resume:${messageId}:${red.verificationId}`;
         if (state.outbound.some(item => item.message.message_id === `phase-notice-${digest([run.runId, task.taskId, "red", outcomeId])}`)) continue;
-        this.phaseNotice(state, outbox, run, task, "red", "passed",
+        await this.phaseNotice(state, outbox, run, task, "red", "passed",
           `Runtime resumed this same assignment after a verified Red receipt (${red.verificationId}). Inspect workspace status and continue the accepted TDD sequence; do not modify frozen tests. No new approval or measurement is granted.`, outcomeId);
         continue;
       }
-      // Incomplete policy phases keep their existing recovery/notice path; do not create a second continuation.
-      try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); } catch { continue; }
+      // Incomplete policy phases with an existing verification request keep their phase recovery/notice path; do not create a second continuation.
+      const hasPhaseRequest = state.outbound.some(item => item.message.run_id === run.runId &&
+        item.message.type === "verification.requested" &&
+        record(item.message.payload).taskId === task.taskId &&
+        record(item.message.payload).implementationAttemptId === current.attemptId);
+      if (hasPhaseRequest) {
+        try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); } catch { continue; }
+      }
       // Only the holder of this blocker is resumed; unrelated accepted Developers may still be doing useful work.
       const sourceIds = [run.pendingAction?.sourceMessageId, ...(run.pendingAction?.relatedMessageIds ?? [])];
       const related = sourceIds.includes(parent.message.message_id) || state.outbound.some(item => sourceIds.includes(item.message.message_id) &&
@@ -2670,7 +2965,8 @@ export class AgenticWorkflowRuntime {
         (options.webCommand ? record(priorWake.message.payload).webCommandId : record(priorWake.message.payload).conversationUserMessageId) === explicitId;
       if (priorResume && (repeatedPhysicalTurn || !retryUnsent && !recurred && !explicitAfterAutomatic)) {
         if (!options.automatic && explicitId) await this.resumeAcceptedDeveloper(state, save, _core, outbox, run, priorResume.messageId);
-        return json({ queued: true, messageId: priorResume.messageId, actionId });
+        return json({ queued: true, messageId: priorResume.messageId, actionId,
+          nonResumablePhaseFailures: nonResumablePhaseFailures(state, run) });
       }
       // A still-unknown native delivery (legacy escalated record) resumes by waking the Coordinator to reconcile; it is never resent.
       if ((!explicitAfterAutomatic && run.status !== "escalated" && !resumeUnmeasured) || !action || action.actionId !== actionId ||
@@ -2748,6 +3044,7 @@ export class AgenticWorkflowRuntime {
       if ((recurred || explicitAfterAutomatic) && state.outbound.some(item => item.message.message_id === messageId)) {
         messageId = `resume-${digest([...baseResumeKey, action.manualResumeAttempts ?? 0, (action.resumeAttempts ?? 0) + (options.automatic ? 1 : 0)])}`;
       }
+      const skippedPhaseFailures = nonResumablePhaseFailures(state, run);
       if (failedCapabilityDispatches.length) {
         // Preflight failed before a lease or transport operation. Reuse that exact immutable unsent handoff once the target proof passes.
         for (const failedCapabilityDispatch of failedCapabilityDispatches) {
@@ -2764,9 +3061,10 @@ export class AgenticWorkflowRuntime {
               ...(options.conversationUserMessageId ? { conversationUserMessageId: textField(options.conversationUserMessageId) } : {}),
               ...(options.webCommand ? { webCommandId: options.webCommand.commandId } : {}) }),
             diagnosticFences: (run.nativeDiagnosticFences ?? []).map(item => ({ operationId: item.operationId, disposition: item.disposition, delivery: "unknown_delivery", resendAllowed: false })),
+            nonResumablePhaseFailures: skippedPhaseFailures,
             next: options.automatic
               ? "Runtime resumed this run automatically (bounded). Inspect the durable blocker, then record the next workflow action through Runtime; if only a human can decide, use request_user_decision instead of stopping."
-              : "This is an explicit operational resume request, distinct from earlier automatic wakes or hold instructions. Inspect the current durable blocker and diagnostic fences, confirm the required capability is now available, then continue this same run through Runtime. It grants no approval, TDD/verification-limit reset, delivery claim or implementation authority." },
+              : "This is an explicit operational resume request, distinct from earlier automatic wakes or hold instructions. Inspect the current durable blocker and diagnostic fences, confirm the required capability is now available, then continue this same run through Runtime. It grants no approval, TDD/verification-limit reset, delivery claim or implementation authority. Các phase failure lệch kế hoạch trong nonResumablePhaseFailures sẽ không được đo lại trên cùng revision." },
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
       }
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
@@ -2782,6 +3080,7 @@ export class AgenticWorkflowRuntime {
           (item.phaseFailure.repairable === false || (!!explicitId && item.phaseFailure.leaseRecoveryRequired === true));
         if ((matchesSource || matchesActiveRunUnrepairable) &&
             (item.phaseFailure.repairable === false || item.phaseFailure.leaseRecoveryRequired === true)) {
+          if (skippedPhaseFailures.some(skipped => skipped.requestId === item.message.message_id)) continue;
           item.phaseFailure.retryAuthorized = true;
         }
       }
@@ -2798,7 +3097,8 @@ export class AgenticWorkflowRuntime {
         // The user's resume grants a fresh automatic budget, with backoff counted from now, so the run can recover itself again.
         action.manualResumeAttempts = manualResumeAttempts + 1;
         action.resumeAttempts = 0;
-        if (action.kind === "resume_coordinator" && (action.recovery === undefined || action.recovery === "manual")) action.recovery = "auto_resume";
+        if (skippedPhaseFailures.length === 0 && action.kind === "resume_coordinator" &&
+            (action.recovery === undefined || action.recovery === "manual")) action.recovery = "auto_resume";
       }
       run.status = action.previousStatus ?? (explicitAfterAutomatic || resumeUnmeasured ? run.status : "specifying");
       if (verificationRetry) this.prepareVerificationRetry(state, run); // same as retry_verification
@@ -2810,9 +3110,9 @@ export class AgenticWorkflowRuntime {
       if (run.resumeReceipts.length > 50) run.resumeReceipts.shift();
       for (const retired of retiredToResume) retired.phaseRetirement!.resumeAuthorizedBy = textField(explicitId);
       if (!options.automatic && explicitId) await this.resumeAcceptedDeveloper(state, save, _core, outbox, run, messageId);
-      await this.recoverPhaseFailures(state, save, outbox);
+      await this.recoverPhaseFailures(state, save, outbox, _core);
       await save();
-      return json({ queued: true, messageId, actionId: action.actionId });
+      return json({ queued: true, messageId, actionId: action.actionId, nonResumablePhaseFailures: skippedPhaseFailures });
     });
   }
 
@@ -2927,7 +3227,12 @@ export class AgenticWorkflowRuntime {
     await this.transaction(async state => { this.providerDelivery(state, message, binding); });
   }
   /** Current native Agy admission/tool authority; historical delivery matching alone grants no new action. */
-  async authorizeAgyProviderTurn(input: unknown, bindingInput: unknown, operationName?: string): Promise<void> {
+  async authorizeAgyProviderTurn(
+    input: unknown,
+    bindingInput: unknown,
+    operationName?: string,
+    options?: { skipLeaseRenewalIfFresh?: boolean }
+  ): Promise<void> {
     const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);
     await this.transaction(async (state, _save, core, outbox) => {
       if (this.quiesced && (operationName === undefined || !QUIESCED_RECEIPT_DRAIN_OPERATIONS.includes(operationName)))
@@ -3039,7 +3344,10 @@ export class AgenticWorkflowRuntime {
         }
       }
       // Registry, rather than the journal's future expiry, proves current fencing authority.
-      await outbox.renew(out);
+      const leaseFresh = options?.skipLeaseRenewalIfFresh === true &&
+        !owner.leaseRenewal && !owner.leaseReacquisition &&
+        Date.parse(owner.lease.expiresAt) - Date.parse(this.now()) > 240_000;
+      if (!leaseFresh) await outbox.renew(out);
     });
   }
   /** An authenticated Stop is operational evidence only. It never applies ingress, retries delivery or changes business state. */
@@ -3275,6 +3583,83 @@ export class AgenticWorkflowRuntime {
       if (outcome.rebound) this.progress(state, outbox, run, `Đã cập nhật công việc theo commit mới trên kho mã (${(outcome.previousRevision ?? "?").slice(0, 7)} → ${(outcome.revision ?? "?").slice(0, 7)}); thiết kế đã duyệt không đổi`);
       await save();
       return json({ ...outcome, unblocked, status: run.status });
+    });
+  }
+  /**
+   * In-run scope amendment (GĐ3, D3). Narrows a task's planned paths or edits its test names inside its current ownership.
+   * Ownership is never changed: Core persists the definition and rejects a different digest.
+   * Runtime re-derives every invariant. It never re-measures: the phase failure stays as evidence and the changed spec/strategy digests
+   * are what let the existing resume/unpark paths measure again (`inputsChanged`).
+   */
+  async amendTaskScope(inputRaw: unknown, context: { source: "coordinator" | "director" }): Promise<JsonValue> {
+    const input = AmendTaskScopeInputSchema.parse(inputRaw);
+    await this.initialize();
+    return this.transaction(async (state, save, core, outbox) => {
+      if (this.quiesced) throw new Error("Runtime is quiesced");
+      const run = this.run(state, input.runId);
+      await this.assertDirectorWritable(run);
+      if (context.source === "director" && run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+      if (run.supersededBy) throw new AdmissionRejectedError(`Run ${run.runId} continued as follow-up run ${run.supersededBy}`);
+      const refuse = (code: ConstructorParameters<typeof ScopeAmendmentRefusal>[0], message: string): never => { throw new ScopeAmendmentRefusal(code, message); };
+      if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) refuse("not_amendable", `Run is ${run.status}`);
+      const task = run.tasks.find(item => item.taskId === input.taskId);
+      if (!task || !run.coreCreated || !run.definition || !run.workflowSpec) return refuse("not_amendable", "Task has no accepted plan to amend");
+      const definitionTask = run.definition.tasks.find(item => item.id === task.taskId);
+      if (!definitionTask) return refuse("not_amendable", "Task is not part of the accepted workflow");
+      const current = (await core.snapshot(run.runId)).tasks.find(item => item.taskId === task.taskId);
+      if (!current) return refuse("not_amendable", "Task is unknown to Core");
+      const related = state.outbound.filter(out => out.message.run_id === run.runId && (out.taskId === task.taskId || taskLogBusinessTaskId(out) === task.taskId));
+      const failures = state.outbound.filter(out => out.message.run_id === run.runId && out.phaseFailure?.applied && out.phaseFailure.blocker &&
+        !isResumable(out.phaseFailure.blocker) && record(out.message.payload).taskId === task.taskId);
+      const duplicate = task.scopeAmendments?.find(item => item.amendmentId === digest([run.runId, task.taskId, item.fromSpecDigest, input.changes]));
+      if (duplicate) return json({ amended: false, duplicate: true, amendmentId: duplicate.amendmentId, specVersion: duplicate.toSpecVersion });
+      const parkedPlan = current.status === "parked" && task.parked?.kind === "plan_mismatch";
+      const stuck = failures.some(out => !inputsChanged(out.phaseFailure!.blocker!, task));
+      if (!parkedPlan && !stuck) refuse("not_amendable", "Only a task stopped by a plan mismatch (an escalated non-resumable phase failure, or parked as plan_mismatch) can be amended");
+      if (run.nativeDeliveries?.length || related.some(out => ["sending", "unknown_delivery"].includes(out.status)))
+        throw new Error("Unknown delivery must be reconciled before amending the task scope");
+      const owned = strings(record(definitionTask.metadata).ownedPaths);
+      const spec = task.spec.specification;
+      const specDigestBefore = digest(spec), strategyDigestBefore = digest(task.spec.strategy);
+      const missingPaths = failures.flatMap(out => strings(record(out.phaseFailure!.blocker!.details).paths));
+      const plan = planScopeAmendment({ specification: spec, strategy: task.spec.strategy, ownedPaths: owned }, input.changes, { missingPaths });
+      if (!plan.diff.droppedAffectedPaths.length && !plan.diff.addedAffectedPaths.length && !plan.diff.testNamesChanged.length)
+        return refuse("empty_amendment", "The amendment changes nothing; it cannot be used to clear a stop");
+      const now = this.now();
+      const { artifactRef: _ref, approvedBy: _approved, testStrategy: _strategy, tddDecision: _tdd, ...rest } = spec;
+      const next = await this.reviewSpec({ ...rest, status: "draft", version: (spec.version ?? 1) + 1, affectedPaths: plan.affectedPaths, updatedAt: now,
+        testStrategy: { ...task.spec.strategy, criterionMappings: plan.criterionMappings },
+        metadata: { ...spec.metadata, sdd: { ...record(spec.metadata?.sdd), revisionReason: input.reason } } }, true);
+      assertScopeInvariants({ specification: spec, strategy: task.spec.strategy }, { specification: next.specification, strategy: next.strategy });
+      if (this.ports.validateTaskCommands) {
+        try { this.ports.validateTaskCommands(next.specification, next.strategy, plan.ownedPaths); }
+        catch (error) { throw new Error(`Amended task command validation failed: ${redactString(String(error))}`); }
+      }
+      const amendmentId = digest([run.runId, task.taskId, specDigestBefore, input.changes]);
+      const decision = ApprovalDecisionSchema.parse({ ...this.decisionFields(next.request), decision: "approved", decidedBy: "coordinator",
+        decidedAt: new Date(Math.max(Date.parse(this.now()), Date.parse(next.request.requestedAt))).toISOString(),
+        feedbackArtifacts: [], idempotencyKey: `scope-amend:${amendmentId}`, metadata: { autoApproved: "scope-amend", amendmentId } });
+      const approved = SpecificationSchema.parse(await this.ports.policies.specification.approve(next.specification, next.request, decision));
+      await this.ports.policies.specification.supersede?.(spec, approved);
+      const projected = { ...run.definition, tasks: run.definition.tasks.filter(item => item.id === task.taskId), dependencies: [] };
+      await this.ports.policies.specification.assertImplementationReady(approved, next.request, decision, projected);
+      task.spec = { specification: approved, request: next.request, decision, strategy: next.strategy };
+      const record_ = { amendmentId, at: now, source: context.source, reason: input.reason, fromSpecVersion: spec.version ?? 1, toSpecVersion: approved.version ?? 1,
+        fromSpecDigest: specDigestBefore, toSpecDigest: digest(approved), fromStrategyDigest: strategyDigestBefore, toStrategyDigest: digest(next.strategy),
+        diff: plan.diff };
+      task.scopeAmendments = [...(task.scopeAmendments ?? []), ScopeAmendmentRecordSchema.parse(record_)].slice(-20);
+      // An earlier resume with unchanged inputs consumed the action and left the run idle. Re-offer that same action so the normal
+      // resume path (which alone authorizes a re-measurement, via the changed digests) can run; the manual resume count is kept.
+      const action = run.pendingAction;
+      if (action?.state === "queued" && run.status !== "escalated" && failures.some(out => out.message.message_id === action.sourceMessageId)) {
+        action.previousStatus = run.status; action.state = "pending"; run.status = "escalated";
+      }
+      await this.activityLog.record({ kind: "recovery", role: "runtime", action: "task_scope_amended", runId: run.runId, outcome: `${task.taskId}:${amendmentId.slice(0, 12)}` });
+      this.progress(state, outbox, run, `Đã chỉnh phạm vi của task ${task.taskId}: bỏ ${plan.diff.droppedAffectedPaths.length} tệp chưa có, thêm ${plan.diff.addedAffectedPaths.length}; tiêu chí nghiệm thu giữ nguyên`);
+      await save();
+      return json({ amended: true, amendmentId, specVersion: approved.version ?? 1, ownedPaths: plan.ownedPaths, affectedPaths: plan.affectedPaths,
+        nextStep: parkedPlan ? "Reopen the parked task (Director: set_issue_status retrying); Runtime re-measures because the specification digest changed"
+          : "Call resume_run; Runtime re-measures the stopped phase because the specification digest changed" });
     });
   }
   /** Withdraws a design proposal the human has not decided, so Coordinator can plan again. The next proposal needs its own approval. */
@@ -4512,6 +4897,24 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       await save();
       await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       if (selectedProfile) assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
+      if (this.ports.preflightTaskEnvironment) {
+        let readiness;
+        try {
+          readiness = await this.ports.preflightTaskEnvironment({ runId: run.runId, taskId: task.taskId,
+            attemptId: taskState.attemptId!, worktreePath: tree.worktreePath, specification: task.spec.specification,
+            strategy: task.spec.strategy, ownedPaths: strings(record(definition.metadata).ownedPaths) });
+        } catch (error) {
+          readiness = { status: "blocked" as const, checkedAt: this.now(), code: "task_environment_preflight_failed",
+            reason: redactString(String(error)).slice(0, 1000), recovery: "Use check_work or ask the Coordinator to inspect host runner/sandbox readiness." };
+        }
+        if (readiness.status === "blocked") {
+          run.error = `Task environment unavailable for ${task.taskId}: ${readiness.code}: ${readiness.reason}. ${readiness.recovery}`;
+          this.pauseDeveloperAllocation(run, task.taskId, run.error, false);
+          this.progress(state, outbox, run, run.error);
+          await save();
+          break;
+        }
+      }
       const allocation = await this.ports.panes.allocateDeveloper({
         taskId: `${run.runId}-${task.taskId}`, runId: run.runId, worktreePath: tree.worktreePath,
         branchName: tree.branchName, agentName, ...(selectedProfile ? { roleProfile: selectedProfile } : {})
@@ -4760,12 +5163,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           entry.sourceBinding.worktreePath === currentBinding.worktreePath).map(entry => entry.sourceMessageId) : [];
       const selected = selectHandover(await store.read(run.runId, task.taskId), currentBinding, sources, continued);
       return json({ binding: currentBinding, authority, handover: selected });
-    });
+    }, args.proposal !== undefined);
   }
   /** Trusted local tool guard. Keep current ownership and lease checks adjacent
    * to file/commit operations; model arguments never supply the authority. */
   async withDeveloperWorkspace<T>(bindingInput: PaneBinding, runId: string, taskId: string,
-    use: (task: TaskRecord, definition: TaskDefinition) => Promise<T>): Promise<T> {
+    use: (task: TaskRecord, definition: TaskDefinition) => Promise<T>,
+    options?: { readOnly?: boolean }): Promise<T> {
     const binding = PaneBindingSchema.parse(bindingInput);
     return this.transaction(async (state, _save, core, outbox) => {
       if (this.quiesced || binding.role !== "developer") throw new Error("Developer writes are quiesced or unauthorized");
@@ -4780,7 +5184,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           out.handle.target.worktreePath !== binding.worktreePath || digest(out.handle.target.session) !== digest(binding.session) ||
           task.worktrees.at(-1)?.worktreePath !== binding.worktreePath)
         throw new Error("No current Developer assignment owns this task workspace");
-      await outbox.renew(out);
+      const leaseFresh = options?.readOnly === true && out.lease &&
+        !out.leaseRenewal && !out.leaseReacquisition &&
+        Date.parse(out.lease.expiresAt) - Date.parse(this.now()) > 240_000;
+      if (!leaseFresh) await outbox.renew(out);
       const selectedProfile = selectRoleProfile(run.roleProfiles, binding.role, definition.roleProfile);
       assertProfileBinding(selectedProfile, binding);
       if (selectedProfile) {
@@ -4792,7 +5199,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       }
       await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       return use(task, definition);
-    });
+    }, options?.readOnly !== true);
   }
   /** Revalidates and renews the authenticated pane's live task lease immediately around a mediated tool side effect. */
   async withAssignedToolAction<T>(bindingInput: PaneBinding,
@@ -4932,7 +5339,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           previous.error = `policy_phase_failed:${UNMEASURED_PHASE_SUMMARY}`;
           previous.phaseFailure = { summary: UNMEASURED_PHASE_SUMMARY, repairable: false, applied: false, retryAuthorized: true };
           await save();
-          await this.recoverPhaseFailures(state, save, outbox);
+          await this.recoverPhaseFailures(state, save, outbox, core);
         } else {
           if (record(previous.message.payload).sourceRevision !== sourceRevision) throw new Error("Prior phase measurement is unresolved on another revision; reconcile it before retrying");
           return json({ queued: true, messageId: previous.message.message_id, deliveryStatus: previous.status });
@@ -4959,17 +5366,98 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       await save(); return json({ queued: true, messageId: id });
     });
   }
-  private phaseNotice(state: JournalState, outbox: HerdrOutbox, run: RunRecord, task: TaskRecord,
-    phase: string, status: string, summary: string, outcomeId: string): void {
-    const parent = [...state.outbound].reverse().find(item => item.message.type === "task.assignment" &&
-      item.message.run_id === run.runId && item.taskId === task.taskId && item.status === "accepted" && item.handle);
-    if (!parent?.handle) throw new Error("Policy phase has no active Developer assignment for its outcome");
+  private async phaseNotice(state: JournalState, outbox: HerdrOutbox, run: RunRecord, task: TaskRecord,
+    phase: string, status: string, summary: string, outcomeId: string): Promise<boolean> {
+    const outcome = state.outbound.find(item => item.message.message_id === outcomeId && item.message.run_id === run.runId);
+    const outcomePayload = outcome ? record(outcome.message.payload) : {};
+    const implementationAttemptId = typeof outcomePayload.implementationAttemptId === "string" ? outcomePayload.implementationAttemptId : undefined;
+    const parents = state.outbound.filter(item => item.message.type === "task.assignment" &&
+      item.message.run_id === run.runId && item.taskId === task.taskId && item.status === "accepted" && item.handle &&
+      (implementationAttemptId ? item.handle.attemptId === implementationAttemptId : true));
+    const parent = parents.length === 1 ? parents[0] : undefined;
+    // Preserve stale outcomes as durable evidence, but never turn them into instructions for a newer writer.
+    if (!parent?.handle) return false;
+    const phaseFailureEvidence = outcome?.phaseFailureEvidence;
+    const sourceRevision = typeof outcomePayload.sourceRevision === "string" ? outcomePayload.sourceRevision : undefined;
+    const failureFindings = phaseFailureEvidence ? await this.phaseFailureFindings(run, task, outcome!, phaseFailureEvidence,
+      implementationAttemptId, sourceRevision) : [];
+    if (status === "failed" && outcome?.phaseFailure?.repairable === true && failureFindings.length === 0) return false;
     const id = `phase-notice-${digest([run.runId, task.taskId, phase, outcomeId])}`;
     outbox.enqueueTaskNotice(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
       causation_id: parent.message.message_id, run_id: run.runId, sender: { role: "coordinator" },
       recipient: { role: "developer", agent_id: parent.handle.target.agentId, pane_id: parent.handle.target.paneId }, type: "task.status",
-      payload: json({ kind: "policy_phase_outcome", runId: run.runId, taskId: task.taskId, phase, status, summary, outcomeId }),
-      artifact_references: [], occurred_at: this.now(), idempotency_key: id }), parent);
+      payload: json({ kind: "policy_phase_outcome", runId: run.runId, taskId: task.taskId, phase, status, summary, outcomeId,
+        ...(implementationAttemptId ? { implementationAttemptId } : {}), ...(sourceRevision ? { sourceRevision } : {}),
+        ...(phaseFailureEvidence ? { evidenceArtifacts: [phaseFailureEvidence] } : {}), ...(failureFindings.length ? { failureFindings } : {}) }),
+      artifact_references: phaseFailureEvidence ? [phaseFailureEvidence] : [], occurred_at: this.now(), idempotency_key: id }), parent);
+    return true;
+  }
+  private async phaseFailureFindings(run: RunRecord, task: TaskRecord, request: Outbound, evidence: ArtifactReference,
+    attemptId: string | undefined, sourceRevision: string | undefined): Promise<{ criterionId: string; summary: string }[]> {
+    try {
+      const ref = ArtifactReferenceSchema.parse(evidence), payload = record(request.message.payload);
+      if (!attemptId || !sourceRevision || ref.runId !== run.runId || ref.taskId !== task.taskId ||
+          payload.runId !== run.runId || payload.taskId !== task.taskId || payload.phase === undefined ||
+          payload.implementationAttemptId !== attemptId || payload.sourceRevision !== sourceRevision ||
+          ref.sizeBytes === undefined || ref.sizeBytes > 1_048_576) return [];
+      await this.verifyReferences([ref], run.runId);
+      const chunks: Buffer[] = []; let size = 0;
+      for await (const chunk of this.ports.artifactStore.get(ref)) {
+        const bytes = Buffer.from(unwrap(chunk)); size += bytes.length;
+        if (size > 1_048_576) return [];
+        chunks.push(bytes);
+      }
+      const document = record(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      const observation = record(document.observation);
+      if (document.runId !== run.runId || document.taskId !== task.taskId || document.attemptId !== attemptId ||
+          document.phase !== payload.phase || document.sourceRevision !== sourceRevision || observation.revision !== sourceRevision ||
+          document.accepted !== false || !Array.isArray(document.criteria)) return [];
+      const allowed = new Set(task.spec.specification.acceptanceCriteria.map(criterion => criterion.id));
+      return document.criteria.slice(0, 32).flatMap(value => {
+        const finding = record(value);
+        if (finding.passed !== false || typeof finding.criterionId !== "string" || !allowed.has(finding.criterionId) ||
+            typeof finding.summary !== "string" || finding.summary.trim().length === 0) return [];
+        return [{ criterionId: finding.criterionId, summary: finding.summary.trim().slice(0, 400) }];
+      });
+    } catch { return []; }
+  }
+  /** Bounded authenticated readback for the current writer after a restart or interrupted notice delivery. */
+  async readPolicyFailureContext(bindingInput: PaneBinding, runId: string, taskId: string, attemptId: string): Promise<JsonValue> {
+    const binding = PaneBindingSchema.parse(bindingInput);
+    if (binding.role !== "developer" || !binding.session) throw new Error("Policy failure readback requires the authenticated Developer session");
+    return this.transaction(async (state, _save, core) => {
+      const run = state.runs.find(item => item.runId === runId), task = run?.tasks.find(item => item.taskId === taskId);
+      const current = run?.coreCreated ? (await core.snapshot(runId)).tasks.find(item => item.taskId === taskId) : undefined;
+      const assignment = state.outbound.find(out => out.message.run_id === runId && out.taskId === taskId &&
+        out.message.type === "task.assignment" && out.status === "accepted" && out.handle?.attemptId === attemptId &&
+        out.handle.target.agentId === binding.agentId && out.handle.target.paneId === binding.paneId &&
+        digest(out.handle.target.session) === digest(binding.session));
+      if (!run || !task || !assignment || current?.attemptId !== attemptId || current.agentExecution?.executionId !== assignment.handle?.executionId)
+        throw new Error("Policy failure readback is outside the current accepted Developer assignment");
+      const lease = AgentLeaseSchema.safeParse(assignment.lease);
+      if (!lease.success || lease.data.runId !== runId || lease.data.taskId !== taskId || lease.data.attemptId !== attemptId ||
+          lease.data.agentId !== binding.agentId || lease.data.fencingToken <= 0 ||
+          Date.parse(lease.data.expiresAt) <= Date.parse(this.now()))
+        return json({ runId, taskId, attemptId, actionable: false, reason: "Current writer lease is expired or no longer valid; findings remain for Coordinator reconciliation.", failures: [] });
+      const failures = [];
+      for (const out of state.outbound) {
+        const payload = record(out.message.payload);
+        if (!out.phaseFailure || out.message.run_id !== runId || out.message.type !== "verification.requested" ||
+            payload.taskId !== taskId || payload.implementationAttemptId !== attemptId) continue;
+        const findings = out.phaseFailureEvidence ? await this.phaseFailureFindings(run, task, out, out.phaseFailureEvidence,
+          attemptId, typeof payload.sourceRevision === "string" ? payload.sourceRevision : undefined) : [];
+        failures.push({ requestId: out.message.message_id, phase: payload.phase, sourceRevision: payload.sourceRevision, summary: out.phaseFailure.summary,
+          repairable: out.phaseFailure.repairable, ...(out.phaseFailureEvidence ? { evidenceArtifacts: [out.phaseFailureEvidence] } : {}),
+          ...(findings.length ? { findings } : {}) });
+      }
+      const retainedFailures = failures.slice(-8);
+      const pendingUnmappedFailure = retainedFailures.some(failure => failure.requestId === run.pendingAction?.sourceMessageId &&
+        failure.repairable && !("findings" in failure));
+      const actionable = !pendingUnmappedFailure && retainedFailures.some(failure => failure.repairable && "findings" in failure);
+      return json({ runId, taskId, attemptId, actionable,
+        ...(!actionable ? { reason: "No verified mapped criterion findings are available for this writer; reconcile the exact outcome with the Coordinator." } : {}),
+        failures: retainedFailures });
+    }, false);
   }
   private phaseFailureReply(run: RunRecord, request: Outbound, replay = false): JsonValue {
     const payload = record(request.message.payload), failure = request.phaseFailure!;
@@ -5010,7 +5498,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   }
   /** Actual host measurements can fail without becoming successful P16 evidence.
    * Preserve the request outcome, bound repairs, and resume only its owning task. */
-  async recordPhaseFailure(bindingInput: PaneBinding, requestId: string, summary: string, repairable: boolean, evidence?: ArtifactReference): Promise<JsonValue> {
+  async recordPhaseFailure(bindingInput: PaneBinding, requestId: string, summary: string, repairable: boolean, evidence?: ArtifactReference,
+    blocker?: TaskBlocker): Promise<JsonValue> {
     const binding = PaneBindingSchema.parse(bindingInput);
     return this.transaction(async (state, save, _core, outbox) => {
       const request = state.outbound.find(item => item.message.message_id === requestId);
@@ -5019,8 +5508,20 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           digest(request.handle.target.session) !== digest(binding.session) || record(request.message.payload).kind !== "conditional_evidence")
         throw new Error("Phase failure does not belong to this independent verifier");
       const run = this.run(state, request.message.run_id!);
+      const payload = record(request.message.payload);
+      const task = run.tasks.find(item => item.taskId === payload.taskId);
+      if (!task) throw new Error("Policy phase task missing");
+      const sourceRevision = textField(payload.sourceRevision);
+      const phase = textField(payload.phase);
+      const specDigest = digest(task.spec.specification), strategyDigest = digest(task.spec.strategy);
+      const recordedBlocker = blocker ? { code: blocker.code, fixableBy: blocker.fixableBy,
+        fingerprint: blockerFingerprint({ code: blocker.code, runId: run.runId, taskId: task.taskId, phase,
+          sourceRevision, specDigest, strategyDigest, details: blocker.details }),
+        specDigest, strategyDigest, sourceRevision, details: json(blocker.details) as Record<string, JsonValue> } : undefined;
+      if (blocker && !isResumable(blocker)) repairable = false;
       if (request.phaseFailure) {
-        if (request.phaseFailure.summary !== summary || request.phaseFailure.repairable !== repairable || digest(request.phaseFailureEvidence) !== digest(evidence))
+        if (request.phaseFailure.summary !== summary || request.phaseFailure.repairable !== repairable ||
+            digest(request.phaseFailureEvidence) !== digest(evidence) || digest(request.phaseFailure.blocker) !== digest(recordedBlocker))
           throw new Error("Conflicting immutable policy failure outcome");
         return this.phaseFailureReply(run, request, true);
       }
@@ -5028,10 +5529,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (request.status !== "accepted") throw new Error("Verifier released without a saved phase failure; reconcile its original request");
       if (evidence) { await this.verifyReferences([evidence], run.runId); request.phaseFailureEvidence = ArtifactReferenceSchema.parse(evidence); }
       await outbox.renew(request);
-      request.phaseFailure = { summary: textField(summary), repairable, applied: false };
+      request.phaseFailure = { summary: textField(summary), repairable, applied: false,
+        ...(recordedBlocker ? { blocker: recordedBlocker } : {}) };
       request.error = `policy_phase_failed:${summary}`;
       await save(); // preserve the measured outcome before releasing its lease
-      await this.recoverPhaseFailures(state, save, outbox);
+      await this.recoverPhaseFailures(state, save, outbox, _core);
       return this.phaseFailureReply(run, request);
     });
   }
@@ -5048,31 +5550,49 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       ...inheritedAutoResume(run),
       recovery: automatic ? "auto_resume" : "manual" };
   }
-  private async recoverPhaseFailures(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox): Promise<void> {
+  private async recoverPhaseFailures(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox, core?: CoreSession): Promise<void> {
     for (const request of state.outbound.filter(item => item.phaseFailure && !item.phaseFailure.applied)) {
-      const { summary, repairable } = request.phaseFailure!;
+      const { summary, repairable, blocker } = request.phaseFailure!;
       const run = state.runs.find(item => item.runId === request.message.run_id);
       if (!run) continue;
       const payload = record(request.message.payload);
       const task = run.tasks.find(item => item.taskId === payload.taskId);
       if (!task) continue;
+      const currentAttempt = core && run.coreCreated
+        ? (await core.snapshot(run.runId)).tasks.find(item => item.taskId === task.taskId)?.attemptId
+        : undefined;
+      if (currentAttempt && typeof payload.implementationAttemptId === "string" && currentAttempt !== payload.implementationAttemptId) {
+        // An interrupted A outcome remains auditable, but it is not B's repair instruction or budget.
+        request.phaseFailure!.applied = true;
+        if (core) this.clearSupersededTaskBlocker(state, run, await core.snapshot(run.runId));
+        await save();
+        continue;
+      }
       await outbox.release(request);
+      const repeatedBlocker = blocker && priorSameFingerprint(state, run.runId, task.taskId, blocker.fingerprint,
+        request.message.message_id) >= 1;
       const failures = state.outbound.filter(item => item.message.run_id === run.runId && item.error?.startsWith("policy_phase_failed:") &&
+        !item.phaseFailure?.retryAuthorized && item.phaseFailure?.repairable !== false &&
         record(item.message.payload).taskId === task.taskId && record(item.message.payload).phase === payload.phase &&
         record(item.message.payload).implementationAttemptId === payload.implementationAttemptId).length;
       if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(run.status)) {
         // Retain the receipt while preserving a newer terminal decision.
-      } else if (!repairable || failures >= run.maxIterations || task.result !== undefined) {
+      } else if (repeatedBlocker || !repairable || failures >= run.maxIterations || task.result !== undefined) {
         const previousStatus = run.status;
-        run.status = "escalated"; run.error = task.result
+        run.status = "escalated"; run.error = repeatedBlocker
+          ? `No progress: same ${blocker.code} on same revision and plan`
+          : blocker && !isResumable(blocker) ? `Plan mismatch (${blocker.code}): ${summary}`
+          : task.result
           ? `Submitted implementation requires independent policy repair: ${summary}`
           : !repairable ? `Policy measurement blocked: ${summary}` : `Policy phase repair limit exhausted: ${summary}`;
         // An infrastructure failure (runner, sandbox, build) is not a code defect: once fixed, an explicit resume re-measures the
         // same revision. An exhausted repair limit stays a human stop, so the bound is never widened.
-        if (!repairable || task.result) run.pendingAction = { actionId: `next-${digest([run.runId, request.message.message_id])}`, kind: "resume_coordinator",
-          owner: "coordinator", reason: run.error.slice(0, 2000), sourceMessageId: request.message.message_id, createdAt: this.now(), state: "pending",
+        if (repeatedBlocker || !repairable || task.result) run.pendingAction = { actionId: `next-${digest([run.runId, request.message.message_id])}`, kind: "resume_coordinator",
+          owner: "coordinator", reason: (run.error + (blocker ? `\nNext: ${BLOCKERS[blocker.code].nextAction}${isResumable(blocker) ? "" : " Resume sẽ không đo lại cùng revision."}` : "")).slice(0, 2000),
+          sourceMessageId: request.message.message_id, createdAt: this.now(), state: "pending",
           previousStatus, ...inheritedManualResume(run), recovery: "manual" };
-        this.progress(state, outbox, run, run.error);
+        this.progress(state, outbox, run, blocker && !isResumable(blocker)
+          ? `Kế hoạch khai các tệp test chưa có trong commit; đang dừng để sửa kế hoạch. ${run.pendingAction?.reason ?? run.error}` : run.error);
       } else {
         const parent = [...state.outbound].reverse().find(item => item.message.run_id === run.runId && item.message.type === "task.assignment" &&
           item.taskId === task.taskId && item.status === "accepted" &&
@@ -5094,7 +5614,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
             ...inheritedManualResume(run),recovery:"manual"};
           this.progress(state,outbox,run,run.error);
         } else if (this.canEnqueueTaskNotice(state, parent)) {
-          this.phaseNotice(state, outbox, run, task, textField(payload.phase), "failed", summary, request.message.message_id);
+          const noticed = await this.phaseNotice(state, outbox, run, task, textField(payload.phase), "failed", summary, request.message.message_id);
+          if (!noticed) this.escalateExpiredWriterNotice(state, outbox, run, request.message.message_id,
+            "Policy phase evidence did not identify a verified mapped criterion finding; preserve the original evidence and reconcile this exact phase with the Coordinator. No actionable Developer repair notice was delivered.");
         } else {
           this.escalateExpiredWriterNotice(
             state,
@@ -5237,7 +5759,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         continue; // Keep the original control message and any submission handle; never re-send an uncertain notice.
       }
       if (!this.canEnqueueTaskNotice(state, parent)) continue;
-      this.phaseNotice(state, outbox, run, task, phase, request.phaseFailure?.leaseRecoveryRequired ? "failed" : "retry",
+      await this.phaseNotice(state, outbox, run, task, phase, request.phaseFailure?.leaseRecoveryRequired ? "failed" : "retry",
         request.phaseFailure?.leaseRecoveryRequired
           ? `Explicit owner resume restored the same writer lease after: ${request.phaseFailure.summary}. Inspect the independent failure evidence, repair source and commit before requesting this phase again. Frozen Red tests and verification limits remain unchanged.`
           : `Explicit resume authorized a new independent measurement of ${phase} at ${textField(payload.sourceRevision)}. Call request_verification for this phase again; this notice grants no Red evidence or implementation authority.`, request.message.message_id);
@@ -5497,24 +6019,128 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       }
     }
   }
-  async tick(): Promise<JsonValue> {
+  async tick(options?: { returnState?: boolean }): Promise<JsonValue> {
     await this.initialize();
-    if (this.quiesced) return this.inspect();
-    await this.recoverParkSettlements();
-    await this.transaction(async (state, save, core, outbox) => {
-      await this.drainCancellationControls(state, save, core, outbox);
-      await this.cleanupProfileSpecialists(state, save);
+    if (this.quiesced) return options?.returnState === false ? null : this.inspect();
+    const cancelOrProfilePredicate = (state: Readonly<JournalState>): boolean =>
+      state.runs.some(item => item.cancelled && (
+        Boolean(item.pendingAction) ||
+        Object.values(item.userDecisions ?? {}).some(d => d.status === "pending") ||
+        Boolean(item.approval && item.approval.status !== "cancelled" && (!item.decision || item.decision.approvalId !== item.approval.approvalId)) ||
+        Boolean(item.prototype && item.prototype.status !== "cancelled" && item.prototype.status !== "superseded") ||
+        state.outbound.some(out => out.message.run_id === item.runId && !out.phaseRetirement &&
+          (out.status === "queued" || out.status === "cancelled" && out.lease !== undefined && !out.parentAssignmentId) &&
+          !isCancellationHandoff(out.message) && (out.message.recipient.role !== "conversation" || out.message.type === "approval.request"))
+      )) ||
+      state.outbound.some(item => (item.status === "queued" && !item.handle && isCancellationHandoff(item.message)) ||
+        Boolean(item.roleProfile && item.profileAllocationTaskId && !item.profileAllocationReleased));
+    const mainTickWorkPredicate = (state: Readonly<JournalState>): boolean =>
+      state.runs.some(run =>
+        (run.cancelled && !run.cancelReconciled) ||
+        (!run.cancelled && !(run.nativeDeliveries?.length) && !(run.pendingAction?.state === "pending" && run.pendingAction.recovery === "reconcile_delivery") &&
+          !["completed", "completed_with_parked", "failed", "cancelled", "escalated", "awaiting_approval", "intake", "clarifying", "specifying", "planning"].includes(run.status))
+      ) ||
+      state.outbound.some(out =>
+        !out.phaseRetirement && !out.reviewReplacement && (
+          Boolean(out.leaseRelease) ||
+          ["queued", "sending", "accepted", "unknown_delivery"].includes(out.status) ||
+          (out.status === "failed" && Boolean(out.error?.includes(RoleCapabilityPreflightError.name)))
+        )
+      );
+    const idleCheck = await this.journal.project(state => {
+      const hasParkSettlements = state.runs.some(run => !run.cancelled && !ENDED_RUN_STATUSES.includes(run.status) &&
+        run.tasks.some(task => Boolean(task.parkSettlement)));
+      const needsCancelOrProfileCleanup = cancelOrProfilePredicate(state);
+      const hasProviderFailovers = state.runs.some(run =>
+        run.tasks.some(task => (task.failovers ?? []).some(entry => !["dispatched", "cancelled"].includes(entry.phase)))
+      );
+      const hasMissingWakeups = state.inbox.some(item => item.status === "received" &&
+          (isCancellationHandoff(item.message) || state.outbound.some(out => out.reviewReplacement && out.message.message_id === item.message.causation_id) || !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
+            TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message) &&
+            !this.acceptsPausedUserDecision(run, item.message) &&
+            !(run.status === "escalated" && isConversationContext(item.message)))))) ||
+        state.outbound.some(out => out.message.sender.role === "conversation" && out.message.recipient.role === "coordinator" &&
+          out.message.type === "approval.decision" && (out.handle !== undefined && ["accepted", "released"].includes(out.status) ||
+            out.delivery === "director_mailbox" && out.status === "delivered") &&
+          !state.inbox.some(item => item.message.message_id === out.message.message_id ||
+            (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
+          state.runs.some(run => run.runId === out.message.run_id && !run.cancelled &&
+            (!TERMINAL_RUN_STATUSES.includes(run.status) || this.acceptsPausedUserDecision(run, out.message)))) ||
+        this.hasMissingCoordinatorWakeups(state);
+      const needsDecisionCleanup = state.runs.some(run => (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) &&
+        Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending"));
+      const hasUnstuckPendingVerifications = state.pendingVerifications.some(item => !item.stuck);
+      const needsMainTickWork = mainTickWorkPredicate(state);
+      const hasInProcessDelivery = state.outbound.some(out => isInProcessDelivery(out) && out.status === "sending");
+      return {
+        hasParkSettlements,
+        needsCancelOrProfileCleanup,
+        hasProviderFailovers,
+        hasMissingWakeups,
+        needsDecisionCleanup,
+        hasUnstuckPendingVerifications,
+        needsMainTickWork,
+        hasInProcessDelivery
+      };
     });
-    try { await this.continueProviderFailovers(); } catch { /* isolate failover continuation errors so sibling runs still tick */ }
-    await this.recoverMissingCoordinatorWakeups();
-    await this.transaction(async (state, save, _core, outbox) => { if (this.closeUserDecisionsOfEndedRuns(state, outbox)) await save(); });
-    const pending = await this.transaction(async state => structuredClone(state.pendingVerifications));
+    if (
+      !idleCheck.hasParkSettlements &&
+      !idleCheck.needsCancelOrProfileCleanup &&
+      !idleCheck.hasProviderFailovers &&
+      !idleCheck.hasMissingWakeups &&
+      !idleCheck.needsDecisionCleanup &&
+      !idleCheck.hasUnstuckPendingVerifications &&
+      !idleCheck.needsMainTickWork &&
+      !idleCheck.hasInProcessDelivery
+    ) {
+      return options?.returnState === false ? null : this.inspect();
+    }
+    let anyEarlierMutated = false;
+    if (idleCheck.hasParkSettlements) {
+      await this.recoverParkSettlements();
+      anyEarlierMutated = true;
+    }
+    const needsCancelOrProfileCleanup = anyEarlierMutated
+      ? await this.journal.project(cancelOrProfilePredicate)
+      : idleCheck.needsCancelOrProfileCleanup;
+    if (needsCancelOrProfileCleanup) {
+      await this.transaction(async (state, save, core, outbox) => {
+        await this.drainCancellationControls(state, save, core, outbox);
+        await this.cleanupProfileSpecialists(state, save);
+      });
+      anyEarlierMutated = true;
+    }
+    if (anyEarlierMutated || idleCheck.hasProviderFailovers) {
+      try { await this.continueProviderFailovers(); } catch { /* isolate failover continuation errors so sibling runs still tick */ }
+      anyEarlierMutated = true;
+    }
+    if (anyEarlierMutated || idleCheck.hasMissingWakeups) {
+      await this.recoverMissingCoordinatorWakeups();
+      anyEarlierMutated = true;
+    }
+    const prePending = (anyEarlierMutated || idleCheck.needsDecisionCleanup || idleCheck.hasUnstuckPendingVerifications)
+      ? await this.journal.project(state => ({
+          needsDecisionCleanup: state.runs.some(run => (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) && Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending")),
+          pending: state.pendingVerifications
+        }))
+      : { needsDecisionCleanup: false, pending: [] };
+    const pending = prePending.needsDecisionCleanup
+      ? await this.transaction(async (state, save, _core, outbox) => {
+          if (this.closeUserDecisionsOfEndedRuns(state, outbox)) await save();
+          anyEarlierMutated = true;
+          return structuredClone(state.pendingVerifications);
+        })
+      : prePending.pending;
     for (const item of pending) {
       if (item.stuck) continue; // waits for an explicit retry_verification
+      anyEarlierMutated = true;
       try { await this.finishVerification(this.parseJob(item.job), this.parseOutcome(item.outcome)); }
       catch (error) { await this.recordVerificationFailure(item, error); }
     }
-    const jobs = await this.transaction(async (state, save, core, outbox) => {
+    const needsMainTickWork = anyEarlierMutated
+      ? await this.journal.project(mainTickWorkPredicate)
+      : idleCheck.needsMainTickWork;
+    const jobs = !needsMainTickWork ? [] : await this.transaction(async (state, save, core, outbox) => {
       const jobs: VerificationJob[] = [];
         for (const run of state.runs) {
           if (this.quiesced) break;
@@ -5567,7 +6193,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
                   let stopped = false;
                   try {
                     const binding = await this.resolveDeveloperExecutionBinding(out);
-                    const observed = out.handle && binding && ownsCancellationPane(out.handle, binding)
+                    const observed = out.handle && (!binding || ownsCancellationPane(out.handle, binding))
                       ? await this.ports.stopDeveloperExecutionScope?.(out.handle, binding) : undefined;
                     if (observed) {
                       const proof = CancellationStopProofSchema.parse(observed);
@@ -5661,7 +6287,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         }
         await save(); return jobs;
     });
-    await this.deliverInProcessInbox();
+    if (needsMainTickWork || anyEarlierMutated || idleCheck.hasInProcessDelivery) {
+      await this.deliverInProcessInbox();
+    }
     for (const job of jobs) {
       // No Runtime lock is held: QA/Reviewer may reply through Herdr while verification awaits them.
       try {
@@ -5683,7 +6311,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         });
       }
     }
-    return this.inspect();
+    return options?.returnState === false ? null : this.inspect();
   }
   /** Escalation whose only automatic recovery is an explicit, idempotent retry: the user gets concrete options. */
   private escalateForRetry(state: JournalState, outbox: HerdrOutbox, run: RunRecord, taskId: string, reason: string): void {
@@ -6417,7 +7045,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     if (out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope) {
       try {
         const binding = await this.resolveDeveloperExecutionBinding(out);
-        const observed = binding ? await this.ports.stopDeveloperExecutionScope(out.handle, binding) : undefined;
+        const observed = (!binding || ownsCancellationPane(out.handle, binding))
+          ? await this.ports.stopDeveloperExecutionScope(out.handle, binding) : undefined;
         if (observed) {
           const proof = CancellationStopProofSchema.parse(observed);
           if (proof.source !== "linux_pid_namespace" || digest(proof.handle) !== digest(out.handle) ||
@@ -6559,7 +7188,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     if (!out.cancellationStopProof) {
       const binding = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope
         ? await this.resolveDeveloperExecutionBinding(out) : undefined;
-      const scoped = binding ? await this.ports.stopDeveloperExecutionScope?.(out.handle!, binding) : undefined;
+      const scoped = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope && (!binding || ownsCancellationPane(out.handle!, binding))
+        ? await this.ports.stopDeveloperExecutionScope(out.handle!, binding) : undefined;
       // Seal/stop the exact namespace even while a message is uncertain; retain allocation, lease and Core until that delivery settles.
       const waitOutcome = !scoped && !uncertain ? await this.stopObserved(out) : undefined;
       const proof = scoped ? CancellationStopProofSchema.parse(scoped) : waitOutcome?.proof ??
@@ -7122,7 +7752,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       catch (error) { parent.error = `Task lease continuation blocked: ${String(error)}`; await save(); continue; }
       if (prior) { if (revive) { prior.status = "queued"; delete prior.error; await save(); } continue; }
       if (!this.canEnqueueTaskNotice(state, parent)) continue;
-      this.phaseNotice(state, outbox, run, task, textField(payload.phase), "retry", `The prior verifier request was retired by a physical human decision without claiming any measurement outcome. Request the same phase at ${textField(payload.sourceRevision)} again. This grants no Red evidence or implementation authority.`, request.message.message_id);
+      await this.phaseNotice(state, outbox, run, task, textField(payload.phase), "retry", `The prior verifier request was retired by a physical human decision without claiming any measurement outcome. Request the same phase at ${textField(payload.sourceRevision)} again. This grants no Red evidence or implementation authority.`, request.message.message_id);
       await save();
     }
   }

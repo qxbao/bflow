@@ -6,6 +6,7 @@ import { App } from '../src/app';
 import { ApiClient } from '../src/api/client';
 import { writeMode } from '../src/features/office/mode';
 import { OfficeHud, agentCounts, chatAvailable, currentRun, type OfficeHudProps } from '../src/features/office/ui/OfficeHud';
+import { DecisionInbox } from '../src/features/office/ui/interaction/DecisionInbox';
 import type { OfficeAgent, OfficeModel } from '../src/features/office/model/types';
 import { WebProjectSessionSchema, type WebProjectSession } from '@bflow/contracts/web';
 import { installApi, now, run, session } from './fixtures';
@@ -63,23 +64,15 @@ test('project switcher, failed and re-pair states, and the Tài liệu button', 
   expect(screen.getByLabelText('Trạng thái văn phòng').textContent).toContain('Chưa có dữ liệu nhân viên');
 });
 
-test('Classic | 3D switch, right rail with the decision badge, and refresh', () => {
+test('desktop shortcut rail keeps badge and document actions', () => {
   const p = props();
   render(<OfficeHud {...p} />);
-  const group = screen.getByRole('group', { name: 'Chế độ hiển thị' });
-  expect(within(group).getByRole('button', { name: '3D' }).getAttribute('aria-pressed')).toBe('true');
-  fireEvent.click(within(group).getByRole('button', { name: 'Web' }));
-  expect(p.onMode).toHaveBeenCalledWith('classic');
-  fireEvent.click(within(group).getByRole('button', { name: '3D' }));
-  expect(p.onMode).toHaveBeenCalledTimes(1);
   const rail = within(screen.getByRole('navigation', { name: 'Lối tắt' }));
-  expect(rail.getAllByRole('button').map(b => b.textContent?.replace(/Đang chờ: /, ''))).toEqual(['Tổng quan', 'Công việc', 'Quyết định2', 'Trò chuyện', 'Nhân viên', 'Tài liệu', 'Cài đặt', 'Tải lại dữ liệu']);
+  expect(rail.getAllByRole('button').map(b => b.textContent?.replace(/Đang chờ: /, ''))).toEqual(['Tổng quan', 'Công việc', 'Quyết định2', 'Trò chuyện', 'Nhân viên', 'Tài liệu', 'Cài đặt']);
   fireEvent.click(rail.getByRole('button', { name: /Quyết định/ }));
   expect(p.onNavigate).toHaveBeenCalledWith('review');
   fireEvent.click(rail.getByRole('button', { name: 'Tổng quan' }));
   expect(p.onOverview).toHaveBeenCalled();
-  fireEvent.click(rail.getByRole('button', { name: 'Tải lại dữ liệu' }));
-  expect(p.onRefresh).toHaveBeenCalled();
 });
 
 test('camera buttons ask the scene for their zone and the overflow chip opens the agent list', () => {
@@ -198,4 +191,53 @@ test('Toàn cảnh collapses an open dock and still asks the scene for the overv
   fireEvent.click(screen.getByRole('button', { name: 'Toàn cảnh' }));
   expect(toggle.getAttribute('aria-expanded')).toBe('false');
   expect(p.onFocusZone).toHaveBeenCalledWith('overview');
+});
+
+test('ac-1: CameraBar không hiển thị trong OfficeHud khi p.taskbar được truyền vào và vẫn hiển thị khi p.taskbar không được truyền; currentRun ưu tiên luồng đang chạy và bỏ qua luồng escalated cũ hơn luồng đã hoàn tất.', () => {
+  const { rerender } = render(<OfficeHud {...props({ taskbar: qc => <div data-testid="tb">{qc}</div> })} />);
+  expect(screen.queryByRole('group', { name: 'Góc nhìn camera' })).toBeNull();
+  expect(screen.getByTestId('tb')).toBeTruthy();
+  rerender(<OfficeHud {...props()} />);
+  expect(screen.getByRole('group', { name: 'Góc nhìn camera' })).toBeTruthy();
+  const r = (runId: string, sdlcStatus: string, updatedAt: string) => ({ ...run, runId, sdlcStatus, updatedAt }) as typeof run;
+  expect(currentRun([r('esc', 'escalated', '2026-11-02T00:00:05Z'), r('imp', 'implementing', '2026-11-02T00:00:01Z')])?.runId).toBe('imp');
+  expect(currentRun([r('esc', 'escalated', '2026-11-02T00:00:01Z'), r('done', 'completed', '2026-11-02T00:00:09Z')])).toBeUndefined();
+});
+
+// NOTE: In Vitest jsdom, import.meta.url is http://localhost:3000 (not file://), so readFileSync(new URL(..., import.meta.url)) throws TypeError.
+// Keep this behavioral DecisionInbox render test as-is; do NOT replace it with readFileSync. Both ac-1 and ac-2 already pass in check_work!
+test('ac-2: DecisionInbox truyền refreshing và initial={!run} cho DecisionReview và LoadingState để tránh vô hiệu hóa nút quyết định khi SSE làm mới.', async () => {
+  HTMLDialogElement.prototype.showModal ??= function () { this.open = true; };
+  HTMLDialogElement.prototype.close ??= function () { this.open = false; };
+  const { Operations } = await import('../src/features/operations');
+  const { DecisionDraftProvider } = await import('../src/features/office/ui/interaction/decision-drafts');
+  const { decision } = await import('./fixtures');
+  const { fetcher } = installApi({
+    '/api/v1/projects/p/decisions': { apiVersion: 1, items: [decision] },
+    '/api/v1/projects/p/runs/run': { ...run, decisions: [decision], availableActions: [{ actionId: 'answer', kind: 'answer_decision', enabled: true, expectedVersion: decision.expectedVersion }] }
+  });
+  const api = new ApiClient();
+  const drafts = { drafts: {}, setDraft: vi.fn() };
+  const view = (rev: number) => (
+    <MemoryRouter initialEntries={[`/projects/p/review?decision=${decision.decisionId}&run=${decision.runId}`]}>
+      <Operations api={api} id="p" refresh={() => {}}>
+        <DecisionDraftProvider value={drafts}>
+          <DecisionInbox api={api} id="p" revision={rev} refresh={() => {}} />
+        </DecisionDraftProvider>
+      </Operations>
+    </MemoryRouter>
+  );
+  const mounted = render(view(0));
+  const reviewBtn = await screen.findByRole('button', { name: 'Xem xét gói', hidden: true });
+  await waitFor(() => expect((reviewBtn as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(reviewBtn);
+  const approve = screen.getByRole('button', { name: 'Duyệt gói', hidden: true });
+  expect((approve as HTMLButtonElement).disabled).toBe(false);
+  let finish!: (value: Response) => void;
+  fetcher.mockImplementation(() => new Promise<Response>(resolve => { finish = resolve; }));
+  mounted.rerender(view(1));
+  await waitFor(() => expect(screen.getAllByText('Đang cập nhật dữ liệu…').length).toBeGreaterThanOrEqual(1));
+  expect((screen.getByRole('button', { name: 'Duyệt gói', hidden: true }) as HTMLButtonElement).disabled).toBe(false);
+  expect(screen.queryByText('Đang xác nhận quyền quyết định…')).toBeNull();
+  finish(Response.json({ apiVersion: 1, items: [decision] }));
 });

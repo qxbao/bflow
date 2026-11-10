@@ -25,7 +25,7 @@ export async function detectTypecheck(root: string, profiles: readonly RunnerPro
     if (!projects.length || projects.length > 128) return;
     const { prepare: _prepare, ...compilerBase } = base;
     return { version: pkg.version, projects, runner: { ...compilerBase, id: "auto-typecheck", command: "auto:typecheck",
-      args: ["node_modules/typescript/bin/tsc", "-b", ...projects.map(project => project === "." ? "." : `./${project}`), "--pretty", "false", "--force"],
+      args: ["node_modules/typescript/bin/tsc", "-b", ...projects.map(project => project === "." ? "." : `./${project}`), "--pretty", "false"],
       timeoutMs: 300000 } };
   } catch { return; } // Optional compiler failure must not break behavioral runner discovery.
 }

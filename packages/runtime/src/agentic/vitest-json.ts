@@ -18,7 +18,7 @@ export class VitestTestCodeFailure extends NodeTapTestCodeFailure {
 /** Private codec for the actual Vitest 2.1 JSON reporter, with the trusted runtime companion.
  * Suite totals count files plus describe suites; reconstruct ancestors instead of equating suites with files.
  */
-export function parseVitestJson(outcome: QualityCommandOutcome, expectedNames: readonly string[], nameSelection = false) {
+export function parseVitestJson(outcome: QualityCommandOutcome, expectedNames: readonly string[], nameSelection = false, allowMissingExpected = false) {
   if (outcome.spawnError || outcome.timedOut || outcome.aborted || outcome.outputTruncated || outcome.signal || outcome.exitCode === null) throw new Error("Behavioral runner infrastructure failure (spawn, deadline, signal or truncated output)");
   const runtimeMarkers = [...outcome.stderr.matchAll(/^BFLOW_VITEST_RUNTIME_ERRORS=([^\r\n]+)\r?$/gm)];
   if (runtimeMarkers.length !== 1 || runtimeMarkers[0]![1] !== "0") throw new Error("Vitest runtime errors or missing trusted reporter completion");
@@ -92,7 +92,7 @@ export function parseVitestJson(outcome: QualityCommandOutcome, expectedNames: r
   }
   const failedSuites = [...suites.values()].filter(suite => suite.failed).length;
   const executedPassedSuites = [...suites.values()].filter(suite => suite.executed && !suite.failed).length;
-  const resolved = resolveExpectedIdentities(executedLeaves, expectedNames);
+  const resolved = resolveExpectedIdentities(executedLeaves, expectedNames, allowMissingExpected);
   if (!resolved.matched) {
     throw new BehavioralIdentityMismatch(expectedNames, executedLeaves.map(leaf => leaf.rawName));
   }

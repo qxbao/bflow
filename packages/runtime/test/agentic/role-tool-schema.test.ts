@@ -25,7 +25,7 @@ describe("native role tool schema guidance", () => {
   });
 
   it("gives only Coordinator the setup, re-resolve, withdraw and reconcile tools, each with a required-argument schema", () => {
-    const names = ["repository_setup", "reresolve_execution_plan", "withdraw_workflow_proposal", "reconcile_cancellation"];
+    const names = ["repository_setup", "reresolve_execution_plan", "withdraw_workflow_proposal", "reconcile_cancellation", "amend_task_scope"];
     for (const provider of ["agy", "claude", "codex"] as const) {
       const coordinator = availableTools("coordinator", provider);
       for (const name of names) expect(coordinator.find(tool => tool.name === name)?.inputSchema).toMatchObject({ required: expect.arrayContaining(["runId"]) });
@@ -33,6 +33,15 @@ describe("native role tool schema guidance", () => {
       for (const role of ["conversation", "developer", "architect", "reviewer", "qa"] as const)
         expect(availableTools(role, provider).filter(tool => names.includes(tool.name))).toEqual([]);
       expect(coordinator.some(tool => /approv/.test(tool.name))).toBe(false);
+    }
+  });
+
+  it("exposes amend_task_scope with a strict schema that offers no ownership, waiver or approval fields", () => {
+    for (const provider of ["agy", "claude", "codex"] as const) {
+      const schema = availableTools("coordinator", provider).find(tool => tool.name === "amend_task_scope")!.inputSchema as any;
+      expect(schema).toMatchObject({ additionalProperties: false, required: ["runId", "taskId", "reason", "changes"] });
+      expect(Object.keys(schema.properties).sort()).toEqual(["changes", "reason", "runId", "taskId"]);
+      expect(JSON.stringify(schema.properties.changes)).not.toMatch(/owned_paths|waive|approv/);
     }
   });
 

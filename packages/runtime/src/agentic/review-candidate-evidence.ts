@@ -38,8 +38,16 @@ export async function reviewCandidateEvidence(input: { context:unknown; state:un
   const expectedNames=list(config.testNames).filter((n):n is string=>typeof n==="string");
   const expectedCriteria=list(config.criterionIds).filter((n):n is string=>typeof n==="string");
   const entries:unknown[]=[];let readBytes=0;let limited=false;
+  // Each required criterion needs at least one of its own mapped names in the receipt: the host measures the tests the task
+  // diff actually committed, so a receipt may legitimately cover a subset of the planned names. A criterion without a mapping
+  // keeps the exact rule, and the criterion must itself be recorded as passed.
+  const mappings=strategy.success?strategy.data.criterionMappings:[];
   const matches=(names:readonly string[], criteria:readonly string[])=>expectedNames.length>0 && expectedCriteria.length>0 &&
-    expectedNames.every(n=>names.includes(n)) && expectedCriteria.every(c=>criteria.includes(c));
+    expectedCriteria.every(c=>criteria.includes(c)) && expectedCriteria.every(c=>{
+      const mapped=mappings.find(m=>m.criterionId===c)?.testNames;
+      return mapped===undefined||mapped.length===0 ? expectedNames.every(n=>names.includes(n)) : mapped.some(n=>names.includes(n));
+    });
+  const executedNames=(names:readonly string[])=>expectedNames.filter(n=>names.includes(n));
   async function artifactVerified(raw:unknown) {
     const parsed=ArtifactReferenceSchema.safeParse(raw);if(!parsed.success)return false;
     const ref=parsed.data;
@@ -66,7 +74,7 @@ export async function reviewCandidateEvidence(input: { context:unknown; state:un
       if(!(await Promise.all(refs.map(artifactVerified))).every(Boolean))continue;
       entries.push({source:"host_policy_phase",receiptId:result.verificationId,receiptDigest:digest(result),attemptId:result.attemptId,
         sourceRevision:phase.data.sourceRevision,testRevision:phase.data.testRevision,phase:phase.data.phase,
-        testNames:expectedNames,observations:observations.map(o=>({criterionId:o.criterionId,command:o.command,exitCode:o.exitCode,summary:o.summary.slice(0,256)})),
+        testNames:executedNames(phase.data.testNames),observations:observations.map(o=>({criterionId:o.criterionId,command:o.command,exitCode:o.exitCode,summary:o.summary.slice(0,256)})),
         artifacts:refs.map(ref=>({artifactId:ref.artifactId,checksum:ref.checksum}))});
       if (entries.length >= 3) {limited=true;break;}
     }
@@ -78,7 +86,7 @@ export async function reviewCandidateEvidence(input: { context:unknown; state:un
         measured.data.specFingerprint!==details.specFingerprint || !behavioral.has(measured.data.method) ||
         !matches(measured.data.testNames,measured.data.criteria.map(c=>c.criterionId)) || !await input.authenticateGate(gate))continue;
       entries.push({source:"host_behavioral_gate",receiptId:gate.evaluationId,receiptDigest:digest(gate),attemptId:measured.data.attemptId,
-        sourceRevision:measured.data.sourceRevision,testNames:expectedNames,command:measured.data.command,exitCode:0,criteria:expectedCriteria});
+        sourceRevision:measured.data.sourceRevision,testNames:executedNames(measured.data.testNames),command:measured.data.command,exitCode:0,criteria:expectedCriteria});
     }
   }
   return json({status:entries.length?"available":"missing",sourceRevision:details.sourceRevision,runId:context.runId,taskId:context.taskId,

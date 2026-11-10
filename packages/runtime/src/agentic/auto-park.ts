@@ -2,6 +2,7 @@ import { taskLogBusinessTaskId } from "./task-log-tools.js";
 import { VerificationCycleSchema, VerificationResultSchema, GitChangeSetSchema, type AgentExecutionHandle, type ParkedIssueKind, type WorkflowRunSnapshot } from "@bflow/contracts";
 import type { JournalState, Outbound, RunRecord, TaskRecord } from "./journal.js";
 import { digest } from "./journal.js";
+import { isResumable } from "./blockers.js";
 
 export interface AutoParkPolicy { enabled: boolean; maxAutoResumesBeforePark: number }
 export interface AutoParkState extends Pick<JournalState, "runs" | "outbound" | "pendingVerifications"> {
@@ -17,6 +18,7 @@ const summaries: Record<ParkedIssueKind, string> = {
   transport_failure: "Task bị kẹt hoặc lỗi giao sau khi hết số lần tự phục hồi.",
   provider_failure: "Provider đã hết ngân sách chuyển hoặc chưa dừng được execution cũ.",
   rework_exhausted: "Task đã hết số lần sửa lại; cần xem dossier và làm rõ tiêu chí.",
+  plan_mismatch: "Kế hoạch lệch với commit (ví dụ khai tệp test chưa có); resume không sửa được.",
   verification_exhausted: "Kiểm chứng task đã hết số lần thử; cần sửa môi trường trước khi thử lại.",
   user_decision_pending: "Task đang chờ quyết định của người dùng.",
   environment: "Môi trường thực thi cần được kiểm tra.",
@@ -26,6 +28,7 @@ export const autoParkSuggestedAction: Record<ParkedIssueKind, string> = {
   transport_failure: "Kiểm tra pane vai trong Herdr rồi bflow queue retry <id>",
   provider_failure: "Kiểm tra hạn mức/đăng nhập provider rồi retry",
   rework_exhausted: "Xem dossier rework; tách task hoặc làm rõ tiêu chí rồi retry",
+  plan_mismatch: "Giao Developer viết đúng tệp đã khai, hoặc thu hẹp phạm vi test (amend_task_scope khi có), rồi retry.",
   verification_exhausted: "Chạy lại verification sau khi sửa môi trường",
   user_decision_pending: "Trả lời quyết định đang chờ",
   environment: "Kiểm tra môi trường rồi retry",
@@ -98,21 +101,35 @@ function select(state: AutoParkState, policy: AutoParkPolicy, now: number, prepa
           Object.values(run.userDecisions ?? {}).some(item => item.status === "pending" && item.taskId === task.taskId)) continue;
       const pending = state.pendingVerifications.filter(item => jobField(item.job, "runId") === run.runId && jobField(item.job, "taskId") === task.taskId);
       if (pending.some(item => !exhaustedTaskVerification(item, run, task, current.attemptId)) || task.verificationPending && !pending.length) continue;
-      const executions = related.filter(out => !out.parentAssignmentId && out.handle && (out.status === "accepted" || out.handle.executionId === current.agentExecution?.executionId));
+      const executions = related.filter(out => !out.parentAssignmentId && out.handle &&
+        (current.agentExecution ? out.handle.executionId === current.agentExecution.executionId && out.handle.requestId === current.agentExecution.requestId
+          : out.status === "accepted"));
       if (!preparing && (executions.some(out => !stopped(out, task, now)) || current.agentExecution &&
           !executions.some(out => digest(out.handle) === digest(current.agentExecution) && stopped(out, task, now)) ||
           task.failovers?.some(entry => !["dispatched", "cancelled"].includes(entry.phase) && !proofMatches(entry.stopProof, entry.sourceHandle, now) &&
             !executions.some(out => out.handle?.executionId === entry.sourceHandle.executionId && stopped(out, task, now))))) continue;
       let kind: ParkedIssueKind | undefined;
+      const latestPhaseFailure = [...related].reverse().find(out => out.message.type === "verification.requested" &&
+        out.phaseFailure?.applied === true && current.attemptId !== undefined &&
+        jobField(out.message.payload, "implementationAttemptId") === current.attemptId);
       if (exhaustedFailover) kind = "provider_failure";
       else if (exhaustedRework(run, task, current)) kind = "rework_exhausted";
       else if (pending.some(item => item.stuck && (item.attempts ?? 0) >= VERIFICATION_ATTEMPT_LIMIT)) kind = "verification_exhausted";
+      else if (run.status === "escalated" && run.pendingAction?.state === "pending" &&
+        latestPhaseFailure?.phaseFailure?.blocker && !isResumable(latestPhaseFailure.phaseFailure.blocker)) kind = "plan_mismatch";
       else {
         const action = run.pendingAction;
         const identity = action?.invalidAssignment;
         const source = action && related.find(out => out.message.message_id === (identity?.messageId ?? action.sourceMessageId) &&
           (!identity || identity.taskId === task.taskId && identity.attemptId === out.attemptId && identity.implementationAttemptId === current.attemptId));
-        if (run.status === "escalated" && action?.state === "pending" && source &&
+        const sourcePayload = source ? jobField(source.message, "payload") : undefined;
+        const sourceIsCurrentAttempt = source?.message.type === "task.assignment"
+          ? current.agentExecution ? source.handle?.executionId === current.agentExecution.executionId && source.handle.requestId === current.agentExecution.requestId
+            : !current.attemptId || (source.handle?.attemptId ?? source.attemptId) === current.attemptId
+          : source?.message.type === "verification.requested" && jobField(sourcePayload, "kind") === "conditional_evidence"
+            ? !current.attemptId || source.phaseFailure === undefined && source.phaseRetirement === undefined && jobField(sourcePayload, "implementationAttemptId") === current.attemptId
+            : true;
+        if (run.status === "escalated" && action?.state === "pending" && source && sourceIsCurrentAttempt &&
             ["task.assignment", "verification.requested"].includes(source.message.type) && taskLogBusinessTaskId(source) === task.taskId &&
             (action.recovery === "manual" || action.recovery === "auto_resume" && (action.resumeAttempts ?? 0) >= policy.maxAutoResumesBeforePark))
           kind = identity ? "other" : STRUCTURAL_DELIVERY_BLOCKERS.test(action.reason) ? "transport_failure" : action.reason.includes("refused messages") ? "other" : "transport_failure";

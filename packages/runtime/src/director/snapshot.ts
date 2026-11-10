@@ -92,7 +92,7 @@ function buildRun(value: unknown): DirectorProgressRun | undefined {
       if (built) tasks.push(built);
     }
   }
-  const title = text(rec(rec(run.workflowSpec).specification).title) ?? text(definition.name) ?? text(definition.id) ?? runId;
+  const title = text(rec(rec(run.workflowSpec).specification).title) ?? text(definition.name) ?? text(definition.id) ?? text(rec(run.delegation).title) ?? runId;
   const status = SdlcWorkStatusSchema.safeParse(run.status);
   const parsed = DirectorProgressRunSchema.safeParse({
     runId,
@@ -111,10 +111,11 @@ export function buildDirectorProgressSnapshot(input: DirectorSnapshotInput): Dir
   let pendingApprovals = 0;
   let pendingQuestions = 0;
   for (const raw of recent) {
+    const run = rec(raw);
+    if (text(run.supersededBy) !== undefined) continue;
     const built = buildRun(raw);
     if (!built) continue;
     runs.push(built);
-    const run = rec(raw);
     if (run.cancelled === true || TERMINAL_RUN.has(String(run.status))) continue;
     const approval = rec(run.approval);
     if (text(approval.approvalId) && rec(run.decision).approvalId !== approval.approvalId) pendingApprovals += 1;

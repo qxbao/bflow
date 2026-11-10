@@ -1,5 +1,7 @@
 # Hợp đồng giao tiếp công khai (Public Contracts)
 
+`ParkedIssueKindSchema` chấp nhận thêm `plan_mismatch` cho lỗi kế hoạch không khớp bằng chứng đã commit. Reader dùng binary cũ sẽ từ chối kind mới tại ranh giới Zod; không ép kiểu sang kind khác. Private agentic journal có blocker hoặc task park với kind này phải dùng v9, nên binary cũ cũng từ chối state mới thay vì diễn giải sai. Các kind cũ giữ nguyên; không có chuyển đổi dữ liệu v8 sang blocker.
+
 Toàn bộ các schema công khai, kiểu dữ liệu suy diễn, bộ xác thực thuần túy (pure validators) và các giao diện cổng (ports) đều được xuất bản chính thức từ package `@bflow/contracts`. Lược đồ Zod schema đóng vai trò là cơ quan thẩm quyền tối cao tại ranh giới tiếp nhận (ingress) của mỗi package. Các đối tượng trao đổi dữ liệu đều tuân thủ quy tắc nghiêm ngặt (`.strict()`); mọi trường dữ liệu lạ không được khai báo trước sẽ bị từ chối, trừ khi được bổ sung tường minh trong các phiên bản lược đồ kế tiếp.
 
 ---

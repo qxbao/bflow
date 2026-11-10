@@ -47,6 +47,21 @@ const safe = (s: ReadSources, text: string, max = 16000) =>
   sliceUtf16Safe(s.redact?.(text) ?? text, max) || "[redacted]";
 const safeOption = (s: ReadSources, text: string, max = 200) =>
   sliceUtf16Safe((s.redactOption ?? s.redact)?.(text) ?? text, max) || "[redacted]";
+function cleanDelegationTitle(delegation: { title: string; objective?: string }): string {
+  if (!/<\/?pasted_content\b/i.test(delegation.title) && !/\[bflow-web:/i.test(delegation.title)) {
+    return delegation.title;
+  }
+  const strip = (text: string) =>
+    text
+      .replace(/<\/?pasted_content\b[^>]*>/gi, "")
+      .replace(/^\s*\[bflow-web:[^\s\]\r\n]*\]?\s*/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const cleanedTitle = strip(delegation.title);
+  if (cleanedTitle) return cleanedTitle;
+  const cleanedObjective = delegation.objective ? strip(delegation.objective).slice(0, 80).trim() : "";
+  return cleanedObjective || delegation.title;
+}
 export function projectDecision(
   s: ReadSources,
   r: RunRecord,
@@ -91,6 +106,7 @@ function pendingActionBlocker(action: NonNullable<RunRecord["pendingAction"]>): 
   if (action.recovery === "capability_repair") return "capability_repair_pending";
   return "manual_resume_required";
 }
+const runViewCache = new WeakMap<JournalState, Map<string, WebRunView>>();
 export function projectRun(s: ReadSources, runId: string): WebRunView {
   const runs = s.state.runs.filter(
     (r) => r.delegation.sessionId === s.sessionId,
@@ -98,6 +114,28 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
   const r = runs.find((r) => r.runId === runId);
   if (!r) throw new Error("not_found");
   const core = r.coreCreated ? s.core.get(runId) : undefined;
+  let cacheBucket: Map<string, WebRunView> | undefined;
+  let cacheKey: string | undefined;
+  if (Object.isFrozen(s.state)) {
+    cacheBucket = runViewCache.get(s.state);
+    if (!cacheBucket) {
+      cacheBucket = new Map();
+      runViewCache.set(s.state, cacheBucket);
+    }
+    cacheKey = JSON.stringify([
+      runId,
+      s.sessionId,
+      s.ready,
+      Boolean(s.commandsSupported),
+      s.transport ?? s.observedAt,
+      core ?? null,
+      s.pendingClarifications?.[r.delegation.correlationId] ?? null,
+      Boolean(s.redact),
+      Boolean(s.redactOption),
+    ]);
+    const cached = cacheBucket.get(cacheKey);
+    if (cached) return cached;
+  }
   const stale =
     r.coreCreated &&
     (!core || s.state.pendingCore.some((p) => p.runId === r.runId));
@@ -154,7 +192,7 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
     actions.length > 100 ||
     decisions.length > 100 ||
     (core?.tasks.length ?? 0) > 1000;
-  return WebRunViewSchema.parse({
+  const view = WebRunViewSchema.parse({
     apiVersion: 1,
     runId: r.runId,
     sessionId: s.sessionId,
@@ -175,7 +213,7 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
       s.commandsSupported,
       s.transport?.states,
     ]),
-    title: safe(s, r.delegation.title, 200),
+    title: safe(s, cleanDelegationTitle(r.delegation), 200),
     originRunId:
       typeof origin === "string" && runs.some((n) => n.runId === origin)
         ? origin
@@ -251,6 +289,8 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
     availableActions: actions.slice(0, 100),
     updatedAt,
   });
+  if (cacheBucket && cacheKey) cacheBucket.set(cacheKey, view);
+  return view;
 }
 export function paginateRuns(s: ReadSources, input: WebRunQuery) {
   const query = WebRunQuerySchema.parse(input);
@@ -314,30 +354,107 @@ const WebWorkforceResultSchema = OperationResultSchema(WebWorkforceViewSchema);
 const WebExcerptsResultSchema = OperationResultSchema(WebWorkforceExcerptsSchema);
 const WebTranscriptResultSchema = OperationResultSchema(WebAgentTranscriptSchema);
 const WebActivityResultSchema = OperationResultSchema(WebPageSchema(WebActivityEntrySchema));
+const inflightSnapshotBytes = new Map<string, Promise<Buffer | undefined>>();
+const snapshotStatCache = new Map<string, {
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  bytes: Buffer;
+  parsedByRepo: Map<string, ReturnType<ProjectionSnapshots["parse"]>>;
+  parsedContext?: ReturnType<typeof ConversationContextSnapshotSchema.parse>;
+}>();
+async function readSnapshotBytes(path: string, maxBytes: number): Promise<Buffer | undefined> {
+  const key = `${path}:${maxBytes}`;
+  const existing = inflightSnapshotBytes.get(key);
+  if (existing) return existing;
+  const work = (async () => {
+    let file;
+    try {
+      file = await open(
+        path,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        snapshotStatCache.delete(path);
+        return undefined;
+      }
+      throw e;
+    }
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.size > maxBytes)
+        throw new Error("Invalid read source");
+      const cached = snapshotStatCache.get(path);
+      if (
+        cached &&
+        stat.size > 65536 &&
+        cached.ino === stat.ino &&
+        cached.size === stat.size &&
+        cached.mtimeMs === stat.mtimeMs &&
+        cached.ctimeMs === stat.ctimeMs
+      ) {
+        return cached.bytes;
+      }
+      const bytes = await file.readFile();
+      if (bytes.byteLength > maxBytes)
+        throw new Error("Read source too large");
+      if (stat.size > 65536) {
+        snapshotStatCache.set(path, {
+          ino: stat.ino,
+          size: stat.size,
+          mtimeMs: stat.mtimeMs,
+          ctimeMs: stat.ctimeMs,
+          bytes,
+          parsedByRepo: new Map(),
+        });
+      } else {
+        snapshotStatCache.delete(path);
+      }
+      return bytes;
+    } finally {
+      await file.close();
+    }
+  })();
+  inflightSnapshotBytes.set(key, work);
+  try {
+    return await work;
+  } finally {
+    if (inflightSnapshotBytes.get(key) === work) inflightSnapshotBytes.delete(key);
+  }
+}
+async function readJournalSnapshot(path: string, repository: string, maxBytes: number) {
+  const bytes = await readSnapshotBytes(path, maxBytes);
+  if (bytes === undefined) return undefined;
+  const cached = snapshotStatCache.get(path);
+  if (cached && cached.bytes === bytes) {
+    const existing = cached.parsedByRepo.get(repository);
+    if (existing !== undefined) return existing;
+    const parsed = projectionSnapshots.parse(path, repository, bytes);
+    cached.parsedByRepo.set(repository, parsed);
+    return parsed;
+  }
+  return projectionSnapshots.parse(path, repository, bytes);
+}
+async function readConversationContextSnapshot(path: string) {
+  const bytes = await readSnapshotBytes(path, 16 * 1024 * 1024);
+  if (bytes === undefined) return undefined;
+  const cached = snapshotStatCache.get(path);
+  if (cached && cached.bytes === bytes) {
+    if (cached.parsedContext !== undefined) return cached.parsedContext;
+    const parsed = ConversationContextSnapshotSchema.parse(JSON.parse(bytes.toString("utf8")));
+    cached.parsedContext = parsed;
+    return parsed;
+  }
+  return ConversationContextSnapshotSchema.parse(JSON.parse(bytes.toString("utf8")));
+}
 async function readSnapshot(path: string): Promise<unknown | undefined>;
 async function readSnapshot<T>(path: string, decode: (bytes: Buffer) => T, maxBytes?: number): Promise<T | undefined>;
 async function readSnapshot(path: string, decode?: (bytes: Buffer) => unknown, maxBytes = 16 * 1024 * 1024): Promise<unknown | undefined> {
-  let file;
-  try {
-    file = await open(
-      path,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw e;
-  }
-  try {
-    const stat = await file.stat();
-    if (!stat.isFile() || stat.size > maxBytes)
-      throw new Error("Invalid read source");
-    const bytes = await file.readFile();
-    if (bytes.byteLength > maxBytes)
-      throw new Error("Read source too large");
-    return decode ? decode(bytes) : JSON.parse(bytes.toString("utf8"));
-  } finally {
-    await file.close();
-  }
+  const bytes = await readSnapshotBytes(path, maxBytes);
+  if (bytes === undefined) return undefined;
+  return decode ? decode(bytes) : JSON.parse(bytes.toString("utf8"));
 }
 export async function hostInteractionQuery(
   configuration: HostConfiguration,
@@ -414,7 +531,7 @@ export async function hostInteractionQuery(
     };
   }
   const journalPath = join(root, "agentic/journal/state.json");
-  const journal = await readSnapshot(journalPath, bytes => projectionSnapshots.parse(journalPath, configuration.repositoryPath, bytes), 64 * 1024 * 1024);
+  const journal = await readJournalSnapshot(journalPath, configuration.repositoryPath, 64 * 1024 * 1024);
   let state =
     journal === undefined
       ? {
@@ -435,20 +552,22 @@ export async function hostInteractionQuery(
     const extensionPath = join(root, "agentic/extensions", digest(configuration.sessionId), "routes/state.json");
     const diagnostic = options.onDiagnostic ?? ((code: string) => console.warn(code));
     try {
-      const extensionRoutes = await readSnapshot(extensionPath, bytes => projectionSnapshots.parse(extensionPath, configuration.repositoryPath, bytes), 64 * 1024 * 1024);
+      const extensionRoutes = await readJournalSnapshot(extensionPath, configuration.repositoryPath, 64 * 1024 * 1024);
       if (extensionRoutes) state = projectExtensionRoutes(state, extensionRoutes, sessionId, diagnostic);
     } catch { diagnostic("extension_routes_unavailable"); }
   }
   const core = new Map<string, WorkflowRunSnapshot>();
-  // The workforce projection needs only the manifest and journal; skipping Core reads keeps its 1 s polling cheap.
-  for (const r of query.kind === "workforce" || query.kind === "activity" || query.kind === "workforce_excerpts" || query.kind === "agent_transcript" ? [] : state.runs.filter(
-    (r) => r.delegation.sessionId === sessionId && r.coreCreated,
-  )) {
-    const value = await options.readCore?.(r.runId);
-    if (value) {
-      const parsed = WorkflowRunSnapshotSchema.parse(value);
-      if (parsed.runId !== r.runId) throw new Error("Core scope mismatch");
-      core.set(r.runId, parsed);
+  // Only run/runs/decisions projections need Core snapshots; skipping Core reads for session/workforce/activity/transcript keeps polling cheap.
+  if (query.kind === "run" || query.kind === "runs" || query.kind === "decisions") {
+    for (const r of state.runs.filter(
+      (r) => r.delegation.sessionId === sessionId && r.coreCreated && (query.kind !== "run" || r.runId === query.runId),
+    )) {
+      const value = await options.readCore?.(r.runId);
+      if (value) {
+        const parsed = WorkflowRunSnapshotSchema.parse(value);
+        if (parsed.runId !== r.runId) throw new Error("Core scope mismatch");
+        core.set(r.runId, parsed);
+      }
     }
   }
   // Conservative textual redaction supplements structural allowlisting. Private raw errors never leave the host.
@@ -495,8 +614,7 @@ export async function hostInteractionQuery(
       ok: true, value: await readRunActivityPage(join(root, "agentic/task-activity.jsonl"), query.runId, query.cursor, redact),
     });
   }
-  const rawContext = await readSnapshot(join(root, "agentic/conversation", sessionId + ".context.json"));
-  const context = rawContext === undefined ? undefined : ConversationContextSnapshotSchema.parse(rawContext);
+  const context = await readConversationContextSnapshot(join(root, "agentic/conversation", sessionId + ".context.json"));
   if (context && (context.session.sessionId !== sessionId || context.session.herdrSessionId !== configuration.sessionId))
     throw new Error("Conversation scope mismatch");
   const source: ReadSources = {

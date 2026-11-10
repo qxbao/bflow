@@ -1,11 +1,12 @@
 import { useEffect } from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { webcrypto } from 'node:crypto';
-import { cleanup, configure, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, configure, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router';
 import { App } from '../src/app';
 import { ApiClient } from '../src/api/client';
 import { writeMode } from '../src/features/office/mode';
+import { sceneInset } from '../src/features/office/ui/windows/geometry';
 import { installApi, run, session } from './fixtures';
 
 configure({ asyncUtilTimeout: 5000 });
@@ -36,7 +37,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 let where = '';
 function Probe() { const l = useLocation(); where = l.pathname; return null; }
 
-test('Toàn cảnh eases the camera only after a route panel has closed, without reserving the panel twice', async () => {
+test('closing all windows releases the route window camera inset', async () => {
   const list = { apiVersion: 1, items: [run] };
   installApi({ '/api/v1/projects/p/session': { ...session, state: 'ready', sessionId: 'host-session' }, '/api/v1/projects/p/runs/run': run, '/api/v1/projects/p/runs?limit=25&search=&phase=': list });
   render(<MemoryRouter initialEntries={['/projects/p/runs']}><App api={new ApiClient()} /><Probe /></MemoryRouter>);
@@ -44,29 +45,35 @@ test('Toàn cảnh eases the camera only after a route panel has closed, without
   await waitFor(() => expect(main().classList.contains('hidden')).toBe(false));
   await screen.findByRole('region', { name: 'Bản văn bản của văn phòng' });
   const openInset = (): number => insets.at(-1)?.right ?? -1;
-  await waitFor(() => expect(openInset()).toBe(0));
+  await waitFor(() => expect(openInset()).toBeGreaterThan(0));
   const openRight = openInset();
+  expect(openRight).toBeGreaterThan(0);
   calls.length = 0;
-  fireEvent.click(within(screen.getByRole('group', { name: 'Góc nhìn camera' })).getByRole('button', { name: 'Toàn cảnh' }));
-  await waitFor(() => expect(calls).toContain('focus:overview'));
+  fireEvent.click(screen.getByRole('button', { name: '◆ Bflow' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Đóng mọi cửa sổ' }));
+  await waitFor(() => expect(main().classList.contains('hidden')).toBe(true));
   expect(where).toBe('/projects/p');
-  expect(main().classList.contains('hidden')).toBe(true);
-  const focusAt = calls.indexOf('focus:overview');
-  expect(focusAt).toBeGreaterThan(0);
-  expect(calls[focusAt - 1]).toBe('inset');
-  // The adjacent panel is handled by the scene host width; only the left HUD rail remains in the camera inset.
-  const closed = insets[insets.length - 1]!;
-  expect(closed.right).toBe(openRight);
-  expect(closed.left).toBe(100);
-  expect(calls.filter(c => c === 'focus:overview')).toHaveLength(1);
+  // Closing the app window clears its right-side scene reservation; shortcuts are now below the scene.
+  await waitFor(()=>expect(insets.at(-1)?.right).toBe(0));
+  const closed = insets.at(-1)!;
+  expect(closed.right).toBe(0);
+  expect(closed.left).toBe(0);
+  expect(calls.filter(c => c === 'focus:overview')).toHaveLength(0);
 });
 
-test('Toàn cảnh with no panel open focuses at once', async () => {
+test('the compact Start menu does not repeat the camera controls', async () => {
   installApi({ '/api/v1/projects/p/session': { ...session, state: 'ready', sessionId: 'host-session' } });
   render(<MemoryRouter initialEntries={['/projects/p']}><App api={new ApiClient()} /></MemoryRouter>);
   await screen.findByRole('region', { name: 'Bản văn bản của văn phòng' });
-  await waitFor(() => expect(calls).toContain('inset'));
-  calls.length = 0;
-  fireEvent.click(within(screen.getByRole('group', { name: 'Góc nhìn camera' })).getByRole('button', { name: 'Toàn cảnh' }));
-  expect(calls.slice(-2)).toEqual(['inset', 'focus:overview']);
+  fireEvent.click(screen.getByRole('button', { name: '◆ Bflow' }));
+  const menu=screen.getByRole('group',{name:'Menu Bflow'});
+  expect(menu.textContent).not.toContain('Góc nhìn văn phòng');
+  expect(menu.textContent).not.toContain('Toàn cảnh');
+  expect(screen.getByRole('button',{name:'Đóng mọi cửa sổ'})).toBeTruthy();
+});
+
+test('sceneInset computes left inset for left-side windows and neutral horizontal inset for maximized windows', () => {
+  const viewport = { width: 1440, height: 900 };
+  expect(sceneInset([{ rect: { x: 40, y: 20, w: 400, h: 600 }, display: 'normal' }], viewport)).toEqual({ left: 440, right: 0, bottom: 112 });
+  expect(sceneInset([{ rect: { x: 900, y: 20, w: 480, h: 600 }, display: 'maximized' }], viewport)).toEqual({ left: 88, right: 0, bottom: 112 });
 });

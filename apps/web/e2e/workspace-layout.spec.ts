@@ -1,13 +1,16 @@
 import { expect, test } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
 import { startAcceptanceHost, type AcceptanceHost } from './acceptance-fixture';
 import { browserOptions, enterVisual, mirror, openProject, sceneReady } from './office-fixture';
 
 test.use({ ...browserOptions(), viewport: { width: 1440, height: 900 } });
 let host: AcceptanceHost;
+const windowEvidence='/tmp/bflow-game-windows';
+test.beforeAll(async()=>{await mkdir(windowEvidence,{recursive:true});});
 test.beforeEach(async () => { host = await startAcceptanceHost(); });
 test.afterEach(async () => { await host?.close(); });
 
-test('3D reserves real space for the panel and adapts all pages to its content width', async ({ page }) => {
+test('3D app window and scene stay in bounds at free, tile and sheet widths', async ({ page }) => {
   test.setTimeout(120000);
   const base = await openProject(page, host.pairing, host.repository, /thư viện.*Xem dự án/);
   await enterVisual(page);
@@ -18,17 +21,20 @@ test('3D reserves real space for the panel and adapts all pages to its content w
   for (const width of [1920, 1440, 1280, 1100]) {
     await page.setViewportSize({ width, height: 900 });
     await expect.poll(async () => {
-      const a = await scene.boundingBox(), b = await main.boundingBox();
-      return { width, scene:a, panel:b, valid:Boolean(a && b && a.x + a.width <= b.x + 1 && a.width >= 500 && b.width >= 420) };
-    }).toEqual(expect.objectContaining({valid:true}));
+      const box = await main.boundingBox();
+      return Boolean(box && box.x>=0 && box.y>=0 && box.width>=420 && box.x+box.width<=width+1 && box.y+box.height<=844);
+    }).toBe(true);
   }
   for (const width of [1099, 1024, 768, 375, 812]) {
     await page.setViewportSize({ width, height: width === 812 ? 375 : 900 });
     await expect(main).toBeVisible();
-    expect(await main.evaluate(e => e.getBoundingClientRect().width)).toBe(width);
-    await expect(page.getByRole('button', { name: 'Đóng bảng' })).toBeInViewport();
+    await page.waitForTimeout(150);
+    const rect=await main.boundingBox();
+    expect(rect).not.toBeNull();
+    expect(rect!.x+rect!.width).toBeLessThanOrEqual(width+1);
+    await expect(page.getByRole('button', { name: /Đóng cửa sổ/ }).first()).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({path:`dist/test-results/workspace-3d-${width}.png`});
+    await page.screenshot({path:`${windowEvidence}/${width}-workspace-window.png`});
   }
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -37,7 +43,7 @@ test('3D reserves real space for the panel and adapts all pages to its content w
     await expect(main).toBeVisible();
     expect(await main.evaluate(e => e.scrollWidth <= e.clientWidth + 1), path).toBe(true);
   }
-  await page.getByRole('button', { name: 'Đóng bảng' }).click();
+  await page.getByRole('button', { name: 'Đóng cửa sổ Trò chuyện' }).click();
   await expect(main).toBeHidden();
   await expect.poll(async () => (await scene.boundingBox())?.width).toBe(1440);
 });

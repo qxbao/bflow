@@ -287,3 +287,9 @@ it("preserves follow-up lineage metadata and specificationId when revising a fol
     isRequirementChange: true
   });
 });
+it("waits briefly when a background queue flush finishes during structured interaction admission", async () => {
+  const f = await setup(), c = command();
+  (f.gateway as any).isFlushingQueue = true;
+  setTimeout(() => { (f.gateway as any).isFlushingQueue = false; }, 15);
+  expect(await f.gateway.handleStructuredInteraction(c, principal(c))).toMatchObject({ ok: true, value: { kind: "interaction" } });
+});

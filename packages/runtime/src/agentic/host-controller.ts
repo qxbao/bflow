@@ -1,7 +1,7 @@
 import { connectArtifact } from "../interaction/artifacts.js";
 import { openSqliteRunStore } from "@bflow/persistence";
 import { WebIssuerCredentialSchema } from "@bflow/contracts/web-host";
-import { createExecutionResolutionReader, readPrivateExecutionSources, readResolutionFile, type ExecutionResolutionReader } from "./execution-binding.js";
+import { createExecutionResolutionReader, readPrivateExecutionSources, readResolutionFile, REPOSITORY_SNAPSHOT_COMPONENT, type ExecutionResolutionReader } from "./execution-binding.js";
 import { buildExecutionPlan } from "../planning/index.js";
 import { OwnerKeySchema } from "../interaction/authority.js";
 import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema, type WorkflowTelemetryReport } from "../telemetry/report.js";
@@ -424,10 +424,20 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
   const policyChanged = options.policy !== undefined && digest(configuration.policy ?? null) !== digest(options.policy);
   const impactIndexChanged = options.impactIndex !== undefined && digest(configuration.impactIndex ?? null) !== digest(options.impactIndex);
   // Live readiness observations are deliberately absent from the planner's authority fingerprint.
-  const resolutionAuthority = (sources: ExecutionResolutionSources | undefined) => sources === undefined ? null
-    : { ...sources, plan: buildExecutionPlan(sources.plan).fingerprint };
+  // When repositoryRoot is tracked live, git commits and working-tree edits are per-run snapshot state, not host-level config drift.
+  const resolutionAuthority = (sources: ExecutionResolutionSources | undefined, includeRepository = false) => sources === undefined ? null
+    : {
+        ...sources,
+        plan: buildExecutionPlan(
+          !includeRepository && sources.repositoryRoot !== undefined
+            ? { ...sources.plan, repository: { revision: "0".repeat(40), dirtyDigests: {} } }
+            : sources.plan
+        ).fingerprint
+      };
   const resolutionChanged = options.executionResolution !== undefined &&
     digest(resolutionAuthority(configuration.executionResolution)) !== digest(resolutionAuthority(options.executionResolution));
+  const fullResolutionChanged = options.executionResolution !== undefined &&
+    digest(resolutionAuthority(configuration.executionResolution, true)) !== digest(resolutionAuthority(options.executionResolution, true));
   const resolveDeadlineMs = (deadlineValue: OperationOptions["deadline"]): number => {
     if (deadlineValue === undefined) return Infinity;
     return Date.parse(deadlineValue);
@@ -448,7 +458,16 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
     startupReader = await createExecutionResolutionReader(options.executionResolution);
   const executionSourceDigests = await startupReader?.readPrivateSources?.();
   await startupReader?.();
+  const hostSourceDigests = (digests: Record<string, string> | undefined, liveRepository: boolean) => {
+    if (!digests) return null;
+    if (!liveRepository) return digests;
+    const { [REPOSITORY_SNAPSHOT_COMPONENT]: _ignored, ...rest } = digests;
+    return rest;
+  };
+  const liveRepository = options.executionResolution?.repositoryRoot !== undefined;
   const sourceSnapshotChanged = resolutionChanged || startupReader !== undefined &&
+    digest(hostSourceDigests(configuration.executionSourceDigests, liveRepository)) !== digest(hostSourceDigests(executionSourceDigests, liveRepository));
+  const stoppedSnapshotChanged = fullResolutionChanged || startupReader !== undefined &&
     digest(configuration.executionSourceDigests ?? null) !== digest(executionSourceDigests ?? null);
   if (alive && options.policy && !compatiblePersistedPolicy(configuration.policy, options.policy))
     throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
@@ -468,7 +487,7 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
       try { await unlink(configuration.socketPath.replace(/\.sock$/, ".native.sock")); }
       catch (nativeError) { if ((nativeError as NodeJS.ErrnoException).code !== "ENOENT") throw nativeError; }
     } catch (statError) { if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError; }
-    if (sourceSnapshotChanged) {
+    if (stoppedSnapshotChanged) {
       if (reopening || !startupReader || !options.executionResolution)
         throw new Error("Persisted recovery cannot refresh execution sources");
       await refreshStoppedStartupSources(configuration, configPath, options.executionResolution, startupReader);
