@@ -126,8 +126,9 @@ describe("Director guide instruction coverage", () => {
     const text = await load();
     const known = new Set([...DIRECTOR_TOOLS, ...DIRECTOR_LOCAL_MCP_TOOLS].map(tool => tool.name));
     const identifiers = [...new Set([...text.matchAll(/`([a-z]+(?:_[a-z]+)+)`/g)].map(match => match[1]!))];
-    // `user_decision_pending` is a ParkedIssue kind, not a tool.
-    expect(identifiers.filter(name => !known.has(name) && name !== "user_decision_pending")).toEqual([]);
+    // `user_decision_pending` is a ParkedIssue kind and `session_stopped_by_user` a CLI error code, not tools.
+    const nonTools = new Set(["user_decision_pending", "session_stopped_by_user"]);
+    expect(identifiers.filter(name => !known.has(name) && !nonTools.has(name))).toEqual([]);
     for (const required of ["director_wait", "director_say", "start_work", "planning_reference", "read_coordinator_guide", "reconcile_delivery"]) {
       expect(identifiers).toContain(required);
     }
