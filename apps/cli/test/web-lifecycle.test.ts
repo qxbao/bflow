@@ -7,6 +7,8 @@ import { randomUUID } from 'node:crypto';
 import { interactionProjectId } from '@bflow/runtime';
 import { createWebWorkspaceServices } from '../src/web-workspace-services.js';
 import { initializeEnvironmentConfig } from '../src/environment-config.js';
+import { identifyRepository } from '../src/repository.js';
+import { readUserStopIntent, writeUserStopIntent } from '../src/user-stop-intent.js';
 import { EnvironmentLifecycle, markStartupUnchanged, startupLeftSessionUnchanged } from '../src/environment.js';
 const roots:string[]=[];afterEach(async()=>{await Promise.all(roots.splice(0).map(p=>rm(p,{recursive:true,force:true})));});
 async function project(config=true){const root=await realpath(await mkdtemp(join(tmpdir(),'web-lifecycle ')));roots.push(root);execFileSync('git',['init','--quiet',root]);if(config)await initializeEnvironmentConfig({cwd:root});return {apiVersion:1 as const,projectId:interactionProjectId(root),canonicalPath:root,displayName:'repo',registrationState:'registered' as const};}
@@ -36,7 +38,21 @@ describe('web workspace lifecycle',()=>{
  });
  it('uses confirmed orderly down with no force bypass',async()=>{
   const p=await project();const down=vi.fn(async()=>({status:'down'}));const s=createWebWorkspaceServices({resolveProject:async()=>p,createLifecycle:()=>({up:vi.fn(),down,doctor:vi.fn()})});
-  expect(await s.stopSession(p.projectId,randomUUID())).toMatchObject({ok:true,value:{state:'stopped'}});expect(down).toHaveBeenCalledWith(true,undefined,false);
+  expect(await s.stopSession(p.projectId,randomUUID())).toMatchObject({ok:true,value:{state:'stopped'}});expect(down).toHaveBeenCalledWith(true,undefined,false,{source:'web',operationId:expect.any(String)});
+ });
+ it('passes the Web origin and the exact operation id to the stop',async()=>{
+  const p=await project();const down=vi.fn(async()=>({status:'down'}));const s=createWebWorkspaceServices({resolveProject:async()=>p,createLifecycle:()=>({up:vi.fn(),down,doctor:vi.fn()})});
+  const id=randomUUID();await s.stopSession(p.projectId,id);expect(down.mock.calls[0]?.[3]).toEqual({source:'web',operationId:id});
+ });
+ it('clears the user stop intent right before the user-initiated start',async()=>{
+  const p=await project();const repository=await identifyRepository(p.canonicalPath);
+  await writeUserStopIntent(p.canonicalPath,{version:1,repositoryId:repository.id,sessionName:repository.sessionName,source:'web',requestedAt:new Date().toISOString()});
+  let atUp:unknown='unset';
+  const up=vi.fn(async()=>{atUp=await readUserStopIntent(p.canonicalPath,repository.id,repository.sessionName);return {};});
+  const readSession=async()=>({ok:true as const,value:{apiVersion:1 as const,projectId:p.projectId,sessionId:'session',state:'ready' as const,pendingIntakes:[],blockers:[],updatedAt:new Date().toISOString()}});
+  const s=createWebWorkspaceServices({resolveProject:async()=>p,createLifecycle:()=>({up,down:vi.fn(),doctor:vi.fn()}),readSession});
+  expect(await s.startSession(p.projectId,randomUUID())).toMatchObject({ok:true});
+  expect(atUp).toBeUndefined();
  });
  it('inspect uses shallow doctor without model diagnostics or setup',async()=>{
   const p=await project();const doctor=vi.fn(async()=>({schemaVersion:2,workspaceRoot:p.canonicalPath,sessionId:'test',healthy:false,checkedAt:new Date().toISOString(),checks:[{checkId:'missing',name:'missing',status:'failed',message:'Run bflow setup --check'}]}));
@@ -103,7 +119,7 @@ describe('W09 lifecycle settlement and readiness',()=>{
 });
 it('passes an explicit recovery stop through the existing checkpointed force lifecycle',async()=>{
  const p=await project(),down=vi.fn(async()=>({status:'down'}));const s=createWebWorkspaceServices({resolveProject:async()=>p,createLifecycle:()=>({up:vi.fn(),down,doctor:vi.fn()})});
- expect(await s.stopSession(p.projectId,randomUUID(),true)).toMatchObject({ok:true,value:{state:'stopped'}});expect(down).toHaveBeenCalledWith(true,undefined,true);
+ expect(await s.stopSession(p.projectId,randomUUID(),true)).toMatchObject({ok:true,value:{state:'stopped'}});expect(down).toHaveBeenCalledWith(true,undefined,true,{source:'web',operationId:expect.any(String)});
 });
 
 it('does not trust cleanup or lock contention text as lifecycle evidence',async()=>{

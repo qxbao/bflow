@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { DomainEventSchema, IdentifierSchema, IsoDateTimeSchema, StoredRunSchema, validateEventBatch,
   SdlcWorkStatusSchema, type DomainEvent, type RunStore } from "@bflow/contracts";
+import type { Outbound } from "../agentic/journal.js";
 
 const Quality = z.enum(["measured", "estimated", "partial", "unavailable"]);
 const Metric = z.object({ value: z.number().finite().nonnegative().nullable(), quality: Quality,
@@ -29,6 +30,8 @@ export const WorkflowTelemetryReportSchema = z.object({
   reviewGateDetails: z.array(z.object({ gateId: z.string().min(1).max(200), role: z.string().min(1).max(200), provider: z.string().min(1).max(200).nullable(),
     operations: z.number().int().nonnegative(), durationMs: z.number().nonnegative(), maxMs: z.number().nonnegative(),
     timeouts: z.number().int().nonnegative(), nearDeadline: z.number().int().nonnegative(), open: z.number().int().nonnegative() }).strict()).default([]),
+  blockers: z.array(z.object({ code: z.string().min(1), fixableBy: z.string().min(1), count: z.number().int().nonnegative(),
+    lastAt: IsoDateTimeSchema, resumeSkipped: z.number().int().nonnegative() }).strict()),
   firstPass: Metric, reworkCycles: Metric, retryAttempts: Metric, approvalWait: Metric, clarificationWait: Metric,
   gateTurnaround: Metric, gateExecution: Metric, phaseRoleTime: Metric, evidenceReuse: Metric,
   regressionWidening: Metric, tokens: Metric, costUsd: Metric
@@ -44,6 +47,7 @@ export interface TelemetryInput {
   runId: string; asOf: string; source: "legacy" | "agentic"; events: readonly unknown[]; complete: boolean;
   taskIds: readonly string[]; highWaterMark?: number; supersededApprovalIds?: readonly string[];
   diagnostics?: readonly string[]; reviewTimings?: readonly ReviewTimingObservation[];
+  blockers?: WorkflowTelemetryReport["blockers"];
 }
 type ReviewGateDetail = WorkflowTelemetryReport["reviewGateDetails"][number];
 const unavailable = (unit: Measurement["unit"], limitation: string): Measurement => ({ value: null, quality: "unavailable", unit,
@@ -217,7 +221,7 @@ export function buildWorkflowTelemetry(input: TelemetryInput): WorkflowTelemetry
     coverage: { quality, events: events.length, highWaterMark, invalidRecords, diagnostics: [...diagnostics].sort() }, cohort,
     taskStateTime: [...rows.values()].sort((a, b) => a.taskId.localeCompare(b.taskId) || a.state.localeCompare(b.state))
       .map(r => ({ ...r, openLowerBoundMs: good && !terminal.has(outcome) ? r.openLowerBoundMs : null, quality: good ? r.quality : "partial" })), approvals, gates,
-    phaseRoleIntervals: [], regressionWideningDetails: [], reviewGateDetails: review?.details ?? [],
+    phaseRoleIntervals: [], regressionWideningDetails: [], reviewGateDetails: review?.details ?? [], blockers: input.blockers ?? [],
     firstPass: measure(good && cohort.succeeded > 0 ? first / cohort.succeeded : null, "ratio", good ? first : null,
       good ? cohort.succeeded : 0, "Success-conditional; failed/cancelled/incomplete tasks excluded. Complete history required."),
     reworkCycles: measure(events.length && (good || reworks > 0) ? reworks : null, "count", events.length && (good || reworks > 0) ? reworks : null, tasks.size, "Distinct task generation advances; retries excluded."),
@@ -238,9 +242,30 @@ export function buildWorkflowTelemetry(input: TelemetryInput): WorkflowTelemetry
 /** Bounded snapshot prefix; never follows a growing tail or publishes raw source errors. */
 export async function readWorkflowTelemetry(store: Pick<RunStore, "get" | "readEvents">, runId: string,
   options: { asOf?: string; source?: "legacy" | "agentic"; supersededApprovalIds?: readonly string[];
-    reviewTimings?: readonly ReviewTimingObservation[] } = {}): Promise<WorkflowTelemetryReport> {
+    reviewTimings?: readonly ReviewTimingObservation[]; outbound?: readonly Outbound[] } = {}): Promise<WorkflowTelemetryReport> {
+  const skips = new Map<string, number>();
+  for (const out of options.outbound ?? []) {
+    if (out.message.run_id !== runId || out.message.type !== "task.status") continue;
+    const payload = out.message.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload) || payload.kind !== "resume_run" ||
+        !Array.isArray(payload.nonResumablePhaseFailures)) continue;
+    for (const item of payload.nonResumablePhaseFailures) if (item && typeof item === "object" && !Array.isArray(item) &&
+        typeof item.requestId === "string") skips.set(item.requestId, (skips.get(item.requestId) ?? 0) + 1);
+  }
+  const groups = new Map<string, WorkflowTelemetryReport["blockers"][number]>();
+  for (const out of options.outbound ?? []) {
+    const blocker = out.phaseFailure?.blocker, at = out.message.occurred_at;
+    if (out.message.run_id !== runId || !blocker || !at) continue;
+    const key = `${blocker.code}:${blocker.fixableBy}`;
+    const group = groups.get(key) ?? { code: blocker.code, fixableBy: blocker.fixableBy, count: 0, lastAt: at, resumeSkipped: 0 };
+    group.count++;
+    group.resumeSkipped += skips.get(out.message.message_id) ?? 0;
+    if (Date.parse(at) > Date.parse(group.lastAt)) group.lastAt = at;
+    groups.set(key, group);
+  }
   const base = { runId, asOf: options.asOf ?? new Date().toISOString(), source: options.source ?? "legacy",
     supersededApprovalIds: options.supersededApprovalIds ?? [], reviewTimings: options.reviewTimings ?? [],
+    blockers: [...groups.values()].sort((a, b) => a.code.localeCompare(b.code)),
     events: [] as unknown[], taskIds: [] as string[], complete: false };
   try {
     const result = await store.get(runId);

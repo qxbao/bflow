@@ -30,7 +30,7 @@ import {
   type ArtifactReference, type CancellationRequest, type GitChangeSet, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification, type AcceptanceCriterion,
   type PaneBinding, type TaskDefinition, type AgentRole, type VerificationCycle, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
-import { AgenticJournal, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, isInProcessDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
+import { AgenticJournal, ScopeAmendmentRecordSchema, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, isInProcessDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
   type ConflictResolverAttempt, type IngressDiagnostic, type Outbound, type ReviewTiming, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
 import { evaluateFastPath } from "./fast-path.js";
 import {
@@ -69,6 +69,9 @@ import {
 } from "./rework-causality.js";
 import { InspectInputSchema, summarizeInspectRun, summarizeInspectState, type InspectInput } from "./mcp-output-views.js";
 import { parseAppCheckIdentity } from "./app-check-config.js";
+import { BLOCKERS, isResumable, type TaskBlocker } from "./blockers.js";
+import { blockerFingerprint, inputsChanged, priorSameFingerprint } from "./no-progress.js";
+import { AmendTaskScopeInputSchema, ScopeAmendmentRefusal, assertScopeInvariants, planScopeAmendment } from "./scope-amendment.js";
 import {
   PROTOTYPE_TASK, PrototypeSubmissionSchema, acceptPrototypeScope, admitPrototypeVersion, assertPrototypeDecision, closePrototype, currentScope,
   pendingPrototypeApprovals, prototypeApproval, prototypeDecisionRefusal, prototypeDesignInput, prototypeManifest, prototypeView, settlePrototypeDecision,
@@ -96,6 +99,17 @@ const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "completed_with_p
 /** An escalated run can still resume, so it is not here: its human decisions stay answerable. */
 const ENDED_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled"];
 const REPOSITORY_SETUP_LOG_LIMIT = 200;
+
+function nonResumablePhaseFailures(state: JournalState, run: RunRecord) {
+  return state.outbound.filter(item => {
+    const blocker = item.phaseFailure?.blocker;
+    if (item.message.run_id !== run.runId || !item.phaseFailure?.applied || item.phaseFailure.retryAuthorized ||
+        !blocker || isResumable(blocker)) return false;
+    const task = run.tasks.find(task => task.taskId === record(item.message.payload).taskId);
+    return task !== undefined && !inputsChanged(blocker, task);
+  }).map(item => ({ requestId: item.message.message_id, code: item.phaseFailure!.blocker!.code,
+    nextAction: BLOCKERS[item.phaseFailure!.blocker!.code].nextAction }));
+}
 
 function sliceUtf16(text: string, maxUnits: number): string {
   if (maxUnits <= 0) return "";
@@ -1722,10 +1736,12 @@ export class AgenticWorkflowRuntime {
     const context = await this.journal.exclusive(async state => {
       const run = state.runs.find(run => run.runId === runId);
       return { status: run?.status, supersededApprovalIds: run?.supersededApprovals?.map(item => item.approvalId) ?? [],
-        reviewTimings: structuredClone(run?.reviewTimings ?? []) };
+        reviewTimings: structuredClone(run?.reviewTimings ?? []),
+        outbound: structuredClone(state.outbound.filter(out => out.message.run_id === runId &&
+          (out.phaseFailure?.blocker || out.message.type === "task.status" && record(out.message.payload).kind === "resume_run"))) };
     });
     const report = await readWorkflowTelemetry(this.ports.runStore, runId, { source: "agentic", asOf,
-      supersededApprovalIds: context.supersededApprovalIds, reviewTimings: context.reviewTimings });
+      supersededApprovalIds: context.supersededApprovalIds, reviewTimings: context.reviewTimings, outbound: context.outbound });
     report.hostWorkStatus = context.status ?? null;
     if (report.coverage.events === 0 && context.status && ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(context.status)) {
       report.outcome = context.status; report.outcomeSource = "host_journal";
@@ -2949,7 +2965,8 @@ export class AgenticWorkflowRuntime {
         (options.webCommand ? record(priorWake.message.payload).webCommandId : record(priorWake.message.payload).conversationUserMessageId) === explicitId;
       if (priorResume && (repeatedPhysicalTurn || !retryUnsent && !recurred && !explicitAfterAutomatic)) {
         if (!options.automatic && explicitId) await this.resumeAcceptedDeveloper(state, save, _core, outbox, run, priorResume.messageId);
-        return json({ queued: true, messageId: priorResume.messageId, actionId });
+        return json({ queued: true, messageId: priorResume.messageId, actionId,
+          nonResumablePhaseFailures: nonResumablePhaseFailures(state, run) });
       }
       // A still-unknown native delivery (legacy escalated record) resumes by waking the Coordinator to reconcile; it is never resent.
       if ((!explicitAfterAutomatic && run.status !== "escalated" && !resumeUnmeasured) || !action || action.actionId !== actionId ||
@@ -3027,6 +3044,7 @@ export class AgenticWorkflowRuntime {
       if ((recurred || explicitAfterAutomatic) && state.outbound.some(item => item.message.message_id === messageId)) {
         messageId = `resume-${digest([...baseResumeKey, action.manualResumeAttempts ?? 0, (action.resumeAttempts ?? 0) + (options.automatic ? 1 : 0)])}`;
       }
+      const skippedPhaseFailures = nonResumablePhaseFailures(state, run);
       if (failedCapabilityDispatches.length) {
         // Preflight failed before a lease or transport operation. Reuse that exact immutable unsent handoff once the target proof passes.
         for (const failedCapabilityDispatch of failedCapabilityDispatches) {
@@ -3043,9 +3061,10 @@ export class AgenticWorkflowRuntime {
               ...(options.conversationUserMessageId ? { conversationUserMessageId: textField(options.conversationUserMessageId) } : {}),
               ...(options.webCommand ? { webCommandId: options.webCommand.commandId } : {}) }),
             diagnosticFences: (run.nativeDiagnosticFences ?? []).map(item => ({ operationId: item.operationId, disposition: item.disposition, delivery: "unknown_delivery", resendAllowed: false })),
+            nonResumablePhaseFailures: skippedPhaseFailures,
             next: options.automatic
               ? "Runtime resumed this run automatically (bounded). Inspect the durable blocker, then record the next workflow action through Runtime; if only a human can decide, use request_user_decision instead of stopping."
-              : "This is an explicit operational resume request, distinct from earlier automatic wakes or hold instructions. Inspect the current durable blocker and diagnostic fences, confirm the required capability is now available, then continue this same run through Runtime. It grants no approval, TDD/verification-limit reset, delivery claim or implementation authority." },
+              : "This is an explicit operational resume request, distinct from earlier automatic wakes or hold instructions. Inspect the current durable blocker and diagnostic fences, confirm the required capability is now available, then continue this same run through Runtime. It grants no approval, TDD/verification-limit reset, delivery claim or implementation authority. Các phase failure lệch kế hoạch trong nonResumablePhaseFailures sẽ không được đo lại trên cùng revision." },
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
       }
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
@@ -3061,6 +3080,7 @@ export class AgenticWorkflowRuntime {
           (item.phaseFailure.repairable === false || (!!explicitId && item.phaseFailure.leaseRecoveryRequired === true));
         if ((matchesSource || matchesActiveRunUnrepairable) &&
             (item.phaseFailure.repairable === false || item.phaseFailure.leaseRecoveryRequired === true)) {
+          if (skippedPhaseFailures.some(skipped => skipped.requestId === item.message.message_id)) continue;
           item.phaseFailure.retryAuthorized = true;
         }
       }
@@ -3077,7 +3097,8 @@ export class AgenticWorkflowRuntime {
         // The user's resume grants a fresh automatic budget, with backoff counted from now, so the run can recover itself again.
         action.manualResumeAttempts = manualResumeAttempts + 1;
         action.resumeAttempts = 0;
-        if (action.kind === "resume_coordinator" && (action.recovery === undefined || action.recovery === "manual")) action.recovery = "auto_resume";
+        if (skippedPhaseFailures.length === 0 && action.kind === "resume_coordinator" &&
+            (action.recovery === undefined || action.recovery === "manual")) action.recovery = "auto_resume";
       }
       run.status = action.previousStatus ?? (explicitAfterAutomatic || resumeUnmeasured ? run.status : "specifying");
       if (verificationRetry) this.prepareVerificationRetry(state, run); // same as retry_verification
@@ -3091,7 +3112,7 @@ export class AgenticWorkflowRuntime {
       if (!options.automatic && explicitId) await this.resumeAcceptedDeveloper(state, save, _core, outbox, run, messageId);
       await this.recoverPhaseFailures(state, save, outbox, _core);
       await save();
-      return json({ queued: true, messageId, actionId: action.actionId });
+      return json({ queued: true, messageId, actionId: action.actionId, nonResumablePhaseFailures: skippedPhaseFailures });
     });
   }
 
@@ -3562,6 +3583,83 @@ export class AgenticWorkflowRuntime {
       if (outcome.rebound) this.progress(state, outbox, run, `Đã cập nhật công việc theo commit mới trên kho mã (${(outcome.previousRevision ?? "?").slice(0, 7)} → ${(outcome.revision ?? "?").slice(0, 7)}); thiết kế đã duyệt không đổi`);
       await save();
       return json({ ...outcome, unblocked, status: run.status });
+    });
+  }
+  /**
+   * In-run scope amendment (GĐ3, D3). Narrows a task's planned paths or edits its test names inside its current ownership.
+   * Ownership is never changed: Core persists the definition and rejects a different digest.
+   * Runtime re-derives every invariant. It never re-measures: the phase failure stays as evidence and the changed spec/strategy digests
+   * are what let the existing resume/unpark paths measure again (`inputsChanged`).
+   */
+  async amendTaskScope(inputRaw: unknown, context: { source: "coordinator" | "director" }): Promise<JsonValue> {
+    const input = AmendTaskScopeInputSchema.parse(inputRaw);
+    await this.initialize();
+    return this.transaction(async (state, save, core, outbox) => {
+      if (this.quiesced) throw new Error("Runtime is quiesced");
+      const run = this.run(state, input.runId);
+      await this.assertDirectorWritable(run);
+      if (context.source === "director" && run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+      if (run.supersededBy) throw new AdmissionRejectedError(`Run ${run.runId} continued as follow-up run ${run.supersededBy}`);
+      const refuse = (code: ConstructorParameters<typeof ScopeAmendmentRefusal>[0], message: string): never => { throw new ScopeAmendmentRefusal(code, message); };
+      if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) refuse("not_amendable", `Run is ${run.status}`);
+      const task = run.tasks.find(item => item.taskId === input.taskId);
+      if (!task || !run.coreCreated || !run.definition || !run.workflowSpec) return refuse("not_amendable", "Task has no accepted plan to amend");
+      const definitionTask = run.definition.tasks.find(item => item.id === task.taskId);
+      if (!definitionTask) return refuse("not_amendable", "Task is not part of the accepted workflow");
+      const current = (await core.snapshot(run.runId)).tasks.find(item => item.taskId === task.taskId);
+      if (!current) return refuse("not_amendable", "Task is unknown to Core");
+      const related = state.outbound.filter(out => out.message.run_id === run.runId && (out.taskId === task.taskId || taskLogBusinessTaskId(out) === task.taskId));
+      const failures = state.outbound.filter(out => out.message.run_id === run.runId && out.phaseFailure?.applied && out.phaseFailure.blocker &&
+        !isResumable(out.phaseFailure.blocker) && record(out.message.payload).taskId === task.taskId);
+      const duplicate = task.scopeAmendments?.find(item => item.amendmentId === digest([run.runId, task.taskId, item.fromSpecDigest, input.changes]));
+      if (duplicate) return json({ amended: false, duplicate: true, amendmentId: duplicate.amendmentId, specVersion: duplicate.toSpecVersion });
+      const parkedPlan = current.status === "parked" && task.parked?.kind === "plan_mismatch";
+      const stuck = failures.some(out => !inputsChanged(out.phaseFailure!.blocker!, task));
+      if (!parkedPlan && !stuck) refuse("not_amendable", "Only a task stopped by a plan mismatch (an escalated non-resumable phase failure, or parked as plan_mismatch) can be amended");
+      if (run.nativeDeliveries?.length || related.some(out => ["sending", "unknown_delivery"].includes(out.status)))
+        throw new Error("Unknown delivery must be reconciled before amending the task scope");
+      const owned = strings(record(definitionTask.metadata).ownedPaths);
+      const spec = task.spec.specification;
+      const specDigestBefore = digest(spec), strategyDigestBefore = digest(task.spec.strategy);
+      const missingPaths = failures.flatMap(out => strings(record(out.phaseFailure!.blocker!.details).paths));
+      const plan = planScopeAmendment({ specification: spec, strategy: task.spec.strategy, ownedPaths: owned }, input.changes, { missingPaths });
+      if (!plan.diff.droppedAffectedPaths.length && !plan.diff.addedAffectedPaths.length && !plan.diff.testNamesChanged.length)
+        return refuse("empty_amendment", "The amendment changes nothing; it cannot be used to clear a stop");
+      const now = this.now();
+      const { artifactRef: _ref, approvedBy: _approved, testStrategy: _strategy, tddDecision: _tdd, ...rest } = spec;
+      const next = await this.reviewSpec({ ...rest, status: "draft", version: (spec.version ?? 1) + 1, affectedPaths: plan.affectedPaths, updatedAt: now,
+        testStrategy: { ...task.spec.strategy, criterionMappings: plan.criterionMappings },
+        metadata: { ...spec.metadata, sdd: { ...record(spec.metadata?.sdd), revisionReason: input.reason } } }, true);
+      assertScopeInvariants({ specification: spec, strategy: task.spec.strategy }, { specification: next.specification, strategy: next.strategy });
+      if (this.ports.validateTaskCommands) {
+        try { this.ports.validateTaskCommands(next.specification, next.strategy, plan.ownedPaths); }
+        catch (error) { throw new Error(`Amended task command validation failed: ${redactString(String(error))}`); }
+      }
+      const amendmentId = digest([run.runId, task.taskId, specDigestBefore, input.changes]);
+      const decision = ApprovalDecisionSchema.parse({ ...this.decisionFields(next.request), decision: "approved", decidedBy: "coordinator",
+        decidedAt: new Date(Math.max(Date.parse(this.now()), Date.parse(next.request.requestedAt))).toISOString(),
+        feedbackArtifacts: [], idempotencyKey: `scope-amend:${amendmentId}`, metadata: { autoApproved: "scope-amend", amendmentId } });
+      const approved = SpecificationSchema.parse(await this.ports.policies.specification.approve(next.specification, next.request, decision));
+      await this.ports.policies.specification.supersede?.(spec, approved);
+      const projected = { ...run.definition, tasks: run.definition.tasks.filter(item => item.id === task.taskId), dependencies: [] };
+      await this.ports.policies.specification.assertImplementationReady(approved, next.request, decision, projected);
+      task.spec = { specification: approved, request: next.request, decision, strategy: next.strategy };
+      const record_ = { amendmentId, at: now, source: context.source, reason: input.reason, fromSpecVersion: spec.version ?? 1, toSpecVersion: approved.version ?? 1,
+        fromSpecDigest: specDigestBefore, toSpecDigest: digest(approved), fromStrategyDigest: strategyDigestBefore, toStrategyDigest: digest(next.strategy),
+        diff: plan.diff };
+      task.scopeAmendments = [...(task.scopeAmendments ?? []), ScopeAmendmentRecordSchema.parse(record_)].slice(-20);
+      // An earlier resume with unchanged inputs consumed the action and left the run idle. Re-offer that same action so the normal
+      // resume path (which alone authorizes a re-measurement, via the changed digests) can run; the manual resume count is kept.
+      const action = run.pendingAction;
+      if (action?.state === "queued" && run.status !== "escalated" && failures.some(out => out.message.message_id === action.sourceMessageId)) {
+        action.previousStatus = run.status; action.state = "pending"; run.status = "escalated";
+      }
+      await this.activityLog.record({ kind: "recovery", role: "runtime", action: "task_scope_amended", runId: run.runId, outcome: `${task.taskId}:${amendmentId.slice(0, 12)}` });
+      this.progress(state, outbox, run, `Đã chỉnh phạm vi của task ${task.taskId}: bỏ ${plan.diff.droppedAffectedPaths.length} tệp chưa có, thêm ${plan.diff.addedAffectedPaths.length}; tiêu chí nghiệm thu giữ nguyên`);
+      await save();
+      return json({ amended: true, amendmentId, specVersion: approved.version ?? 1, ownedPaths: plan.ownedPaths, affectedPaths: plan.affectedPaths,
+        nextStep: parkedPlan ? "Reopen the parked task (Director: set_issue_status retrying); Runtime re-measures because the specification digest changed"
+          : "Call resume_run; Runtime re-measures the stopped phase because the specification digest changed" });
     });
   }
   /** Withdraws a design proposal the human has not decided, so Coordinator can plan again. The next proposal needs its own approval. */
@@ -5400,7 +5498,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   }
   /** Actual host measurements can fail without becoming successful P16 evidence.
    * Preserve the request outcome, bound repairs, and resume only its owning task. */
-  async recordPhaseFailure(bindingInput: PaneBinding, requestId: string, summary: string, repairable: boolean, evidence?: ArtifactReference): Promise<JsonValue> {
+  async recordPhaseFailure(bindingInput: PaneBinding, requestId: string, summary: string, repairable: boolean, evidence?: ArtifactReference,
+    blocker?: TaskBlocker): Promise<JsonValue> {
     const binding = PaneBindingSchema.parse(bindingInput);
     return this.transaction(async (state, save, _core, outbox) => {
       const request = state.outbound.find(item => item.message.message_id === requestId);
@@ -5409,8 +5508,20 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           digest(request.handle.target.session) !== digest(binding.session) || record(request.message.payload).kind !== "conditional_evidence")
         throw new Error("Phase failure does not belong to this independent verifier");
       const run = this.run(state, request.message.run_id!);
+      const payload = record(request.message.payload);
+      const task = run.tasks.find(item => item.taskId === payload.taskId);
+      if (!task) throw new Error("Policy phase task missing");
+      const sourceRevision = textField(payload.sourceRevision);
+      const phase = textField(payload.phase);
+      const specDigest = digest(task.spec.specification), strategyDigest = digest(task.spec.strategy);
+      const recordedBlocker = blocker ? { code: blocker.code, fixableBy: blocker.fixableBy,
+        fingerprint: blockerFingerprint({ code: blocker.code, runId: run.runId, taskId: task.taskId, phase,
+          sourceRevision, specDigest, strategyDigest, details: blocker.details }),
+        specDigest, strategyDigest, sourceRevision, details: json(blocker.details) as Record<string, JsonValue> } : undefined;
+      if (blocker && !isResumable(blocker)) repairable = false;
       if (request.phaseFailure) {
-        if (request.phaseFailure.summary !== summary || request.phaseFailure.repairable !== repairable || digest(request.phaseFailureEvidence) !== digest(evidence))
+        if (request.phaseFailure.summary !== summary || request.phaseFailure.repairable !== repairable ||
+            digest(request.phaseFailureEvidence) !== digest(evidence) || digest(request.phaseFailure.blocker) !== digest(recordedBlocker))
           throw new Error("Conflicting immutable policy failure outcome");
         return this.phaseFailureReply(run, request, true);
       }
@@ -5418,7 +5529,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (request.status !== "accepted") throw new Error("Verifier released without a saved phase failure; reconcile its original request");
       if (evidence) { await this.verifyReferences([evidence], run.runId); request.phaseFailureEvidence = ArtifactReferenceSchema.parse(evidence); }
       await outbox.renew(request);
-      request.phaseFailure = { summary: textField(summary), repairable, applied: false };
+      request.phaseFailure = { summary: textField(summary), repairable, applied: false,
+        ...(recordedBlocker ? { blocker: recordedBlocker } : {}) };
       request.error = `policy_phase_failed:${summary}`;
       await save(); // preserve the measured outcome before releasing its lease
       await this.recoverPhaseFailures(state, save, outbox, _core);
@@ -5440,7 +5552,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   }
   private async recoverPhaseFailures(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox, core?: CoreSession): Promise<void> {
     for (const request of state.outbound.filter(item => item.phaseFailure && !item.phaseFailure.applied)) {
-      const { summary, repairable } = request.phaseFailure!;
+      const { summary, repairable, blocker } = request.phaseFailure!;
       const run = state.runs.find(item => item.runId === request.message.run_id);
       if (!run) continue;
       const payload = record(request.message.payload);
@@ -5457,23 +5569,30 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         continue;
       }
       await outbox.release(request);
+      const repeatedBlocker = blocker && priorSameFingerprint(state, run.runId, task.taskId, blocker.fingerprint,
+        request.message.message_id) >= 1;
       const failures = state.outbound.filter(item => item.message.run_id === run.runId && item.error?.startsWith("policy_phase_failed:") &&
         !item.phaseFailure?.retryAuthorized && item.phaseFailure?.repairable !== false &&
         record(item.message.payload).taskId === task.taskId && record(item.message.payload).phase === payload.phase &&
         record(item.message.payload).implementationAttemptId === payload.implementationAttemptId).length;
       if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(run.status)) {
         // Retain the receipt while preserving a newer terminal decision.
-      } else if (!repairable || failures >= run.maxIterations || task.result !== undefined) {
+      } else if (repeatedBlocker || !repairable || failures >= run.maxIterations || task.result !== undefined) {
         const previousStatus = run.status;
-        run.status = "escalated"; run.error = task.result
+        run.status = "escalated"; run.error = repeatedBlocker
+          ? `No progress: same ${blocker.code} on same revision and plan`
+          : blocker && !isResumable(blocker) ? `Plan mismatch (${blocker.code}): ${summary}`
+          : task.result
           ? `Submitted implementation requires independent policy repair: ${summary}`
           : !repairable ? `Policy measurement blocked: ${summary}` : `Policy phase repair limit exhausted: ${summary}`;
         // An infrastructure failure (runner, sandbox, build) is not a code defect: once fixed, an explicit resume re-measures the
         // same revision. An exhausted repair limit stays a human stop, so the bound is never widened.
-        if (!repairable || task.result) run.pendingAction = { actionId: `next-${digest([run.runId, request.message.message_id])}`, kind: "resume_coordinator",
-          owner: "coordinator", reason: run.error.slice(0, 2000), sourceMessageId: request.message.message_id, createdAt: this.now(), state: "pending",
+        if (repeatedBlocker || !repairable || task.result) run.pendingAction = { actionId: `next-${digest([run.runId, request.message.message_id])}`, kind: "resume_coordinator",
+          owner: "coordinator", reason: (run.error + (blocker ? `\nNext: ${BLOCKERS[blocker.code].nextAction}${isResumable(blocker) ? "" : " Resume sẽ không đo lại cùng revision."}` : "")).slice(0, 2000),
+          sourceMessageId: request.message.message_id, createdAt: this.now(), state: "pending",
           previousStatus, ...inheritedManualResume(run), recovery: "manual" };
-        this.progress(state, outbox, run, run.error);
+        this.progress(state, outbox, run, blocker && !isResumable(blocker)
+          ? `Kế hoạch khai các tệp test chưa có trong commit; đang dừng để sửa kế hoạch. ${run.pendingAction?.reason ?? run.error}` : run.error);
       } else {
         const parent = [...state.outbound].reverse().find(item => item.message.run_id === run.runId && item.message.type === "task.assignment" &&
           item.taskId === task.taskId && item.status === "accepted" &&

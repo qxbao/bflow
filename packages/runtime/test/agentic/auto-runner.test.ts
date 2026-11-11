@@ -3,12 +3,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { SpecificationSchema, TestStrategySchema, type Specification, type TestStrategy } from "@bflow/contracts";
+import { QualityGateContextSchema, SpecificationSchema, TestStrategySchema, type Specification, type TestStrategy } from "@bflow/contracts";
 import { TestStrategyResolver } from "../../../test-strategy/src/index.js";
 import { assessment, spec } from "../../../test-strategy/test/fixtures.js";
 import { parseBehavioralCommands } from "../../src/agentic/behavioral-runner.js";
+import { TaskBlocker } from "../../src/agentic/blockers.js";
 import { HostVerification } from "../../src/agentic/host-verification.js";
-import { TestRunnerSource, describeTestRunners, resolveTaskCommands } from "../../src/agentic/task-commands.js";
+import { TestRunnerSource, automaticChecks, describeTestRunners, resolveTaskCommands } from "../../src/agentic/task-commands.js";
 import { detectTestRunners } from "../../src/agentic/runner-detection.js";
 import { WorkflowProposalRejected, reportsToUser } from "../../src/agentic/workflow-rejection.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
@@ -84,6 +85,32 @@ describe("automatic test runner proposals (no owner configuration)", () => {
     const verification = verificationWith(runners);
     expect(() => verification.assertSupported(specification, strategy)).not.toThrow();
     expect(verification.configuredMethods()).toEqual(["unit_test", "integration_test", "e2e_test"]);
+  });
+
+  it("accepts a planned test directory before its tests exist and registers its independent gate", async () => {
+    const root = await repository(vitestRepository);
+    const runners = new TestRunnerSource([], root);
+    await runners.refresh();
+    const { specification, strategy } = proposal(["packages/example/src/logic.ts", "packages/example/test"]);
+    const verification = verificationWith(runners);
+
+    expect(() => verification.assertSupported(specification, strategy)).not.toThrow();
+    expect(() => verification.assertTaskSupported(specification, strategy, ["packages/example"])).not.toThrow();
+    const check = verification.behavioralChecks(specification, strategy).find(item => item.id === "host-behavioral-auto-unit");
+    expect(check?.metadata).toMatchObject({ observedDiffIdentity: true });
+  });
+
+  it("rejects a planned directory when two selected runners could claim the same criterion", async () => {
+    const root = await repository(vitestRepository);
+    const detected = await detectTestRunners(root);
+    if (detected.status !== "detected") throw new Error("Expected detected test runners");
+    const unit = detected.profiles.find(profile => profile.command === "auto:unit")!;
+    const runners = new TestRunnerSource([], root, async () => ({ ...detected,
+      profiles: [...detected.profiles, { ...unit, id: "other-unit" }] }));
+    await runners.refresh();
+    const { specification, strategy } = proposal(["packages/example/src/logic.ts", "packages/example/test"]);
+
+    expect(rejectionOf(() => verificationWith(runners).assertSupported(specification, strategy)).rejection.code).toBe("missing_test_mapping");
   });
 
   it("refuses a proposal whose affectedPaths lack test files with a Coordinator-fixable code that is never reported to the user", async () => {
@@ -172,6 +199,45 @@ describe("automatic test runner proposals (no owner configuration)", () => {
     const { specification, strategy } = proposal(["test/a.test.cjs"]);
     const [bound] = resolveTaskCommands({ owner: [], profiles: runners.profiles, strategy, specification });
     expect(bound).toMatchObject({ reporter: "node_tap", checkoutDependencyRoots: [], testPaths: ["test/a.test.cjs"], testNames: [TEST_NAME] });
+  });
+
+  it("classifies ambiguous criterion-to-runner binding as a plan blocker", async () => {
+    const root = await repository(vitestRepository);
+    const runners = new TestRunnerSource([], root);
+    await runners.refresh();
+    const { specification, strategy } = proposal(["packages/example/test/logic.test.ts"]);
+    const unit = runners.profiles.find(profile => profile.command === "auto:unit")!;
+    const competing = { ...unit, id: "competing-unit", command: "auto:competing-unit" };
+    const selected = { ...strategy, targetCommands: [...strategy.targetCommands, competing.command] };
+
+    let error: unknown;
+    try { resolveTaskCommands({ owner: [], profiles: [...runners.profiles, competing], strategy: selected, specification }); }
+    catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(TaskBlocker);
+    expect(error).toMatchObject({ code: "runner_identity_unselectable", fixableBy: "director" });
+    expect((error as Error).message).toContain("runner_identity_unselectable");
+  });
+
+  it("returns a structured no-test-identities blocker from an automatic gate with no owned tests", async () => {
+    const root = await repository(vitestRepository);
+    const runners = new TestRunnerSource([], root);
+    await runners.refresh();
+    const { specification, strategy } = proposal(["packages/example/test/logic.test.ts"]);
+    const run = { baseRevision: "a".repeat(40), definition: { tasks: [{ id: "task", metadata: { ownedPaths: ["packages/other"] } }] },
+      tasks: [{ taskId: "task", spec: { specification, strategy } }] };
+    const host = new HostVerification(() => ({ inspect: async () => run } as unknown as AgenticWorkflowRuntime),
+      () => { throw new Error("No artifact access expected"); }, undefined, runners);
+    const definition = automaticChecks().find(check => check.id === "host-behavioral-auto-unit")!;
+    const context = QualityGateContextSchema.parse({ runId: "run", taskId: "task", attemptId: "attempt",
+      definition, artifacts: [], input: { sourceRevision: run.baseRevision, baseRevision: run.baseRevision,
+        sourceWorktreePath: root, specFingerprint: "a".repeat(64), scope: "task" } });
+    const gate = host.behavioralGates().find(check => check.id === definition.id)!;
+
+    const result = await gate.evaluate(context);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "validation", retryable: false,
+      message: expect.stringContaining("has no test identities for this task"),
+      details: { blocker: { code: "no_test_identities", fixableBy: "director", nextAction: expect.any(String), details: {} } } } });
   });
 
   it("describes the detected runner for Coordinator planning with its naming rules", async () => {

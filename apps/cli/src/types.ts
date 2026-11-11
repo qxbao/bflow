@@ -206,6 +206,8 @@ export interface EnvironmentCommandArgs extends GlobalCliFlags {
   readonly command: "up" | "down" | "attach" | "doctor" | "recover";
   readonly timeoutMs?: number | undefined;
   readonly expectPlanPath?: string | undefined;
+  /** `up` only: explicitly reopen a session the user stopped, even from an agent context. */
+  readonly restart?: boolean | undefined;
   readonly yes: boolean;
   readonly force?: boolean | undefined;
   readonly deep?: boolean | undefined;
@@ -540,6 +542,8 @@ export interface PresentationOptions {
 }
 
 export interface CliContext {
+  /** Process environment used to recognise an agent (Director) context; defaults to process.env. */
+  readonly env?: Readonly<Record<string, string | undefined>> | undefined;
   readonly reconcileCancellation?: ((runId: string) => Promise<import("@bflow/runtime").CancellationReconciliationReport>) | undefined;
   readonly telemetry?: ((runId: string) => Promise<import("@bflow/runtime").WorkflowTelemetryReport>) | undefined;
   readonly environment?: EnvironmentDependencies | undefined;

@@ -6,6 +6,7 @@ import { restoreDirectorMachineEnvironment } from './director-machine-environmen
 import { environmentProcessRunner } from './environment-process.js';
 import { armCodexDirectorWatch, cancelCodexDirectorWatch, cancelCodexDirectorWatchIfThread, isCodexDirectorWakeMarker, queueCodexDirectorThread, readCodexDirectorWatchStatus, runCodexDirectorWatch } from "./director-wake.js";
 import { CLI_EXIT_CODES } from "./types.js";
+import { SESSION_STOPPED_BY_USER, clearUserStopIntent, userStopMessages, userStopState } from "./user-stop-intent.js";
 
 export type DirectorProvider = "claude" | "codex" | "agy";
 const PROVIDERS: readonly DirectorProvider[] = ["claude", "codex", "agy"];
@@ -15,7 +16,7 @@ const HOOK_STDIN_DEADLINE_MS = 2000;
 const SuspendMcpArgs = z.object({ cursor: z.string().min(1).max(512), threadId: z.string().uuid() }).strict();
 
 export type DirectorArgs =
-  | { readonly sub: "start"; readonly provider?: DirectorProvider | undefined; readonly json: boolean }
+  | { readonly sub: "start"; readonly provider?: DirectorProvider | undefined; readonly json: boolean; readonly restart: boolean }
   | { readonly sub: "call"; readonly tool: string; readonly argsJson: string; readonly json: boolean }
   | { readonly sub: "mcp" }
   | { readonly sub: "suspend"; readonly cursor: string }
@@ -26,7 +27,7 @@ export type DirectorArgs =
 
 export const DIRECTOR_HELP = `Cách dùng: bflow director <lệnh con>
 
-  start [--provider claude|codex|agy] [--json]   Đăng ký phiên Director và in token (chỉ dùng trong skill /bflow-start)
+  start [--provider claude|codex|agy] [--restart] [--json]   Đăng ký phiên Director và in token (chỉ dùng trong skill /bflow-start); --restart chỉ khi người dùng yêu cầu mở lại phiên đã dừng
   call <tool> [--json] [<argsJson>]              Gọi một tool Director (cần biến BFLOW_DIRECTOR_TOKEN)
   mcp                                            Máy chủ MCP qua stdio cho Director
   suspend <cursor>                               Codex: ngủ đến khi có sự kiện, rồi tiếp tục thread
@@ -37,17 +38,18 @@ export function parseDirectorArgs(args: readonly string[]): { ok: true; value: D
   const [sub, ...rest] = args;
   if (sub === undefined || sub === "--help" || sub === "-h") return { ok: true, value: { sub: "help" } };
   if (sub === "start") {
-    let provider: DirectorProvider | undefined; let json = false;
+    let provider: DirectorProvider | undefined; let json = false; let restart = false;
     for (let i = 0; i < rest.length; i++) {
       const a = rest[i]!;
       if (a === "--json" || a === "-j") json = true;
+      else if (a === "--restart") restart = true;
       else if (a === "--provider") {
         const v = rest[++i];
         if (!PROVIDERS.includes(v as DirectorProvider)) return { ok: false, message: "--provider phải là claude, codex hoặc agy." };
         provider = v as DirectorProvider;
       } else return { ok: false, message: `Tham số không hợp lệ cho 'bflow director start': ${a}` };
     }
-    return { ok: true, value: { sub, provider, json } };
+    return { ok: true, value: { sub, provider, json, restart } };
   }
   if (sub === "call") {
     let tool: string | undefined; let argsJson: string | undefined; let json = false;
@@ -74,13 +76,13 @@ export function parseDirectorArgs(args: readonly string[]): { ok: true; value: D
   return { ok: false, message: `Lệnh con không hợp lệ '${sub}' cho 'bflow director'. Dùng: start, call, mcp, suspend, watch-status, hook.` };
 }
 
-export interface DirectorRepositoryIdentity { readonly root: string; readonly sessionName: string }
+export interface DirectorRepositoryIdentity { readonly root: string; readonly sessionName: string; readonly id?: string | undefined }
 type HostOptions = { repositoryPath: string; sessionId: string };
 
 export interface DirectorCommandDeps {
   readonly cwd: string;
   readonly identify: (cwd: string) => Promise<DirectorRepositoryIdentity>;
-  readonly ensureUp: (cwd: string) => Promise<void>;
+  readonly ensureUp: (cwd: string, options?: { readonly restart?: boolean }) => Promise<void>;
   readonly ownerCall: (opts: HostOptions, method: "director_register" | "director_hook_note", input: unknown, timeoutMs?: number) => Promise<unknown>;
   readonly toolCall: (opts: HostOptions, token: string, name: string, args: Record<string, JsonValue>) => Promise<unknown>;
   readonly runMcp: (options: { call(name: string, token: string, args: Record<string, JsonValue>): Promise<unknown>; input: NodeJS.ReadableStream; output: NodeJS.WritableStream }) => Promise<void>;
@@ -91,7 +93,7 @@ export interface DirectorCommandDeps {
   readonly hookStdinDeadlineMs?: number | undefined;
   readonly suspendWatch?: (input: { root: string; sessionName: string; cursor: string; threadId: string; token: string }) => Promise<void>;
   readonly watch?: (input: { root: string; sessionName: string; generation: string;
-    wait: (cursor: string, timeoutMs: number) => Promise<unknown> }) => Promise<void>;
+    wait: (cursor: string, timeoutMs: number) => Promise<unknown>; stopped?: () => Promise<boolean> }) => Promise<void>;
 }
 
 async function spawnWatcher(root: string, generation: string, token: string): Promise<void> {
@@ -109,10 +111,10 @@ export async function defaultDirectorDeps(cwd: string): Promise<DirectorCommandD
   return {
     cwd,
     identify: async dir => (await import("./repository.js")).identifyRepository(dir),
-    ensureUp: async dir => {
+    ensureUp: async (dir, options) => {
       const machineEnvironment=restoreDirectorMachineEnvironment(process.env);
       if(machineEnvironment){
-        const result=await environmentProcessRunner.run({executable:process.execPath,args:[fileURLToPath(new URL('./bin.js',import.meta.url)),'up','--json'],
+        const result=await environmentProcessRunner.run({executable:process.execPath,args:[fileURLToPath(new URL('./bin.js',import.meta.url)),'up','--json',...(options?.restart?['--restart']:[])],
           cwd:dir,env:machineEnvironment,mode:'capture'});
         if(result.exitCode!==0)throw Error('Không khởi động được Runtime bằng môi trường máy của phiên Director. Chạy bflow doctor để xem chẩn đoán.');
         return;
@@ -126,9 +128,10 @@ export async function defaultDirectorDeps(cwd: string): Promise<DirectorCommandD
     ownerCall: (opts, method, input, timeoutMs) => runtime.callDirectorOwnerHost(opts, method, input, timeoutMs),
     toolCall: (opts, token, name, args) => runtime.callDirectorTool(opts, token, name, args),
     runMcp: options => runtime.runDirectorMcp(options),
-    suspendWatch: async input => { await armCodexDirectorWatch({ ...input, spawn: generation => spawnWatcher(input.root, generation, input.token) }); },
+    suspendWatch: async input => { await armCodexDirectorWatch({ ...input, spawn: generation => spawnWatcher(input.root, generation, input.token),
+      stopped: async () => (await userStopState(input.root, undefined, input.sessionName)).stopped }); },
     watch: async input => runCodexDirectorWatch({ root: input.root, sessionName: input.sessionName,
-      generation: input.generation, wait: input.wait,
+      generation: input.generation, wait: input.wait, ...(input.stopped ? { stopped: input.stopped } : {}),
       queue: (threadId, message, env) => queueCodexDirectorThread({ executable: "codex", cwd: input.root, threadId, message, env }),
       delay: ms => new Promise(resolve => setTimeout(resolve, ms)) }),
     env: process.env,
@@ -162,6 +165,27 @@ function startFix(message: string, provider: DirectorProvider): string {
   if (/Host unavailable|Foreign host/i.test(message)) return "Chạy `bflow up` trong kho này để khởi động host, rồi thử lại.";
   if (/config|cấu hình|init/i.test(message)) return "Chạy `bflow init` trong kho này rồi thử lại.";
   return "Chạy `bflow doctor` để xem nguyên nhân, sửa theo hướng dẫn rồi thử lại.";
+}
+
+const CONNECTION_ERROR = /ENOENT|ECONNREFUSED|ENOTDIR|Host unavailable/;
+function isConnectionError(error: unknown): boolean {
+  const code = isRecord(error) && typeof error.code === "string" ? error.code : "";
+  return CONNECTION_ERROR.test(code) || CONNECTION_ERROR.test(error instanceof Error ? error.message : String(error));
+}
+/** The Error a Director tool surfaces once the user stopped the session; the model must end its turn, not restart. */
+async function sessionStoppedError(repository: DirectorRepositoryIdentity): Promise<Error | undefined> {
+  const stop = await userStopState(repository.root, repository.id, repository.sessionName);
+  if (!stop.stopped) return undefined;
+  const { message, fix } = userStopMessages(stop.intent);
+  return new Error(`${SESSION_STOPPED_BY_USER}: ${message} ${fix}`);
+}
+/** Runs a host call; a connection failure after a user stop becomes `session_stopped_by_user`, any other error is untouched. */
+async function hostCall<T>(repository: DirectorRepositoryIdentity, call: () => Promise<T>): Promise<T> {
+  try { return await call(); }
+  catch (error) {
+    if (!isConnectionError(error)) throw error;
+    throw (await sessionStoppedError(repository)) ?? error;
+  }
 }
 
 async function readLimited(stream: NodeJS.ReadableStream, maxBytes: number, deadlineMs: number): Promise<string> {
@@ -211,7 +235,15 @@ async function runStart(args: Extract<DirectorArgs, { sub: "start" }>, deps: Dir
   const provider = args.provider ?? detectProvider(deps.env);
   try {
     const repository = await deps.identify(deps.cwd);
-    await deps.ensureUp(deps.cwd);
+    const stop = await userStopState(repository.root, repository.id, repository.sessionName);
+    if (stop.stopped && !args.restart) {
+      const { message, fix } = userStopMessages(stop.intent);
+      deps.stdout.write(args.json ? `${JSON.stringify({ ok: false, code: SESSION_STOPPED_BY_USER, message, fix })}\n` : `${message}\n${fix}\n`);
+      return CLI_EXIT_CODES.RUNTIME_ERROR;
+    }
+    // --restart is the explicit decision to reopen a session the user stopped.
+    if (args.restart) await clearUserStopIntent(repository.root);
+    await deps.ensureUp(deps.cwd, args.restart ? { restart: true } : undefined);
     const registered = await deps.ownerCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, "director_register", { provider });
     if (!isRecord(registered) || typeof registered.token !== "string") throw new Error("Host trả về phản hồi đăng ký không hợp lệ.");
     if (provider === "codex") await cancelCodexDirectorWatch(repository.root, repository.sessionName);
@@ -238,7 +270,9 @@ async function runSuspend(cursor: string, deps: DirectorCommandDeps): Promise<nu
   }
   try {
     const repository = await deps.identify(deps.cwd);
-    await deps.toolCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, token, "inspect", { view: "summary" });
+    const stopped = await sessionStoppedError(repository);
+    if (stopped) throw stopped;
+    await hostCall(repository, () => deps.toolCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, token, "inspect", { view: "summary" }));
     await deps.suspendWatch({ root: repository.root, sessionName: repository.sessionName, cursor, threadId, token });
     deps.stdout.write("watching\n");
     return 0;
@@ -255,6 +289,7 @@ async function runWatch(generation: string, deps: DirectorCommandDeps): Promise<
     const repository = await deps.identify(deps.cwd);
     const host = { repositoryPath: repository.root, sessionId: repository.sessionName };
     await deps.watch({ root: repository.root, sessionName: repository.sessionName, generation,
+      stopped: async () => (await userStopState(repository.root, repository.id, repository.sessionName)).stopped,
       wait: (cursor, timeoutMs) => deps.toolCall(host, token, "director_wait", { cursor, timeoutMs }) });
     return 0;
   } catch { return CLI_EXIT_CODES.RUNTIME_ERROR; }
@@ -278,7 +313,7 @@ async function runCall(args: Extract<DirectorArgs, { sub: "call" }>, deps: Direc
   if (Object.prototype.hasOwnProperty.call(parsed, "token")) return syntax("argsJson không được chứa khoá `token`; dùng BFLOW_DIRECTOR_TOKEN.");
   try {
     const repository = await deps.identify(deps.cwd);
-    const result = await deps.toolCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, token, args.tool, parsed as Record<string, JsonValue>);
+    const result = await hostCall(repository, () => deps.toolCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, token, args.tool, parsed as Record<string, JsonValue>));
     deps.stdout.write(`${JSON.stringify(result ?? null)}\n`);
     return 0;
   } catch (error) {
@@ -292,10 +327,12 @@ async function runMcp(deps: DirectorCommandDeps): Promise<number> {
     const opts = { repositoryPath: repository.root, sessionId: repository.sessionName };
     await deps.runMcp({
       call: async (name, token, a) => {
-        if (name !== "director_suspend") return deps.toolCall(opts, token, name, a);
+        if (name !== "director_suspend") return hostCall(repository, () => deps.toolCall(opts, token, name, a));
         if (!deps.suspendWatch) throw new Error("Codex Director watcher unavailable");
         const input = SuspendMcpArgs.parse(a);
-        await deps.toolCall(opts, token, "inspect", { view: "summary" });
+        const stopped = await sessionStoppedError(repository);
+        if (stopped) throw stopped;
+        await hostCall(repository, () => deps.toolCall(opts, token, "inspect", { view: "summary" }));
         await deps.suspendWatch({ root: repository.root, sessionName: repository.sessionName,
           cursor: input.cursor, threadId: input.threadId, token });
         return { status: "watching" };

@@ -211,6 +211,15 @@ describe("DirectorTools", () => {
     expect(await h.store.listIssues()).toMatchObject([{ issueId: "park:run-1:implement:2", taskKey: "implement", kind: "other", status: "open" }]);
   });
 
+  it("records a plan_mismatch park with its kind and refuses unknown kinds", async () => {
+    const h = await harness({ invoke: async () => ({ parked: true, runStatus: "completed_with_parked", episode: 1 }) });
+    const args = { runId: "run-1", taskId: "implement", reason: "Kế hoạch khai tệp test chưa có", kind: "plan_mismatch" };
+    await h.tools.invoke("park_task", args, h.token);
+    expect(h.calls[0]).toEqual({ name: "park_task", input: args });
+    expect(await h.store.listIssues()).toMatchObject([{ issueId: "park:run-1:implement:1", kind: "plan_mismatch" }]);
+    await expect(h.tools.invoke("park_task", { ...args, kind: "verification" }, h.token)).rejects.toThrow();
+  });
+
   it("does not create an issue for an unconfirmed stop or a rejected legacy run", async () => {
     let refused = false;
     const h = await harness({ invoke: async () => {

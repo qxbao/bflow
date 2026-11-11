@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { parseDirectorArgs, runDirectorCommand, runDirectorHookSafely, detectProvider, defaultDirectorDeps, type DirectorCommandDeps } from "../src/director-commands.js";
-import { armCodexDirectorWatch, cancelCodexDirectorWatch } from "../src/director-wake.js";
+import { armCodexDirectorWatch, cancelCodexDirectorWatch, readCodexDirectorWatchStatus, runCodexDirectorWatch } from "../src/director-wake.js";
+import { readUserStopIntent, writeUserStopIntent } from "../src/user-stop-intent.js";
 
 function make(over: Partial<DirectorCommandDeps> & { stdinText?: string } = {}) {
   const out: string[] = []; const err: string[] = [];
@@ -306,5 +307,178 @@ describe("director hook termination", () => {
     expect(await runDirectorHookSafely("claude", async () => { throw new Error("cannot load"); }, {})).toBe(0);
     expect(write.mock.calls.length).toBe(before);
     write.mockRestore();
+  });
+});
+
+describe("user stop intent", () => {
+  const threadId = "123e4567-e89b-42d3-a456-426614174000";
+  const tokenValue = "tid.secretsecretsecretsecret";
+  async function stoppedRepo() {
+    const dir = await mkdtemp(join(tmpdir(), "director-stop-"));
+    await writeUserStopIntent(dir, { version: 1, repositoryId: "repo-1", sessionName: "bf-abc", source: "web", requestedAt: "2026-11-09T10:00:00.000Z" });
+    return { dir, identify: async () => ({ root: dir, sessionName: "bf-abc", id: "repo-1" }) };
+  }
+
+  it("parses --restart for director start", () => {
+    expect(parse(["start", "--json"])).toMatchObject({ sub: "start", restart: false });
+    expect(parse(["start", "--restart", "--json"])).toMatchObject({ sub: "start", restart: true });
+  });
+
+  it("director start refuses with session_stopped_by_user and never calls ensureUp", async () => {
+    const { dir, identify } = await stoppedRepo();
+    try {
+      const ensureUp = vi.fn(async () => {});
+      const { deps, out, ownerCall } = make({ identify, ensureUp });
+      expect(await runDirectorCommand(parse(["start", "--json"]), deps)).toBe(1);
+      const body = JSON.parse(out[0]!);
+      expect(body).toMatchObject({ ok: false, code: "session_stopped_by_user" });
+      expect(body.message).toContain("Người dùng đã dừng phiên");
+      expect(body.fix).toContain("--restart");
+      expect(ensureUp).not.toHaveBeenCalled();
+      expect(ownerCall).not.toHaveBeenCalled();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("director start --restart clears the intent and then calls ensureUp", async () => {
+    const { dir, identify } = await stoppedRepo();
+    try {
+      let intentAtUp: unknown = "unset";
+      const ensureUp = vi.fn(async () => { intentAtUp = await readUserStopIntent(dir, "repo-1", "bf-abc"); });
+      const { deps } = make({ identify, ensureUp });
+      expect(await runDirectorCommand(parse(["start", "--restart", "--json"]), deps)).toBe(0);
+      expect(ensureUp).toHaveBeenCalledWith("/repo", { restart: true });
+      expect(intentAtUp).toBeUndefined();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("director start refuses on a corrupt stop marker (safe direction)", async () => {
+    const { dir } = await stoppedRepo();
+    try {
+      await writeFile(join(dir, ".bflow", "state", "user-stop.json"), "{broken");
+      const ensureUp = vi.fn(async () => {});
+      const { deps, out } = make({ identify: async () => ({ root: dir, sessionName: "bf-abc", id: "repo-1" }), ensureUp });
+      expect(await runDirectorCommand(parse(["start", "--json"]), deps)).toBe(1);
+      expect(JSON.parse(out[0]!)).toMatchObject({ ok: false, code: "session_stopped_by_user" });
+      expect(ensureUp).not.toHaveBeenCalled();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("director start without an intent keeps calling ensureUp as before", async () => {
+    const ensureUp = vi.fn(async () => {});
+    const { deps } = make({ ensureUp });
+    expect(await runDirectorCommand(parse(["start", "--json"]), deps)).toBe(0);
+    expect(ensureUp).toHaveBeenCalledOnce();
+  });
+
+  it("runMcp turns a connection error into session_stopped_by_user when the user stopped the session", async () => {
+    const { dir, identify } = await stoppedRepo();
+    try {
+      const toolCall = vi.fn(async () => { throw new Error("connect ENOENT /tmp/host.sock"); });
+      let caught: unknown;
+      const { deps } = make({ identify, toolCall: toolCall as never, runMcp: (async options => {
+        try { await options.call("director_wait", tokenValue, { cursor: "m1" }); } catch (error) { caught = error; }
+      }) as never });
+      expect(await runDirectorCommand(parse(["mcp"]), deps)).toBe(0);
+      expect((caught as Error).message).toMatch(/^session_stopped_by_user:/);
+      expect((caught as Error).message).toContain("--restart");
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("runMcp keeps the original connection error when the user did not stop the session", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "director-nostop-"));
+    try {
+      let caught: unknown;
+      const { deps } = make({ identify: async () => ({ root: dir, sessionName: "bf-abc", id: "repo-1" }),
+        toolCall: (async () => { throw new Error("connect ENOENT /tmp/host.sock"); }) as never,
+        runMcp: (async options => { try { await options.call("director_wait", tokenValue, {}); } catch (error) { caught = error; } }) as never });
+      await runDirectorCommand(parse(["mcp"]), deps);
+      expect((caught as Error).message).toBe("connect ENOENT /tmp/host.sock");
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("runMcp does not rewrite non-connection errors even after a stop", async () => {
+    const { dir, identify } = await stoppedRepo();
+    try {
+      let caught: unknown;
+      const { deps } = make({ identify, toolCall: (async () => { throw new Error("Director token rejected"); }) as never,
+        runMcp: (async options => { try { await options.call("inspect", tokenValue, {}); } catch (error) { caught = error; } }) as never });
+      await runDirectorCommand(parse(["mcp"]), deps);
+      expect((caught as Error).message).toBe("Director token rejected");
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("runMcp refuses director_suspend after a stop without arming a watcher", async () => {
+    const { dir, identify } = await stoppedRepo();
+    try {
+      const suspendWatch = vi.fn(async () => undefined);
+      let caught: unknown;
+      const { deps } = make({ identify, suspendWatch, runMcp: (async options => {
+        try { await options.call("director_suspend", tokenValue, { cursor: "m4.i0.b2.rZmVlZA", threadId }); } catch (error) { caught = error; }
+      }) as never });
+      await runDirectorCommand(parse(["mcp"]), deps);
+      expect((caught as Error).message).toMatch(/^session_stopped_by_user:/);
+      expect(suspendWatch).not.toHaveBeenCalled();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("director call reports session_stopped_by_user for a connection error after a stop", async () => {
+    const { dir, identify } = await stoppedRepo();
+    try {
+      const { deps, out } = make({ identify, env: { BFLOW_DIRECTOR_TOKEN: tokenValue },
+        toolCall: (async () => { throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }); }) as never });
+      expect(await runDirectorCommand(parse(["call", "inspect", "--json", "{}"]), deps)).toBe(1);
+      expect(JSON.parse(out[0]!).message).toMatch(/^session_stopped_by_user:/);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("director suspend refuses after a stop", async () => {
+    const { dir, identify } = await stoppedRepo();
+    try {
+      const suspendWatch = vi.fn(async () => undefined);
+      const { deps, err } = make({ identify, suspendWatch, env: { BFLOW_DIRECTOR_TOKEN: tokenValue, CODEX_THREAD_ID: threadId } });
+      expect(await runDirectorCommand(parse(["suspend", "m4.i0.b2.rZmVlZDox"]), deps)).toBe(1);
+      expect(err.join("")).toContain("session_stopped_by_user");
+      expect(suspendWatch).not.toHaveBeenCalled();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("the watch command passes a stop probe that sees the intent", async () => {
+    const { dir, identify } = await stoppedRepo();
+    try {
+      const watch = vi.fn(async (input: { stopped?: () => Promise<boolean> }) => { expect(await input.stopped?.()).toBe(true); });
+      const { deps } = make({ identify, watch: watch as never, env: { BFLOW_DIRECTOR_TOKEN: tokenValue } });
+      expect(await runDirectorCommand(parse(["watch", "123e4567-e89b-42d3-a456-426614174001"]), deps)).toBe(0);
+      expect(watch).toHaveBeenCalledOnce();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("end to end: armed watcher, Web stop, stale wake, director_wait and director start all end without a restart", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "director-e2e-stop-"));
+    try {
+      const identify = async () => ({ root: dir, sessionName: "bf-abc", id: "repo-1" });
+      const state = await armCodexDirectorWatch({ root: dir, sessionName: "bf-abc", threadId, cursor: "m4.i0.b2.rZmVlZDox", spawn: async () => {} });
+      // The user stops the session from Web: the intent is durable and the watcher is cancelled.
+      await writeUserStopIntent(dir, { version: 1, repositoryId: "repo-1", sessionName: "bf-abc", source: "web", operationId: "op-1", requestedAt: new Date().toISOString() });
+      await cancelCodexDirectorWatch(dir, "bf-abc");
+      expect(await readCodexDirectorWatchStatus(dir, "bf-abc")).toBe("cancelled");
+      // The old watcher process finds the session stopped and never queues a wake.
+      let queued = 0;
+      await runCodexDirectorWatch({ root: dir, sessionName: "bf-abc", generation: state.generation,
+        stopped: async () => (await readUserStopIntent(dir, "repo-1", "bf-abc")) !== undefined,
+        wait: async () => { throw new Error("connect ENOENT"); }, queue: async () => { queued++; }, delay: async () => {} });
+      expect(queued).toBe(0);
+      // A wake queued earlier still reaches the Director: director_wait learns the user stopped the session.
+      let caught: unknown;
+      const ensureUp = vi.fn(async () => {});
+      const { deps: mcpDeps } = make({ identify, ensureUp, toolCall: (async () => { throw new Error("connect ENOENT /tmp/host.sock"); }) as never,
+        runMcp: (async options => { try { await options.call("director_wait", tokenValue, { cursor: "m4" }); } catch (error) { caught = error; } }) as never });
+      await runDirectorCommand(parse(["mcp"]), mcpDeps);
+      expect((caught as Error).message).toMatch(/^session_stopped_by_user:/);
+      // The Director then runs `director start` without --restart: refused, ensureUp never called.
+      const { deps: startDeps, out } = make({ identify, ensureUp });
+      expect(await runDirectorCommand(parse(["start", "--json"]), startDeps)).toBe(1);
+      expect(JSON.parse(out[0]!)).toMatchObject({ ok: false, code: "session_stopped_by_user" });
+      expect(ensureUp).not.toHaveBeenCalled();
+    } finally { await rm(dir, { recursive: true, force: true }); }
   });
 });

@@ -34,9 +34,9 @@ describe("bflow-start director skill", () => {
   });
 
   it("embeds the skill version", () => {
-    expect(BFLOW_START_SKILL_VERSION).toBe("1.7.0");
+    expect(BFLOW_START_SKILL_VERSION).toBe("1.8.0");
     const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
-    expect(text).toContain("1.7.0");
+    expect(text).toContain("1.8.0");
     expect(text).toContain("BFLOW_DIRECTOR_TOKEN=<token> '/usr/bin/node' director call <tool> --json");
     expect(text).not.toContain("--token");
   });
@@ -145,7 +145,7 @@ describe("generated Director skills", () => {
     for (const render of [renderBflowStatusSkill, renderBflowQueueSkill]) {
       expect(Buffer.byteLength(render({ bflowCommand: argv }), "utf8")).toBeLessThanOrEqual(4096);
     }
-    expect(Buffer.byteLength(renderBflowStartSkill({ bflowCommand: argv }), "utf8")).toBeLessThanOrEqual(8192);
+    expect(Buffer.byteLength(renderBflowStartSkill({ bflowCommand: argv }), "utf8")).toBeLessThanOrEqual(9216);
   });
 
   it("never gives the Director code editing, approval or evidence authority", () => {
@@ -212,5 +212,21 @@ describe("generated Director skills", () => {
       const names = [...render({ bflowCommand: argv }).matchAll(/`([a-z]+(?:_[a-z]+)+)`/g)].map(match => match[1]!);
       expect(names.filter(name => !known.has(name) && name !== "user_decision_pending")).toEqual([]);
     }
+  });
+});
+
+describe("user stop rules for the Director", () => {
+  it("tells the Director not to restart a session the user stopped, in the skill and in the guide", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const guide = await readFile(new URL("../../../agents/director/system-prompt.md", import.meta.url), "utf8");
+    const skill = renderBflowStartSkill({ bflowCommand: argv });
+    for (const [name, text] of [["skill", skill], ["guide", guide]] as const) {
+      expect(text, name).toContain("session_stopped_by_user");
+      expect(text, name).toContain("--restart");
+      expect(text, name).toContain("bflow status");
+      expect(text, name).toMatch(/Do not (?:run|call)[^.\n]*director start/);
+      expect(text, name).toMatch(/latest message/);
+    }
+    expect(Buffer.byteLength(skill, "utf8")).toBeLessThanOrEqual(9216);
   });
 });

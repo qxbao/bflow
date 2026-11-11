@@ -82,7 +82,7 @@ export class FakeDirectorPort implements DirectorRuntimePort {
   async present(): Promise<boolean> { this.presentCalls++; return this.presence; }
 }
 
-export async function fixture(options: { additionalChecks?: QualityGateDefinition[]; additionalGates?: QualityGate[]; dynamicGate?: boolean; parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource; highRisk?: boolean; readiness?: "ready" | "partial"; director?: boolean;
+export async function fixture(options: { plannedExtraPaths?: string[]; extraOwnedPaths?: string[]; additionalChecks?: QualityGateDefinition[]; additionalGates?: QualityGate[]; dynamicGate?: boolean; parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource; highRisk?: boolean; readiness?: "ready" | "partial"; director?: boolean;
   /** Test-only override of the specification approver; omitted, the fixture keeps its `coordinator`/`human-1` principals. */
   authorizeApprover?: (decision: ApprovalDecision, humanRequired: boolean) => boolean | Promise<boolean> } = {}) {
   if (options.highRisk) options = { ...options, complex: true };
@@ -186,7 +186,7 @@ export async function fixture(options: { additionalChecks?: QualityGateDefinitio
   runtime = new AgenticWorkflowRuntime(ports, runtimeOptions);
   const spec: Specification = draft(options.complex ? "api" : options.behavioral ? "bugfix" : "documentation");
   const time = new Date().toISOString(); spec.createdAt = time; spec.updatedAt = time;
-  spec.affectedPaths = options.behavioral ? ["src", "test", ...(options.runners ? ["test/double.test.cjs"] : [])] : ["guide.md", ...(options.parallel ? ["other.md"] : [])];
+  spec.affectedPaths = options.behavioral ? ["src", "test", ...(options.runners ? ["test/double.test.cjs"] : []), ...(options.plannedExtraPaths ?? []), ...(options.extraOwnedPaths ?? [])] : ["guide.md", ...(options.parallel ? ["other.md"] : [])];
   spec.traceabilityTaskIds = options.parallel ? ["implement", "other"] : ["implement"];
   if (options.complex) { (spec.metadata!.sdd as any).assessment.modules = ["one", "two"]; }
   const sdd = spec.metadata!.sdd as any; sdd.traceability[0].taskIds = spec.traceabilityTaskIds;
@@ -212,7 +212,7 @@ export async function fixture(options: { additionalChecks?: QualityGateDefinitio
     spec.testStrategy = strategy; spec.tddDecision = strategy.tddDecision;
   } else { delete spec.testStrategy; delete spec.tddDecision; }
   const def = workflow(spec.traceabilityTaskIds); def.maxConcurrency = options.parallel ? 2 : 1;
-  def.tasks.forEach((task, index) => { (task as any).metadata = { ownedPaths: options.behavioral ? ["src", "test"] : [index && !options.conflict ? "other.md" : "guide.md"] }; });
+  def.tasks.forEach((task, index) => { (task as any).metadata = { ownedPaths: options.behavioral ? ["src", "test", ...(options.extraOwnedPaths ?? [])] : [index && !options.conflict ? "other.md" : "guide.md"] }; });
   const delegation = { schemaVersion: 2, delegationId: "delegation-1", messageId: "intake-1", correlationId: "correlation-1", sessionId: "session-1", runId: "run-1",
     requestedBy: "conversation", targetRole: "coordinator", title: spec.title, objective: spec.summary, specificationId: spec.specId, sddLevel: spec.level,
     acceptanceCriteria: spec.acceptanceCriteria, inputArtifacts: [], priority: "normal", requestedAt: time, idempotencyKey: "intake-1" };
@@ -319,7 +319,7 @@ export async function automaticRunners(): Promise<TestRunnerSource> {
   await runners.refresh();
   return runners;
 }
-export async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIterations = 3, automatic = false, policy: { highRisk?: boolean; readiness?: "ready" | "partial" } = {}) {
+export async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIterations = 3, automatic = false, policy: { highRisk?: boolean; readiness?: "ready" | "partial"; plannedExtraPaths?: string[]; extraOwnedPaths?: string[] } = {}) {
   const testPath = "test/double.test.cjs", sourcePath = "src/double.cjs";
   const dependencies = await realpath(await mkdtemp(join(tmpdir(), "bflow-integration-deps-")));
   cleanups.push(() => rm(dependencies, { recursive: true, force: true }));

@@ -28,6 +28,13 @@ describe("force environment shutdown arguments", () => {
   it.each(["up", "attach", "doctor", "recover"])("rejects force on %s", command => {
     expect(parseCliArgs([command, "--force"]).ok).toBe(false);
   });
+  it("accepts --restart only on up", () => {
+    const result = parseCliArgs(["up", "--restart", "--json"]);
+    expect(result.ok && result.value).toMatchObject({ command: "up", restart: true, json: true });
+    const plain = parseCliArgs(["up"]);
+    expect(plain.ok && "restart" in plain.value).toBe(false);
+    for (const command of ["down", "attach", "doctor", "recover"]) expect(parseCliArgs([command, "--restart"]).ok).toBe(false);
+  });
   it("documents the recovery flag in down help", () => {
     expect(getHelpText("down")).toContain("--force");
     expect(getHelpText("down")).toContain("checkpoint");

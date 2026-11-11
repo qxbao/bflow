@@ -15,7 +15,7 @@ import { useDirector } from '../director/status';
  */
 export const kindLabels:Record<ParkedIssueKind,string>={
   transport_failure:'Lỗi kết nối tác tử',provider_failure:'Lỗi nhà cung cấp mô hình',verification_exhausted:'Hết lượt kiểm chứng',
-  rework_exhausted:'Hết lượt sửa lại',user_decision_pending:'Chờ quyết định của bạn',environment:'Lỗi môi trường',other:'Sự cố khác',
+  rework_exhausted:'Hết lượt sửa lại',plan_mismatch:'Kế hoạch lệch',user_decision_pending:'Chờ quyết định của bạn',environment:'Lỗi môi trường',other:'Sự cố khác',
 };
 export const issueStatusLabels:Record<ParkedIssueStatus,string>={open:'Đang mở',retrying:'Đang thử lại',resolved:'Đã giải quyết',dismissed:'Đã bỏ qua'};
 const statusIcon:Record<ParkedIssueStatus,string>={open:'●',retrying:'◷',resolved:'✓',dismissed:'○'};

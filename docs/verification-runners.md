@@ -14,6 +14,31 @@ read-only mounts, offline environment, protected configuration and result parser
 No RoleMessage supplies these execution fields. Only exact test names and committed
 test paths come from the accepted strategy/specification and task ownership.
 
+### Test identities observed from the committed diff
+
+`specification.affectedPaths` lists *expected* test files or test directories. For an
+automatic runner with a task worktree, Runtime does not trust that list as the measured set.
+It reads `git diff --name-only --diff-filter=ACMR -z <task base> <head> --` after proving
+HEAD is clean and unchanged, and measures the changed files that match the runner's language
+and project directory and lie inside the task ownership. A test added outside the declared list
+but inside ownership is measured; a declared file that was never committed is reported as a
+coverage gap, not as a failure by itself. A plan that names only a test directory passes the
+host preflight if a selected runner exists; identities are then taken from the diff.
+
+Each required criterion needs at least one of its mapped test names to appear in the runner report.
+A criterion with none fails the host gate with a `criterion_without_test` finding that routes to
+ordinary Developer rework; it is never accepted as passed. Owner-configured commands keep their
+exact name matching, and the independent Red/Green blob pinning, `host-test-integrity` review,
+leases, fencing tokens and approvals are unchanged.
+
+The Developer side follows the same rule. `check_work` measures the tests the committed task diff changed, and reports that no
+test is committed yet when the diff has none. Edit authorization protects the union of the declared test files and the committed
+ones. Before Red, a test file under a planned test directory is the Red test the Developer is expected to write. After Red, the
+committed Red files are frozen, and Green/Refactor are measured on exactly the Red-measured paths, so a supplemental test added
+later cannot change the compared identities. Any file under a test directory that is not a measured test remains a runner
+definition under the provenance rule and fails Green with "Runner definitions differ". The candidate-evidence view accepts a
+receipt whose executed names are a subset, provided every required criterion has at least one executed mapped name.
+
 Multiple adapters can match one repository. Labels are `auto:unit:<adapter>`,
 `auto:integration:<adapter>` and `auto:e2e:<adapter>`; nested projects append their
 readable repository-path slug plus a stable SHA-256 suffix, so paths such as `a/b` and `a-b` cannot collide. Existing root JavaScript `auto:unit` / `auto:integration`

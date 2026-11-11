@@ -24,13 +24,14 @@ function text(input: unknown): string { if (typeof input !== "string" || !input.
 function number(input: unknown): number { if (!Number.isSafeInteger(input) || Number(input) < 0) invalid("invalid counter"); return Number(input); }
 function logText(input: unknown): string { if (typeof input !== "string" || input.includes("\0")) invalid("invalid log text"); return input; }
 function json(input: string): unknown { try { return JSON.parse(input); } catch { return invalid("incomplete JSON"); } }
-function finish(results: TestResult[], outcome: QualityCommandOutcome, expected: readonly string[], failureExitCodes: readonly number[] = [1]): ParsedRunnerResult {
+function finish(results: TestResult[], outcome: QualityCommandOutcome, expected: readonly string[], failureExitCodes: readonly number[] = [1],
+  allowMissingExpected = false): ParsedRunnerResult {
   const leaves: ObservedIdentityLeaf[] = results.map(test => ({
     ancestors: test.ancestors ?? [],
     title: test.title ?? test.name,
     rawName: test.name
   }));
-  const resolved = resolveExpectedIdentities(leaves, expected);
+  const resolved = resolveExpectedIdentities(leaves, expected, allowMissingExpected);
   if (!results.length || !resolved.matched) invalid("zero, duplicate or mismatched test identities");
   const names = resolved.canonicalNames;
   const canonicalResults = results.map((result, index) => ({ name: names[index]!, passed: result.passed }));
@@ -313,15 +314,15 @@ function rspecResults(input: string): TestResult[] {
 }
 
 /** Parses only complete structured per-test evidence; process success alone is never accepted. */
-export function parseRunnerResult(format: ResultFormat, outcome: QualityCommandOutcome, expectedNames: readonly string[], reports?: readonly string[], failureExitCodes?: readonly number[], selectedPaths: readonly string[] = []): ParsedRunnerResult {
+export function parseRunnerResult(format: ResultFormat, outcome: QualityCommandOutcome, expectedNames: readonly string[], reports?: readonly string[], failureExitCodes?: readonly number[], selectedPaths: readonly string[] = [], allowMissingExpected = false): ParsedRunnerResult {
   if (outcome.spawnError || outcome.timedOut || outcome.aborted || outcome.outputTruncated || outcome.signal || outcome.exitCode === null) invalid("runner infrastructure failure (spawn, deadline, signal or truncated output)");
   if (reports !== undefined && (!reports.length || reports.length > 1024 || reports.reduce((total, report) => total + Buffer.byteLength(report), 0) > 4_194_304)) invalid("missing or oversized structured reports");
   if (Buffer.byteLength(outcome.stdout) > 4_194_304) invalid("oversized runner output");
   let results: TestResult[];
   const output = outcome.stdout.replace(/\r\n/g, "\n");
   switch (format) {
-    case "node_tap": return parseNodeTap(outcome, expectedNames, true, selectedPaths);
-    case "vitest_json": return parseVitestJson(outcome, expectedNames, true);
+    case "node_tap": return parseNodeTap(outcome, expectedNames, true, selectedPaths, allowMissingExpected);
+    case "vitest_json": return parseVitestJson(outcome, expectedNames, true, allowMissingExpected);
     case "junit": results = junitResults(reports ?? [output]); break;
     case "trx": results = trxResults(reports ?? [output]); break;
     case "go_json": results = goResults(output); break;
@@ -331,5 +332,5 @@ export function parseRunnerResult(format: ResultFormat, outcome: QualityCommandO
     case "rspec_json": results = rspecResults(reports?.length === 1 ? reports[0]! : output); break;
     default: return invalid("unsupported result format");
   }
-  return finish(results, outcome, expectedNames, failureExitCodes ?? (format === "rust_libtest" ? [101] : [1]));
+  return finish(results, outcome, expectedNames, failureExitCodes ?? (format === "rust_libtest" ? [101] : [1]), allowMissingExpected);
 }

@@ -269,6 +269,19 @@ describe("launchDirectorPlan", () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it("clears the user stop intent when the user opens the Director, but not on a refusal before any effect", async () => {
+    const intent = join(repo, ".bflow", "state", "user-stop.json");
+    const write = async () => { await mkdir(join(repo, ".bflow", "state"), { recursive: true });
+      await writeFile(intent, JSON.stringify({ version: 1, repositoryId: "r", sessionName: "s", source: "web", requestedAt: "2026-11-09T00:00:00.000Z" })); };
+    const exists = () => readFile(intent).then(() => true, () => false);
+    await write();
+    await expect(launchDirectorPlan(await plan("/usr/bin/xterm"), { presence: "active", deps: deps({ spawn: vi.fn() as never }) }))
+      .rejects.toMatchObject({ code: "director_active" });
+    expect(await exists()).toBe(true);
+    await launchDirectorPlan(await plan(null), { presence: "absent", deps: deps({ spawn: vi.fn() as never }) });
+    expect(await exists()).toBe(false);
+  });
+
   it("refuses an active Director before any effect", async () => {
     const spawn = vi.fn();
     await expect(launchDirectorPlan(await plan("/usr/bin/xterm"), { presence: "active", deps: deps({ spawn: spawn as never }) }))

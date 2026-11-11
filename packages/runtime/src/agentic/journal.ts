@@ -26,6 +26,7 @@ import { ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./r
 import { CancellationStopProofSchema, NamespaceExitProofSchema, ownsCancelledAllocation, type CancellationStopProof, type NamespaceExitProof } from "./cancellation-stop.js";
 import { PrototypeRecordSchema, type PrototypeRecord } from "./prototype-review.js";
 import { TaskFailoverSchema, type TaskFailover } from "./provider-failover-state.js";
+import { BLOCKERS, type BlockerCode, type BlockerFixableBy } from "./blockers.js";
 
 export function json(value: unknown): JsonValue {
   const serialized = JSON.stringify(value);
@@ -60,6 +61,20 @@ const TaskParkSchema = z.object({
   episodeKey: z.string().min(1).optional()
 }).strict();
 export type TaskPark = z.infer<typeof TaskParkSchema>;
+const Hex64 = z.string().regex(/^[a-f0-9]{64}$/);
+const PathListSchema = z.array(z.string().min(1).max(1024)).max(50);
+/** Audit of one in-run scope amendment (private journal v10); the old spec and phase failures stay as evidence. */
+export const ScopeAmendmentRecordSchema = z.object({
+  amendmentId: Hex64, at: IsoDateTimeSchema, source: z.enum(["coordinator", "director"]),
+  reason: z.string().trim().min(1).max(1000),
+  fromSpecVersion: z.number().int().positive(), toSpecVersion: z.number().int().positive(),
+  fromSpecDigest: Hex64, toSpecDigest: Hex64, fromStrategyDigest: Hex64, toStrategyDigest: Hex64,
+  diff: z.object({ droppedAffectedPaths: PathListSchema, addedAffectedPaths: PathListSchema,
+    ownedPathsBefore: PathListSchema, ownedPathsAfter: PathListSchema,
+    testNamesChanged: z.array(z.object({ criterionId: z.string().min(1), before: z.array(z.string()).max(20), after: z.array(z.string()).max(20) }).strict()).max(20) }).strict(),
+  ownerApprovalId: z.string().min(1).max(200).optional()
+}).strict();
+export type ScopeAmendmentRecord = z.infer<typeof ScopeAmendmentRecordSchema>;
 const TaskParkSettlementSchema = z.object({
   attemptId: z.string().min(1), binding: PaneBindingSchema, park: TaskParkSchema
 }).strict();
@@ -72,6 +87,8 @@ export interface TaskRecord {
   parkedVerifications?: z.infer<typeof ParkedVerificationSchema>[];
   parked?: TaskPark;
   parkHistory?: TaskPark[];
+  /** Private v10 audit of scope amendments, oldest first. */
+  scopeAmendments?: ScopeAmendmentRecord[];
   /** Private v8 write-ahead authority to settle an unsent allocation; dispatch stays fenced until park commits. */
   parkSettlement?: z.infer<typeof TaskParkSettlementSchema>;
   failovers?: TaskFailover[];
@@ -310,7 +327,9 @@ export interface Outbound {
     contextDigest: string; replacementMessageId: string; disposition: "replaced_without_verdict_claim" };
   phaseFailureEvidence?: ArtifactReference;
   /** `retryAuthorized`: an explicit resume allows re-measuring the same revision after a non-repairable (infrastructure) failure. */
-  phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean; leaseRecoveryRequired?: boolean };
+  phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean; leaseRecoveryRequired?: boolean;
+    blocker?: { code: BlockerCode; fixableBy: BlockerFixableBy; fingerprint: string; specDigest: string; strategyDigest: string;
+      sourceRevision: string; details?: Record<string, JsonValue> } };
   /** A control notice borrows its task assignment's lease; it never owns capacity. */
   parentAssignmentId?: string;
   /** Private outbox position captured before this Coordinator turn is physically dispatched. */
@@ -323,7 +342,7 @@ export interface Outbound {
   leaseRelease?: ReleaseAgentLeaseRequest;
 }
 export interface JournalState {
-  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8; repository: string; runs: RunRecord[]; outbound: Outbound[];
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10; repository: string; runs: RunRecord[]; outbound: Outbound[];
   /** "rejected" is terminal and carries Runtime's reason: the message was refused by admission and must never be retried. */
   inbox: { message: RoleMessage; status: "received" | "applied" | "rejected"; reason?: string }[];
   pendingCore: AppendEventsRequest[];
@@ -344,10 +363,18 @@ export function requiresDirectorJournal(state: Pick<JournalState, "runs" | "outb
     state.runs.some(run => run.delegation.requestedBy === "director" || run.delegationHistory?.some(item => item.requestedBy === "director") ||
       run.status === "completed_with_parked" || run.tasks.some(task => task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined || task.parkedVerifications !== undefined));
 }
+export function requiresBlockerJournal(state: Pick<JournalState, "runs" | "outbound">): boolean {
+  return state.outbound.some(out => out.phaseFailure?.blocker !== undefined) ||
+    state.runs.some(run => run.tasks.some(task => task.parked?.kind === "plan_mismatch" ||
+      task.parkHistory?.some(entry => entry.kind === "plan_mismatch")));
+}
+export function requiresScopeAmendmentJournal(state: Pick<JournalState, "runs">): boolean {
+  return state.runs.some(run => run.tasks.some(task => task.scopeAmendments !== undefined));
+}
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 export function parseAgenticJournalState(input: unknown, repository: string, baseline?: JournalState): JournalState {
   const root = record(input);
-  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7, 8].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
+  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
   const state = root as unknown as JournalState;
   const trustedBaseline = baseline && baseline.repository === repository && baseline.version <= state.version ? baseline : undefined;
@@ -490,11 +517,17 @@ export function parseAgenticJournalState(input: unknown, repository: string, bas
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {
+      if (task.scopeAmendments !== undefined) {
+        if (state.version < 10) throw new Error("Task scope amendments require private journal v10");
+        task.scopeAmendments = z.array(ScopeAmendmentRecordSchema).max(20).parse(task.scopeAmendments);
+      }
       if (task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined || task.parkedVerifications !== undefined) {
         if (state.version < 8) throw new Error("Task parking requires private journal v8");
         if (task.parkedVerifications !== undefined) task.parkedVerifications = z.array(ParkedVerificationSchema).max(20).parse(task.parkedVerifications);
         if (task.parked !== undefined) task.parked = TaskParkSchema.parse(task.parked);
         if (task.parkHistory !== undefined) task.parkHistory = z.array(TaskParkSchema).max(20).parse(task.parkHistory);
+        if (state.version < 9 && (task.parked?.kind === "plan_mismatch" || task.parkHistory?.some(entry => entry.kind === "plan_mismatch")))
+          throw new Error("Task parking plan mismatch requires private journal v9");
         if (task.parkSettlement !== undefined) task.parkSettlement = TaskParkSettlementSchema.parse(task.parkSettlement);
         if (task.parked && task.parkSettlement) throw new Error("Task park and allocation settlement cannot coexist");
         const pendingPark = task.parked ?? task.parkSettlement?.park;
@@ -641,6 +674,19 @@ export function parseAgenticJournalState(input: unknown, repository: string, bas
           out.phaseFailure.leaseRecoveryRequired !== undefined && (out.phaseFailure.leaseRecoveryRequired !== true || !out.phaseFailure.repairable || !out.phaseFailure.applied) ||
           out.message.type !== "verification.requested" || record(out.message.payload).kind !== "conditional_evidence")
         throw new Error("Invalid private policy failure outcome");
+      if (out.phaseFailure.blocker !== undefined) {
+        const blocker = out.phaseFailure.blocker;
+        const details = blocker?.details;
+        const paths = details?.paths;
+        if (state.version < 9 || !blocker || !Object.hasOwn(BLOCKERS, blocker.code) ||
+            blocker.fixableBy !== BLOCKERS[blocker.code]?.fixableBy ||
+            ![blocker.fingerprint, blocker.specDigest, blocker.strategyDigest].every(value => /^[a-f0-9]{64}$/.test(value)) ||
+            !/^[a-f0-9]{40}$/.test(blocker.sourceRevision) ||
+            details !== undefined && (!z.record(z.string(), JsonValueSchema).safeParse(details).success ||
+              JSON.stringify(details).length > 52_000 || paths !== undefined &&
+              (!Array.isArray(paths) || paths.length > 50 || paths.some(path => typeof path !== "string" || path.length > 1024))))
+          throw new Error("Invalid private policy failure outcome");
+      }
     }
     if (out.leaseHistory) {
       if (!Array.isArray(out.leaseHistory) || !out.leaseHistory.length || out.leaseHistory.length > 3 ||
@@ -861,6 +907,8 @@ export class AgenticJournal {
         if (state.version < 7 && (state.runs.some(run => run.roleProfiles?.length || Object.keys(run.roleProfileDefaults ?? {}).length) ||
             state.outbound.some(out => out.roleProfile || out.executorLineage || out.profileAllocationTaskId))) state.version = 7;
         if (state.version < 8 && requiresDirectorJournal(state)) state.version = 8;
+        if (state.version < 9 && requiresBlockerJournal(state)) state.version = 9;
+        if (state.version < 10 && requiresScopeAmendmentJournal(state)) state.version = 10;
         // Equality covers invalid values that JSON.stringify would omit. Re-read under flock before acknowledging unchanged durable bytes.
         if (baseline && durableBytes && journalStatesEqual(state, baseline)) {
           try { if ((await readRegularJournalFile(statePath)).equals(durableBytes)) return; }

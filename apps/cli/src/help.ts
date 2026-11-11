@@ -9,7 +9,7 @@ Lệnh / Commands:
   init            Khởi tạo cấu hình kho mã bflow và quy trình mặc định
   config-migrate  Chuyển đổi tệp cấu hình cũ sang .bflow/config.yml
   setup           Lập kế hoạch và cài đặt môi trường máy cùng các thành phần nền tảng
-  director start  Director: đăng ký phiên Director và in token (--provider, --json)
+  director start  Director: đăng ký phiên Director và in token (--provider, --restart, --json)
   director call   Director: gọi một tool qua BFLOW_DIRECTOR_TOKEN (bflow director call <tool> [argsJson])
   director mcp    Director: máy chủ MCP qua stdio cho CLI của nhà cung cấp
   director hook   Director: hook ghi tin nhắn người dùng (bflow director hook claude|codex)
@@ -563,7 +563,7 @@ Examples:
 
 const HELP_MAP: Record<CliCommandName, string> = {
   docs: DOCS_HELP,
-  up: "Cách dùng: bflow up [--timeout <milliseconds>] [--json] [--debug] (Usage: bflow up [--timeout <milliseconds>] [--json])\nDựng hạ tầng Bflow (daemon, Herdr, vai chuyên trách, tab tiến trình). Không tạo phiên làm việc: mở CLI và chạy /bflow-start.",
+  up: "Cách dùng: bflow up [--timeout <milliseconds>] [--restart] [--json] [--debug] (Usage: bflow up [--timeout <milliseconds>] [--json])\nDựng hạ tầng Bflow (daemon, Herdr, vai chuyên trách, tab tiến trình). Không tạo phiên làm việc: mở CLI và chạy /bflow-start. Trong ngữ cảnh agent, phiên người dùng đã dừng chỉ mở lại với --restart.",
   down: "Cách dùng: bflow down [--yes] [--force] [--timeout <milliseconds>] [--json] [--debug] (Usage: bflow down [--yes] [--force] [--timeout <milliseconds>] [--json])\nTạo checkpoint cho công việc đang chạy và dừng an toàn chỉ phiên làm việc của kho mã này. --yes xác nhận dừng khi có công việc chưa an toàn. --force bao gồm xác nhận và dừng trực tiếp phiên làm việc thuộc sở hữu khi việc dọn dẹp pane bị kẹt. Cả hai chế độ đều yêu cầu rào chắn tắt Runtime và các checkpoint hợp lệ; trạng thái dự án và các worktree được giữ nguyên.",
   attach: "Cách dùng: bflow attach [--json] [--debug] (Usage: bflow attach [--json])\nMở tab tiến trình của phiên Bflow.",
   recover: "Cách dùng: bflow recover --yes [--json] [--debug] (Usage: bflow recover --yes [--json])\nHãy dừng các lệnh Bflow cũ trước. Chỉ chuyển đổi khóa vòng đời cũ đang trống; giữ nguyên trạng thái dự án, các tác nhân và worktree. Sau đó chạy bflow up hoặc bflow down --yes.",

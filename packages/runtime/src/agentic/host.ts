@@ -84,13 +84,14 @@ import { CONVERSATION_CONTEXT_BUDGET, boundConversationContext } from "./convers
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, defaultHostChecks } from "./host-verification.js";
+import { blockerOf } from "./blockers.js";
 import { AgyNativeAnchorSchema, HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, parseConversationResumeRequest, isCoordinatorTrigger, type AgyNativeTurn, type CoordinatorTurnObservation, type HumanPromptHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands, RtkRequiredToolUnavailable, type RtkOutputIntegration } from "./behavioral-runner.js";
 import { parseMutationChecks } from "./mutation-check.js";
 import { parseAppChecks } from "./app-check-config.js";
 import { WorkflowProposalRejected, guardWorkflowProposal } from "./workflow-rejection.js";
 import { detectTestRunners, disposeDetectedDependencies } from "./runner-detection.js";
-import { TestRunnerSource, describeTestRunners, resolveTaskCommands } from "./task-commands.js";
+import { TestRunnerSource, describeTestRunners, plannedRunnerCommands } from "./task-commands.js";
 import { splitAppCriteria } from "./app-check-selection.js";
 import { episodeKeyOf, evaluateIdleCheck, evaluateWatchdog, IDLE_CHECK_INTERVAL_MS, type IdleCheck, type IdleCheckPing } from "./run-watchdog.js";
 import { HostConversationIntake } from "./host-conversation.js";
@@ -1381,7 +1382,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
             recovery: "Restore the pinned compiler locally, then ask the Coordinator to resume this same task." };
           if (behavioralRunnerRequired) {
             try {
-              const commands = resolveTaskCommands({ owner: behavioralCommands, profiles: testRunners.profilesForRevision(), strategy: input.strategy,
+              const commands = plannedRunnerCommands({ owner: behavioralCommands, profiles: testRunners.profilesForRevision(), strategy: input.strategy,
                 specification: input.specification, ownedPaths: input.ownedPaths });
               if (!commands.length) return { status: "blocked", checkedAt, code: "task_runner_unavailable",
                 reason: "Accepted criteria have no usable host runner command bound to their committed test identities.",
@@ -2492,7 +2493,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         clearInterval(heartbeat);
         await renewInFlight;
         const failed = await host.runtime.recordPhaseFailure(binding, source.message_id, redactString(String(error)), error instanceof HostBehavioralFailure,
-          error instanceof HostBehavioralFailure ? error.evidence : undefined);
+          error instanceof HostBehavioralFailure ? error.evidence : undefined, blockerOf(error));
         return error instanceof HostBehavioralFailure && error.rtkOutputs.length
           ? json({ phaseFailure: failed, rtkOutputs: error.rtkOutputs }) : failed;
       }
@@ -3566,6 +3567,12 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     repository_setup:{properties:{runId:string,operation:{type:"string",enum:["git_status","git_log","npm_init","npm_install_dev","gitignore_add","create_directories","git_add","git_commit"]},limit:{type:"integer",minimum:1,maximum:100},packages:array,patterns:array,paths:array,message:string},required:["runId","operation"]},
     reresolve_execution_plan:{properties:{runId:string},required:["runId"]},
     withdraw_workflow_proposal:{properties:{runId:string,reason:string},required:["runId","reason"]},
+    amend_task_scope:{properties:{runId:string,taskId:string,reason:{type:"string",minLength:10,maxLength:1000},
+      changes:{type:"array",minItems:1,maxItems:20,items:{oneOf:[
+        strictObject({kind:{type:"string",const:"drop_planned_paths"},paths:array},["kind","paths"]),
+        strictObject({kind:{type:"string",const:"add_paths_within_ownership"},paths:array},["kind","paths"]),
+        strictObject({kind:{type:"string",const:"set_test_names"},criterionId:string,testNames:array},["kind","criterionId","testNames"])]}}},
+      required:["runId","taskId","reason","changes"]},
     read_role_pane:{properties:{role:string,paneId:string,lines:{type:"integer",minimum:1,maximum:200}},required:["role"]},
     assignment_context:{properties:{view:{type:"string",enum:["full","compact","active_only"]},surveyView:{type:"string",enum:["full","summary","anchors_only","omit"]},includeReleased:{type:"boolean"}},required:[]},
     read_task_log:{properties:{runId:string,taskId:string,lines:{type:"integer",minimum:1,maximum:100},maxBytes:{type:"integer",minimum:256,maximum:16384},cursor:{type:"string",minLength:1,maxLength:128},view:{type:"string",enum:["full","compact"]}},required:[]},

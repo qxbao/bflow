@@ -15,6 +15,7 @@ import type { AdapterRunner } from "./runner-adapter.js";
 import { parseRunnerResult } from "./runner-results.js";
 import { collectRunnerReports } from "./runner-reports.js";
 import { assertRunnerProvenance } from "./runner-provenance.js";
+import { TaskBlocker } from "./blockers.js";
 import {
   parseRegressionResult,
   RegressionInfrastructureFailure,
@@ -387,6 +388,15 @@ export interface RegressionMeasurement {
   sourceRevision: string; commandId: string; testBlobs: Record<string, string>;
   observation: RegressionObservation; outcome: QualityCommandOutcome;
 }
+/**
+ * Runner prepare/sandbox/invocation failures are environment problems, not code defects or plan mismatches: resume after the
+ * machine is fixed re-measures the same revision. Details stay stable (no output tail) so a repeat on unchanged inputs is detected.
+ */
+function runnerInfrastructure(stage: "prepare" | "sandbox_preparation" | "invocation" | "sandbox", message: string,
+  command: BoundBehavioralCommand, revision: string, cause?: unknown): TaskBlocker {
+  return new TaskBlocker("runner_infrastructure", message, { stage, commandId: command.id, revision },
+    cause === undefined ? undefined : { cause });
+}
 async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: string, revision: string,
   options: { readonly rtk?: RtkOutputRequest } = {}): Promise<{
   outcome: QualityCommandOutcome; testBlobs: Record<string, string>; checkout: string;
@@ -395,12 +405,15 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
   await assertPinnedRevision(cwd, revision);
   await assertRunnerProvenance(command, cwd, revision);
   const testBlobs: Record<string, string> = {};
+  const missing: string[] = [];
   for (const path of command.testPaths) {
     const entry = (await verificationGit(cwd, ["ls-tree", revision, "--", path])).trim();
     const match = /^100(?:644|755) blob ([a-f0-9]{40})\t/.exec(entry);
-    if (!match) throw new Error(`Behavioral test identity must be a committed regular file: ${path}`);
+    if (!match) { missing.push(path); continue; }
     testBlobs[path] = match[1]!;
   }
+  if (missing.length) throw new TaskBlocker("declared_test_missing",
+    `Behavioral test identity must be a committed regular file: ${missing.join(", ")}`, { paths: missing, revision });
   Object.assign(testBlobs, command.definitionBlobs ?? {});
   // Canonical path: Vitest reports resolved file names (macOS /var is a symlink to /private/var) and they are matched against the checkout.
   const temporary = await realpath(await mkdtemp(join(tmpdir(), "bflow-behavioral-"))), checkout = join(temporary, "checkout");
@@ -468,15 +481,15 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
           ? { ...command, executable: preparation.executable }
           : { ...command, executable: preparation.executable, ...(command.adapter ? { adapter: { ...command.adapter, projectDirectory: "." } } : {}) };
         const prepareSandbox = await sandboxBehavior(prepareCommand, checkout, preparation.args).catch(error => {
-          throw new Error(`Behavioral runner infrastructure failure (prepare): ${String(error)}`, { cause: error });
+          throw runnerInfrastructure("prepare", `Behavioral runner infrastructure failure (prepare): ${String(error)}`, command, revision, error);
         });
         const prepared = await runner.run({ ...prepareSandbox, cwd: prepareCwd, env, timeoutMs: preparation.timeoutMs, maxOutputBytes });
-        if (!prepared.ok) throw new Error(`Behavioral runner infrastructure failure (prepare): ${prepared.error.message}`);
+        if (!prepared.ok) throw runnerInfrastructure("prepare", `Behavioral runner infrastructure failure (prepare): ${prepared.error.message}`, command, revision);
         const prepareOutcome = prepared.value as QualityCommandOutcome;
         const failure = prepareOutcome.spawnError ?? (SANDBOX_ERROR.test(prepareOutcome.stderr) ? prepareOutcome.stderr.trim()
           : prepareOutcome.outputTruncated ? "truncated prepare output" : prepareOutcome.timedOut ? "deadline exceeded" : prepareOutcome.aborted ? "aborted" : prepareOutcome.signal ? `signal ${prepareOutcome.signal}`
           : prepareOutcome.exitCode !== 0 ? `exit ${prepareOutcome.exitCode}` : undefined);
-        if (failure !== undefined) throw new Error(`Behavioral runner infrastructure failure (prepare): ${failure}${outputTail(prepareOutcome)}`);
+        if (failure !== undefined) throw runnerInfrastructure("prepare", `Behavioral runner infrastructure failure (prepare): ${failure}${outputTail(prepareOutcome)}`, command, revision);
         await assertPinnedRevision(checkout, revision);
         await savePrepareArtifacts(checkout, prepKey, treeHash, prepareId);
       }
@@ -504,10 +517,10 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
         if (warmTreeFiles) await restorePrepareArtifacts(checkout, warmTreeFiles);
       }
       const sandbox = await sandboxBehavior(command, checkout, args, reporter).catch(error => {
-        throw new Error(`Behavioral runner infrastructure failure (sandbox preparation): ${String(error)}`, { cause: error });
+        throw runnerInfrastructure("sandbox_preparation", `Behavioral runner infrastructure failure (sandbox preparation): ${String(error)}`, command, revision, error);
       });
       const result = await runner.run({ ...sandbox, cwd: projectCwd, env, timeoutMs: command.timeoutMs, maxOutputBytes });
-      if (!result.ok) throw new Error(`Behavioral command invocation failed: ${result.error.message}`);
+      if (!result.ok) throw runnerInfrastructure("invocation", `Behavioral command invocation failed: ${result.error.message}`, command, revision);
       outcome = result.value as QualityCommandOutcome;
       if (compilerKey && outcome.exitCode === 0 && !outcome.spawnError && !outcome.signal && !outcome.timedOut && !outcome.aborted && !outcome.outputTruncated && !SANDBOX_ERROR.test(outcome.stderr)) {
         if (compilerOutcomeCache.size >= MAX_PREPARE_CACHE_ENTRIES) {
@@ -517,7 +530,7 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
         compilerOutcomeCache.set(compilerKey, outcome);
       }
     }
-    if (SANDBOX_ERROR.test(outcome.stderr)) throw new Error(`Behavioral sandbox failed: ${outcome.stderr.trim()}`);
+    if (SANDBOX_ERROR.test(outcome.stderr)) throw runnerInfrastructure("sandbox", `Behavioral sandbox failed: ${outcome.stderr.trim()}`, command, revision);
     if (options.rtk && rtkContext) {
       const raw = outcome.stdout + (outcome.stderr ? `\n[stderr]\n${outcome.stderr}` : "");
       try {
@@ -596,9 +609,10 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
   const { outcome, testBlobs, reports, rtk: rtkResult } = await runMeasurementCommand(command, cwd, revision, options);
   let parsed: ReturnType<typeof parseNodeTap> | ReturnType<typeof parseVitestJson>;
   try {
-    parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames, reports, command.adapter.failureExitCodes, command.testPaths)
-      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined || command.testNames.length > 0)
-      : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined || command.args.some(arg => arg.startsWith("--test-name-pattern")), command.testPaths);
+    const automatic = command.checkoutDependencyRoots !== undefined;
+    parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames, reports, command.adapter.failureExitCodes, command.testPaths, automatic)
+      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, automatic || command.testNames.length > 0, automatic)
+      : parseNodeTap(outcome, command.testNames, automatic || command.args.some(arg => arg.startsWith("--test-name-pattern")), command.testPaths, automatic);
   } catch (error) {
     if (error instanceof NodeTapTestCodeFailure) {
       if (rtkResult) {

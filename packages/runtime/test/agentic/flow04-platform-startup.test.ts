@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:net";
-import { mkdir, mkdtemp, open, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -500,15 +500,19 @@ describe("Flow-04 HostPlatformSession, host-protocol wall-clock framing, and hos
       { mode: 0o600 }
     );
 
-    // Hold `boot.lock` via flock for 180ms while openPersistedAgenticHost starts concurrently
-    const lockHandle = await open(join(hostDir, "boot.lock"), "a+", 0o600);
-    const holder = spawn("flock", ["3", "-c", "sleep 0.18"], {
-      stdio: ["ignore", "ignore", "ignore", lockHandle.fd]
+    // With -c, flock expects a path, not an inherited file descriptor.
+    const holder = spawn("flock", [join(hostDir, "boot.lock"), "-c", "echo locked; sleep 0.18"], {
+      stdio: ["ignore", "pipe", "ignore"]
     });
-    await lockHandle.close();
+    const holderClosed = new Promise<number | null>(resolveHolder => holder.once("close", resolveHolder));
+    await new Promise<void>((resolveLocked, reject) => {
+      holder.once("error", reject);
+      holder.once("close", () => reject(new Error("Lock holder exited before acquiring boot.lock")));
+      holder.stdout!.once("data", () => resolveLocked());
+    });
 
     const controller = await openPersistedAgenticHost({ repositoryPath: repoDir, sessionId });
-    await new Promise<void>(resolveHolder => holder.once("close", () => resolveHolder()));
+    expect(await holderClosed).toBe(0);
 
     // Expired deadline on `prepare` MUST reject before writing a prepare request to the daemon socket
     await expect(

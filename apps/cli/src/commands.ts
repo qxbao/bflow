@@ -55,6 +55,8 @@ import { lstat } from "node:fs/promises";
 import { findExecutable, type PlatformProfile } from "@bflow/machine-setup";
 import { roleModelPreset } from "@bflow/agent-providers";
 import { identifyRepository } from "./repository.js";
+import { EnvironmentError } from "./environment-error.js";
+import { SESSION_STOPPED_BY_USER, clearUserStopIntent, userStopMessages, userStopState } from "./user-stop-intent.js";
 import {
   checkRepositoryGitNexus,
   gitNexusServiceId,
@@ -175,6 +177,24 @@ function makeResult(
     ...(data !== undefined ? { data } : {}),
     ...(error !== undefined ? { error } : {})
   };
+}
+
+/** An agent (Director) context must not reopen a session the user stopped; a plain terminal or `--restart` may. */
+const AGENT_CONTEXT_ENV = ["BFLOW_DIRECTOR_TOKEN", "BFLOW_DIRECTOR_PROVIDER", "CODEX_THREAD_ID"] as const;
+async function guardUpAfterUserStop(cwd: string, restart: boolean, env: Readonly<Record<string, string | undefined>>): Promise<void> {
+  const repository = await identifyRepository(cwd);
+  const agentContext = AGENT_CONTEXT_ENV.some(name => (env[name] ?? "") !== "");
+  if (agentContext && !restart) {
+    const stop = await userStopState(repository.root, repository.id, repository.sessionName);
+    if (stop.stopped) {
+      const { message, fix } = userStopMessages(stop.intent);
+      throw new EnvironmentError({ code: "validation", retryable: false, message: `${SESSION_STOPPED_BY_USER}: ${message} ${fix}`,
+        details: { code: SESSION_STOPPED_BY_USER } });
+    }
+    return;
+  }
+  // A terminal user or an explicit --restart is the decision to reopen the session.
+  await clearUserStopIntent(repository.root);
 }
 
 export async function executeCommand(
@@ -369,6 +389,7 @@ async function executeCommandWithProgress(
         case "up":
           if (showProgress) emitProgress("Khởi động môi trường Bflow", "Kiểm tra điều kiện cần thiết và khởi chạy các vai trò");
           const expectation = parsed.expectPlanPath ? await prepareExecutionExpectation(cwd, parsed.expectPlanPath) : undefined;
+          await guardUpAfterUserStop(cwd, parsed.restart === true, context?.env ?? process.env);
           data = await lifecycle.up(parsed.timeoutMs, expectation);
           break;
         case "down":
