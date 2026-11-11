@@ -190,8 +190,8 @@ describe("Flow 07 — Verification, Rework Causality & Git Delivery red-team reg
           kind: "deterministic",
           method: "integration_test",
           command: "test-regression",
-          criterionIds: [],
-          testNames: [],
+          criterionIds: ["ac-1"],
+          testNames: [testName],
           role: "tester",
           levels: ["integration"]
         }
@@ -235,7 +235,7 @@ describe("Flow 07 — Verification, Rework Causality & Git Delivery red-team reg
                   command: config.command,
                   exitCode: 0,
                   testNames: config.testNames,
-                  criteria: [],
+                  criteria: [{ criterionId: "ac-1", passed: true, summary: "Regression suite passed" }],
                   summary: "Regression suite passed"
                 }
               }
@@ -323,14 +323,16 @@ describe("Flow 07 — Verification, Rework Causality & Git Delivery red-team reg
     spec.createdAt = time;
     spec.updatedAt = time;
     spec.affectedPaths = ["guide.md", "notes.md", "test/rework.test.cjs"];
+    // The rework checks need command-backed evidence in addition to independent Reviewer/QA gates.
+    spec.acceptanceCriteria[0]!.verificationMethod = "integration_test";
     spec.traceabilityTaskIds = ["implement"];
     (spec.metadata!.sdd as any).traceability[0].taskIds = ["implement"];
     spec.metadata!.conditionalTdd = {
       policyVersion: 1,
       taskId: "implement",
-      taskType: "documentation",
+      taskType: "integration",
       changeImpact: {
-        surfaces: ["documentation"],
+        surfaces: ["integration"],
         behaviorChanged: false,
         deterministic: false,
         regressionReproducible: false,
@@ -385,6 +387,9 @@ describe("Flow 07 — Verification, Rework Causality & Git Delivery red-team reg
       const runSnap = (await runtime.inspect("run-1")) as any;
       const task = runSnap.tasks.find((t: any) => t.taskId === "implement");
       const strategy = task.spec.strategy;
+      expect(strategy.tddDecision.mode).toBe("recommended");
+      expect(strategy.metadata.conditionalTdd.requiredVerificationMethods).toEqual(["integration_test"]);
+      expect(strategy.targetCommands).toEqual(["test-regression"]);
       const startedAt = new Date().toISOString();
       const bytes = Buffer.from(`implement-verification-${randomUUID()}`);
       const ref = unwrapResult(
@@ -443,15 +448,9 @@ describe("Flow 07 — Verification, Rework Causality & Git Delivery red-team reg
                 method,
                 criterionId: "ac-1",
                 evidenceArtifactId: ref.artifactId,
-                summary: "Independent observation"
-              },
-              {
-                method: "integration_test",
-                criterionId: "ac-1",
-                evidenceArtifactId: ref.artifactId,
                 command: "test-regression",
                 exitCode: 0,
-                summary: "Independent regression observation"
+                summary: "Independent observation"
               }
             ]
           }
@@ -661,6 +660,7 @@ describe("Flow 07 — Verification, Rework Causality & Git Delivery red-team reg
 
     // 1. Disputed-only rework submission WITHOUT a new commit (`HEAD === failedRevision`) must fail synchronously for `succeeded`
     const noCommitCheck = (await development.check(attempt2.developerBinding, { runId: "run-1", taskId: "implement" })) as any;
+    expect(noCommitCheck.evidence?.artifactId).toMatch(/^check-work-/);
     const disputedOnly = devStatus2.reworkContext.findings.map((f: any) => ({
       findingId: f.findingId,
       disposition: "disputed",
@@ -729,6 +729,7 @@ describe("Flow 07 — Verification, Rework Causality & Git Delivery red-team reg
       runId: "run-1",
       taskId: "implement"
     })) as any;
+    expect(repairedCheck.evidence?.artifactId).toMatch(/^check-work-/);
 
     const resolutions2 = devStatus2.reworkContext.findings.map((f: any) => ({
       findingId: f.findingId,

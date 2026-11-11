@@ -18,6 +18,22 @@ function reviewed(input: unknown) {
 }
 
 describe("per-task specification projection", () => {
+  it("preserves critical risk when projecting implementation policy", () => {
+    const critical = { ...draft, riskLevel: "critical" as const };
+    const projected = projectTaskSpecificationInput(critical, "unit", draft.acceptanceCriteria, "critical");
+    expect(projected.metadata?.conditionalTdd).toMatchObject({ riskClassification: "critical" });
+  });
+  it.each(["high", "critical"] as const)("keeps a documentation task independently reviewable in a %s-risk workflow", riskLevel => {
+    const manual = { ...draft.acceptanceCriteria[0]!, id: "manual", verificationMethod: "manual_review" as const };
+    const root = { ...draft, riskLevel, affectedPaths: [...draft.affectedPaths, "guide.md"] };
+    const projected = projectTaskSpecificationInput(root, "docs", [manual], "docs", undefined, ["guide.md"]);
+    const { strategy, specification } = reviewed(projected);
+    expect(strategy.targetCommands).toEqual([]);
+    expect(strategy.metadata?.conditionalTdd).toMatchObject({ requiredVerificationMethods: ["manual_review"] });
+    expect(specification.riskLevel).toBe("low");
+    expect(specification.level).toBe("lightweight");
+    expect(root.riskLevel).toBe(riskLevel);
+  });
   it("narrows the submitted criterion mappings to the task's criteria so split DAGs review", () => {
     expect(draft.testStrategy?.criterionMappings.map(mapping => mapping.criterionId)).toEqual(["ac-1", "ac-2", "ac-3"]);
     for (const [taskId, ids] of [["unit", ["ac-1", "ac-3"]], ["integration", ["ac-2"]]] as const) {

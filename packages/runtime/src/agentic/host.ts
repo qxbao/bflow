@@ -89,6 +89,7 @@ import { AgyNativeAnchorSchema, HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliver
 import { parseBehavioralCommands, RtkRequiredToolUnavailable, type RtkOutputIntegration } from "./behavioral-runner.js";
 import { parseMutationChecks } from "./mutation-check.js";
 import { parseAppChecks } from "./app-check-config.js";
+import { buildStaticAnalyzers } from "./static-analyzers.js";
 import { WorkflowProposalRejected, guardWorkflowProposal } from "./workflow-rejection.js";
 import { detectTestRunners, disposeDetectedDependencies } from "./runner-detection.js";
 import { TestRunnerSource, describeTestRunners, plannedRunnerCommands } from "./task-commands.js";
@@ -1029,9 +1030,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   } };
   const impactIndex = configuration.impactIndex ? createGitNexusImpactIndex(configuration.impactIndex) : unconfiguredImpactIndex;
   const hostReviewChecks = defaultHostChecks(configuration.policy);
+  const staticAnalyzers = buildStaticAnalyzers(configuration.staticAnalyzers ?? [], configuration.repositoryPath);
   const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, testRunners, rtkUsageIntegration,
     { scope: effectiveRegressionScope(configuration.policy, true), index: impactIndex }, mutationChecks,
-    { suites: appChecks, leaseDirectory: join(configuration.directory, "app-checks") }, hostReviewChecks);
+    { suites: appChecks, leaseDirectory: join(configuration.directory, "app-checks") }, hostReviewChecks, staticAnalyzers);
   const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners, rtkUsageIntegration, context => verification.candidateEvidenceForDeveloper(context));
   const activePolicyMeasurements = new Set<string>();
   const activeHostVerifications = new Map<string, number>();
@@ -1940,7 +1942,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           if (configuration.policy?.sdd.minimumLevel === "full" && spec.level !== "full") throw new Error("Project policy requires a full specification");
         } });
         guardWorkflowProposal({ phase: "verification", specification: spec, configuredMethods, check: () =>
-          verification.assertSupported(spec, strategy, normalizedDefinition) });
+          verification.assertWorkflowSupported(spec, strategy, normalizedDefinition) });
       } catch (error) {
         // Outside any journal transaction: Conversation learns why, and the Coordinator receives the same structured reason as its tool error.
         // Coordinator-fixable refusals stay with the Coordinator (structured tool error only); user notices are for the rest.

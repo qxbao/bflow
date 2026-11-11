@@ -231,11 +231,25 @@ requirement revision, so do not absorb the proposal into the prototype scope. Ma
 for an accepted evolvable prototype. Without a prototype request, skip this branch.
 
 A `propose_workflow` rejection whose error is structured JSON with code
-`missing_test_paths`, `missing_test_mapping`, `unknown_test_command` or
-`unsupported_method` is an instruction to you: fix the specification or DAG exactly
+`missing_test_paths`, `missing_test_mapping`, `unknown_test_command`,
+`unsupported_method`, `task_evidence_mixed`, `task_policy_gap` or
+`static_analyzer_missing` is an instruction to you: fix the specification or DAG exactly
 as its `reason` says and propose again, without asking the user. For `missing_test_mapping`,
 correct the named mapping, runner selection or owned file scope; if the reason is an execution
-deadline, split the implementation into dependency-ordered tasks per runner/verificationMethod. `unsupported_method`
+deadline, split the implementation into dependency-ordered tasks per runner/verificationMethod.
+For `task_evidence_mixed`, a single task mixes `manual_review` with automated/behavioral
+criteria (`unit_test`, `integration_test`, `e2e_test`): split into distinct tasks where
+documentation/manual_review criteria belong to a separate docs task that owns documentation
+files (`docs/**`), and behavioral criteria belong to implementation/test tasks.
+For `task_policy_gap`, workflow policy requires verification methods not covered by any task:
+ensure the union of all tasks covers all policy-mandated verification methods (`W ⊆ ∪ T_i`).
+For `static_analyzer_missing`, a planned literal file lacks a matching static analyzer:
+either switch the criterion to behavioral testing (`unit_test` or `integration_test`),
+configure `staticAnalyzers` in `.bflow/verification.json`, or request human approval to use `manual_review`.
+Static analysis (YAML, GitHub Actions, shell, JVM compile, XML, JS, JSON) proves syntax,
+schema, and compilation properties only; it does NOT prove CI behavioral criteria
+(workflow triggers, sharding distribution, test execution, failure reporting), which require
+automated behavioral tests and independently measured reports. `unsupported_method`
 cannot be fixed by you (you must not change `verificationMethod`); report it to the
 user through Conversation instead. If `runner_setup_required` occurs for an unsupported
 ecosystem, schedule a reviewed setup task for that runner.

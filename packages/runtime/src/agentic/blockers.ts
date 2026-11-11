@@ -11,6 +11,8 @@ export const BLOCKERS = {
     nextAction: "Task không có danh tính test nào khớp runner. Kiểm criterionMappings, đường dẫn test và ownership." },
   runner_infrastructure: { fixableBy: "environment",
     nextAction: "Hạ tầng runner (bước prepare, sandbox hoặc gọi lệnh) lỗi, không phải lỗi mã hay kế hoạch. Sửa môi trường máy theo thông điệp lỗi (sandbox Bubblewrap/Seatbelt, toolchain, dependency, lệnh prepare), rồi resume để đo lại cùng revision." },
+  static_analyzer_missing: { fixableBy: "director",
+    nextAction: "Tệp trong phạm vi không có static analyzer nào xử lý. Thêm staticAnalyzers vào verification.json hoặc đổi tiêu chí sang test hành vi." },
 } as const satisfies Record<string, { fixableBy: BlockerFixableBy; nextAction: string }>;
 
 export type BlockerCode = keyof typeof BLOCKERS;

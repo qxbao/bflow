@@ -287,6 +287,57 @@ function missing(id: string, tool: string): AdapterDetection {
   return { runners: [], notes: [`${id}: runner_toolchain_unavailable: ${tool} was not found with a verified version; Coordinator should schedule an isolated setup task`] };
 }
 
+async function collectDeclaredReactorModules(
+  root: string,
+  baseProjectDir: string,
+  allFiles: readonly string[],
+  maxDepth = 6,
+  maxModules = 128
+): Promise<string[]> {
+  const result: string[] = [];
+  const visited = new Set<string>();
+
+  async function traverse(currentDir: string, depth: number) {
+    if (depth > maxDepth || result.length >= maxModules) return;
+    const pomRelative = currentDir === "" ? "pom.xml" : `${currentDir}/pom.xml`;
+    if (visited.has(pomRelative)) return;
+    visited.add(pomRelative);
+
+    if (!allFiles.includes(pomRelative)) return;
+
+    let pomContent: string;
+    try {
+      pomContent = await readFile(join(root, pomRelative), "utf8");
+    } catch {
+      return;
+    }
+
+    const modulesMatch = /<modules>([\s\S]*?)<\/modules>/i.exec(pomContent);
+    if (!modulesMatch) return;
+
+    const moduleTags = [...modulesMatch[1]!.matchAll(/<module>([^<]+)<\/module>/gi)];
+    const childModuleNames = moduleTags
+      .map(m => m[1]!.trim())
+      .filter(m => m.length > 0 && !m.startsWith("/") && !m.includes("..") && !m.includes("\0") && !m.includes("\\"));
+
+    for (const mod of childModuleNames) {
+      if (result.length >= maxModules) break;
+      const childDir = currentDir === "" ? mod : `${currentDir}/${mod}`;
+      const childPom = `${childDir}/pom.xml`;
+      if (allFiles.includes(childPom)) {
+        if (!result.includes(childDir)) {
+          result.push(childDir);
+        }
+        await traverse(childDir, depth + 1);
+      }
+    }
+  }
+
+  const startDir = baseProjectDir === "." ? "" : baseProjectDir;
+  await traverse(startDir, 1);
+  return result;
+}
+
 export function createManagedAdapters(host: ManagedAdapterHost = systemHost): RunnerAdapter[] {
   const maven = adapter("maven", path => basename(path) === "pom.xml", async (context, manifest) => {
     const tool = await host.findTool("mvn", ["--version"], context.root);
@@ -305,13 +356,40 @@ export function createManagedAdapters(host: ManagedAdapterHost = systemHost): Ru
     // The Debian launcher needs m2.conf, while settings.xml may contain credentials and is deliberately absent.
     try {
       const launcher = await realpath(join(dirname(tool.executable), "m2.conf"));
-      if (launcher === "/etc/maven/m2.conf") base.mounts.push(...await optionalMount(launcher, launcher, host));
+      if (launcher === "/etc/maven/m2.conf") {
+        base.mounts.push(...await optionalMount(launcher, launcher, host));
+        // Debian's Classworlds configuration requires this directory at startup.
+        // Import just logging resources; settings.xml may contain credentials.
+        base.mounts.push(...await optionalMount("/etc/maven/logging", "/etc/maven/logging", host));
+      }
     } catch { /* Self-contained distributions need no extra mount. */ }
     base.environment = { ...java.environment, MAVEN_SKIP_RC: "true" };
+    const prefix = project === "." ? "" : `${project}/`;
+    const validatedModules = await collectDeclaredReactorModules(context.root, project, context.files);
+    const isReactor = validatedModules.length > 0;
     return { runners: [{ ...base, format: "junit", nameRule: "classname.name (fully qualified Java/Kotlin test class, dot, method)", bind(identities) {
       validateSelection(identities, project);
       const selectors = fqnNames(identities).map(name => name.replace(/\.([^.]+)$/, "#$1"));
-      return { args: ["--offline", "--batch-mode", "--no-transfer-progress", "-Dmaven.repo.local=/bflow-cache/maven", `-Dtest=${selectors.join(",")}`, "-DfailIfNoTests=true", "-Dsurefire.failIfNoSpecifiedTests=true", "test"], reportPaths: [`${project === "." ? "" : `${project}/`}target/surefire-reports/TEST-*.xml`] };
+      const failIfNoTests = !isReactor;
+      const reportPaths = isReactor ? [
+        ...new Set([
+          `${prefix}target/surefire-reports/TEST-*.xml`,
+          ...validatedModules.map(mod => `${mod}/target/surefire-reports/TEST-*.xml`)
+        ])
+      ] : [`${prefix}target/surefire-reports/TEST-*.xml`];
+      return {
+        args: [
+          "--offline",
+          "--batch-mode",
+          "--no-transfer-progress",
+          "-Dmaven.repo.local=/bflow-cache/maven",
+          `-Dtest=${selectors.join(",")}`,
+          `-DfailIfNoTests=${failIfNoTests}`,
+          `-Dsurefire.failIfNoSpecifiedTests=${failIfNoTests}`,
+          "test"
+        ],
+        reportPaths
+      };
     } }], notes: [] };
   }, host);
 

@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import { WorkflowRejectionCodeSchema } from "../../src/agentic/workflow-rejection.js";
 import {
   DIRECTOR_GUIDE_MAX_BYTES,
   DIRECTOR_GUIDE_SOURCE,
@@ -126,8 +127,8 @@ describe("Director guide instruction coverage", () => {
     const text = await load();
     const known = new Set([...DIRECTOR_TOOLS, ...DIRECTOR_LOCAL_MCP_TOOLS].map(tool => tool.name));
     const identifiers = [...new Set([...text.matchAll(/`([a-z]+(?:_[a-z]+)+)`/g)].map(match => match[1]!))];
-    // `user_decision_pending` is a ParkedIssue kind and `session_stopped_by_user` a CLI error code, not tools.
-    const nonTools = new Set(["user_decision_pending", "session_stopped_by_user"]);
+    // ParkedIssue kinds, CLI errors and validated workflow rejection codes are not tools.
+    const nonTools = new Set<string>(["user_decision_pending", "session_stopped_by_user", ...WorkflowRejectionCodeSchema.options]);
     expect(identifiers.filter(name => !known.has(name) && !nonTools.has(name))).toEqual([]);
     for (const required of ["director_wait", "director_say", "start_work", "planning_reference", "read_coordinator_guide", "reconcile_delivery"]) {
       expect(identifiers).toContain(required);

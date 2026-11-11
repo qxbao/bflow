@@ -462,7 +462,7 @@ describe("manual-review policy proposal ingress and evidence lifecycle", () => {
     expect(rejection.reason).toContain("manual_review");
   });
 
-  it("admits high-risk proposal when review capability is present (Acceptance B)", async () => {
+  it("rejects incomplete high-risk task policy coverage even with review capability (Acceptance B)", async () => {
     const { specification, definition, strategy } = highRiskDataQualityProposal();
     const profiles: RunnerProfile[] = [
       {
@@ -488,9 +488,11 @@ describe("manual-review policy proposal ingress and evidence lifecycle", () => {
       hostChecks // review capability provided via host checks
     );
 
-    // This should NOT throw unsupported_method: manual_review!
-    expect(() => hostWithReview.assertSupported(specification, strategy, definition)).not.toThrow();
-    // Tasks should also be supported
+    // Capability alone is insufficient: the DAG must assign every policy-required method.
+    expect(refusal(() => hostWithReview.assertSupported(specification, strategy, definition))).toMatchObject({
+      code: "task_policy_gap", methods: ["static_analysis", "manual_review"]
+    });
+    // Standalone task admission still recognizes the configured review capability.
     expect(() => hostWithReview.assertTaskSupported(
       specification,
       strategy,

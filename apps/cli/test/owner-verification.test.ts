@@ -30,7 +30,7 @@ async function repositoryWith(config: unknown | undefined): Promise<string> {
 
 describe("readOwnerVerification", () => {
   it("returns no owner commands or mutation checks when the file is absent", async () => {
-    expect(await readOwnerVerification(await repositoryWith(undefined), runtime)).toEqual({ behavioralCommands: [], mutationChecks: [], appChecks: [] });
+    expect(await readOwnerVerification(await repositoryWith(undefined), runtime)).toEqual({ behavioralCommands: [], mutationChecks: [], appChecks: [], staticAnalyzers: [] });
   });
 
   it("accepts optional mutationChecks beside the behavioral commands", async () => {
@@ -60,5 +60,52 @@ describe("readOwnerVerification", () => {
     await expect(readOwnerVerification(await repositoryWith({ schemaVersion: 1, behavioralCommands: [behavioralCommand],
       appChecks: [{ ...appSuite, checks: [{ id: "status-only", kind: "api", request: { method: "GET", path: "/" }, expect: { status: 200 } }] }] }), runtime))
       .rejects.toThrow(/behavioral assertion besides status/);
+  });
+
+  it("accepts optional staticAnalyzers and returns them parsed with defaults", async () => {
+    const value = await readOwnerVerification(await repositoryWith({
+      schemaVersion: 1,
+      behavioralCommands: [behavioralCommand],
+      staticAnalyzers: [{ id: "custom-lint", executable: "/usr/bin/env", include: ["src/**/*.ts"] }]
+    }), runtime);
+    expect(value.staticAnalyzers).toEqual([
+      expect.objectContaining({ id: "custom-lint", executable: "/usr/bin/env", include: ["src/**/*.ts"], args: [], timeoutMs: 30000 })
+    ]);
+  });
+
+  it("rejects staticAnalyzers located inside the repository", async () => {
+    const repo = await repositoryWith(undefined);
+    await mkdir(join(repo, ".bflow"), { recursive: true });
+    await writeFile(join(repo, ".bflow/verification.json"), JSON.stringify({
+      schemaVersion: 1,
+      behavioralCommands: [behavioralCommand],
+      staticAnalyzers: [{ id: "repo-local", executable: join(repo, "lint.sh"), include: ["src/**/*.ts"] }]
+    }));
+    await expect(readOwnerVerification(repo, runtime))
+      .rejects.toThrow(/must be outside the repository/);
+  });
+
+  it("rejects duplicate staticAnalyzer ids", async () => {
+    await expect(readOwnerVerification(await repositoryWith({
+      schemaVersion: 1,
+      behavioralCommands: [behavioralCommand],
+      staticAnalyzers: [
+        { id: "custom-lint", executable: "/usr/bin/env", include: ["src/**/*.ts"] },
+        { id: "custom-lint", executable: "/usr/bin/env", include: ["lib/**/*.ts"] }
+      ]
+    }), runtime)).rejects.toThrow(/Duplicate static analyzer id/);
+  });
+
+  it("rejects when runtime does not support staticAnalyzers", async () => {
+    const runtimeWithoutStaticAnalyzers = {
+      parseBehavioralCommands: runtime.parseBehavioralCommands,
+      parseMutationChecks: runtime.parseMutationChecks,
+      parseAppChecks: runtime.parseAppChecks
+    } as any;
+    await expect(readOwnerVerification(await repositoryWith({
+      schemaVersion: 1,
+      behavioralCommands: [behavioralCommand],
+      staticAnalyzers: [{ id: "custom-lint", executable: "/usr/bin/env", include: ["src/**/*.ts"] }]
+    }), runtimeWithoutStaticAnalyzers)).rejects.toThrow(/Runtime does not support staticAnalyzers; upgrade @bflow\/runtime/);
   });
 });

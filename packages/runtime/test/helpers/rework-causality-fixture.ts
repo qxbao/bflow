@@ -222,8 +222,8 @@ export async function createReworkFixture(options: { maxIterations?: number; leg
         kind: "deterministic",
         method: "integration_test",
         command: "test-regression",
-        criterionIds: [],
-        testNames: [],
+        criterionIds: ["ac-1"],
+        testNames: [testName],
         role: "tester",
         levels: ["integration"]
       }
@@ -272,7 +272,7 @@ export async function createReworkFixture(options: { maxIterations?: number; leg
                 command: config.command,
                 exitCode: 0,
                 testNames: config.testNames,
-                criteria: [],
+                criteria: [{ criterionId: "ac-1", passed: true, summary: "Regression suite passed" }],
                 summary: "Regression suite passed"
               }
             }
@@ -425,15 +425,17 @@ export async function createReworkFixture(options: { maxIterations?: number; leg
   const time = new Date().toISOString();
   spec.createdAt = time;
   spec.updatedAt = time;
-  spec.affectedPaths = ["guide.md", "notes.md"];
+  spec.affectedPaths = ["guide.md", "notes.md", "test/rework.test.cjs"];
+  // Rework exercises command-backed check_work artifacts; manual Reviewer judgments are separate gates.
+  spec.acceptanceCriteria[0]!.verificationMethod = "integration_test";
   spec.traceabilityTaskIds = ["implement"];
   (spec.metadata!.sdd as any).traceability[0].taskIds = ["implement"];
   spec.metadata!.conditionalTdd = {
     policyVersion: 1,
     taskId: "implement",
-    taskType: "documentation",
+    taskType: "integration",
     changeImpact: {
-      surfaces: ["documentation"],
+      surfaces: ["integration"],
       behaviorChanged: false,
       deterministic: false,
       regressionReproducible: false,
@@ -456,7 +458,7 @@ export async function createReworkFixture(options: { maxIterations?: number; leg
   def.tasks[0]!.retry.maxAttempts = options.retryAttempts ?? 1;
   def.tasks[0] = {
     ...def.tasks[0]!,
-    metadata: { ownedPaths: ["guide.md", "notes.md"] }
+    metadata: { ownedPaths: ["guide.md", "notes.md", "test/rework.test.cjs"] }
   } as any;
 
   const envelope = (type: string, payload: unknown, extra: any = {}) =>
@@ -505,6 +507,9 @@ export async function createReworkFixture(options: { maxIterations?: number; leg
     const run = await inspectRun();
     const task = run.tasks.find((t: any) => t.taskId === taskId);
     const strategy = task.spec.strategy;
+    expect(strategy.tddDecision.mode).toBe("recommended");
+    expect(strategy.metadata.conditionalTdd.requiredVerificationMethods).toEqual(["integration_test"]);
+    expect(strategy.targetCommands).toEqual(["test-regression"]);
     const startedAt = new Date().toISOString();
     const bytes = Buffer.from(`${taskId}-verification-${randomUUID()}`);
     const ref = unwrap(
@@ -563,15 +568,9 @@ export async function createReworkFixture(options: { maxIterations?: number; leg
               method,
               criterionId: "ac-1",
               evidenceArtifactId: ref.artifactId,
-              summary: "Independent observation"
-            },
-            {
-              method: "integration_test",
-              criterionId: "ac-1",
-              evidenceArtifactId: ref.artifactId,
               command: "test-regression",
               exitCode: 0,
-              summary: "Independent regression observation"
+              summary: "Independent observation"
             }
           ]
         }

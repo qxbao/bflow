@@ -40,6 +40,7 @@
     "@bflow/test-strategy": "workspace:*",
     "@bflow/verification": "workspace:*",
     "typescript": "5.9.3",
+    "yaml": "^2.7.0",
     "zod": "^3.24.2"
   }
 }

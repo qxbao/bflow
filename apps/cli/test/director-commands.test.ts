@@ -479,6 +479,13 @@ describe("user stop intent", () => {
       expect(await runDirectorCommand(parse(["start", "--json"]), startDeps)).toBe(1);
       expect(JSON.parse(out[0]!)).toMatchObject({ ok: false, code: "session_stopped_by_user" });
       expect(ensureUp).not.toHaveBeenCalled();
+
+      // Explicit restart with --restart clears the stop intent and calls ensureUp({ restart: true })
+      const { deps: restartDeps, out: restartOut } = make({ cwd: dir, identify, ensureUp });
+      expect(await runDirectorCommand(parse(["start", "--restart", "--json"]), restartDeps)).toBe(0);
+      expect(JSON.parse(restartOut[0]!)).toMatchObject({ ok: true });
+      expect(ensureUp).toHaveBeenCalledWith(dir, { restart: true });
+      expect(await readUserStopIntent(dir, "repo-1", "bf-abc")).toBeUndefined();
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 });

@@ -48,21 +48,28 @@ export type LifecycleHostFactory = (input: EnvironmentCompositionInput) => Promi
  * `.bflow/verification.json` is an optional owner override. When absent, no owner commands are returned and Runtime detects
  * the repository's test runner itself (see docs/verification-runners.md); no user configuration is required.
  */
-export async function readOwnerVerification(repositoryRoot: string, runtime: Pick<typeof import("@bflow/runtime"), "parseBehavioralCommands" | "parseMutationChecks" | "parseAppChecks">) {
+export async function readOwnerVerification(repositoryRoot: string, runtime: Pick<typeof import("@bflow/runtime"), "parseBehavioralCommands" | "parseMutationChecks" | "parseAppChecks" | "parseStaticAnalyzers">) {
   const verificationPath = resolve(repositoryRoot, ".bflow/verification.json");
   try {
     if (!(await lstat(verificationPath)).isFile() || await realpath(verificationPath) !== verificationPath)
       throw new Error("Owner verification configuration must be a regular file inside this repository");
     const value: unknown = JSON.parse(await readFile(verificationPath, "utf8"));
     if (value === null || typeof value !== "object" || Array.isArray(value) || !("schemaVersion" in value) || value.schemaVersion !== 1 ||
-        !("behavioralCommands" in value) || Object.keys(value).some(key => !["schemaVersion", "behavioralCommands", "mutationChecks", "appChecks"].includes(key)))
-      throw new Error("Invalid owner verification configuration (expected schemaVersion:1, behavioralCommands and optional mutationChecks and appChecks)");
+        !("behavioralCommands" in value) || Object.keys(value).some(key => !["schemaVersion", "behavioralCommands", "mutationChecks", "appChecks", "staticAnalyzers"].includes(key)))
+      throw new Error("Invalid owner verification configuration (expected schemaVersion:1, behavioralCommands and optional mutationChecks, appChecks, staticAnalyzers)");
     const behavioralCommands = runtime.parseBehavioralCommands(value.behavioralCommands);
+    if ("staticAnalyzers" in value && typeof runtime.parseStaticAnalyzers !== "function") {
+      throw new Error("Runtime does not support staticAnalyzers; upgrade @bflow/runtime");
+    }
+    const staticAnalyzers = "staticAnalyzers" in value
+      ? runtime.parseStaticAnalyzers(value.staticAnalyzers, repositoryRoot)
+      : [];
     return { behavioralCommands, mutationChecks: runtime.parseMutationChecks("mutationChecks" in value ? value.mutationChecks : undefined, behavioralCommands),
-      appChecks: runtime.parseAppChecks("appChecks" in value ? value.appChecks : undefined) };
+      appChecks: runtime.parseAppChecks("appChecks" in value ? value.appChecks : undefined),
+      staticAnalyzers };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    return { behavioralCommands: [], mutationChecks: [], appChecks: [] };
+    return { behavioralCommands: [], mutationChecks: [], appChecks: [], staticAnalyzers: [] };
   }
 }
 
@@ -116,7 +123,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
   const openForStartup = (): Promise<LifecycleHost> => {
     return activeHost ??= (async () => {
       const runtime = await loadRuntime();
-      const { behavioralCommands, mutationChecks, appChecks } = await readOwnerVerification(input.repository.root, runtime);
+      const { behavioralCommands, mutationChecks, appChecks, staticAnalyzers } = await readOwnerVerification(input.repository.root, runtime);
       const context = await loadHostPlatformContext(input);
       const deepwikiReady = input.config.environment.deepwiki?.enabled !== false
         ? (await readGatewayReadiness(context.stateDirectory, "deepwiki")).status === "ready" : undefined;
@@ -135,6 +142,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         behavioralCommands,
         mutationChecks,
         appChecks,
+        staticAnalyzers,
         platform,
         layout: "director",
         progressCommand,
@@ -175,7 +183,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
       if (hasHostConfig) {
         return runtime.openPersistedAgenticHost({ repositoryPath: input.repository.root, sessionId: input.repository.sessionName });
       }
-      const { behavioralCommands, mutationChecks, appChecks } = await readOwnerVerification(input.repository.root, runtime);
+      const { behavioralCommands, mutationChecks, appChecks, staticAnalyzers } = await readOwnerVerification(input.repository.root, runtime);
       return runtime.ensureAgenticHost({
         repositoryPath: input.repository.root,
         sessionId: input.repository.sessionName,
@@ -185,6 +193,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         behavioralCommands,
         mutationChecks,
         appChecks,
+        staticAnalyzers,
         layout: "director",
         progressCommand: await directorProgressCommand(input),
         executionResolution: await loadHostExecutionResolution(input),

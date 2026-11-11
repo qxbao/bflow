@@ -1,10 +1,8 @@
 import { reviewCandidateEvidence, candidateEvidenceContext, hasCandidateGateReceipt } from "./review-candidate-evidence.js";
-import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, QualityFindingSchema, QualityGateContextSchema, QualityGateDefinitionSchema,
   PaneBindingSchema, QualityGateResultSchema, SpecificationSchema, TestStrategySchema, VerificationResultSchema,
@@ -42,7 +40,9 @@ import { splitAppCriteria, type AppCriterionBinding } from "./app-check-selectio
 import { runAppSuite, type AppCheckRunCompleted } from "./app-check-runner.js";
 import { TEST_INTEGRITY_CHECK, TestIntegrityObservationSchema, TestIntegrityGrantSchema, adjudicateTestIntegrity,
   measureTestIntegrity, testIntegrityAuthorityInput, validateTestIntegrityEvidence, type TestIntegrityObservation } from "./host-test-integrity.js";
-const execFileAsync = promisify(execFile);
+import { DEFAULT_STATIC_ANALYZERS, RESERVED_BUILTIN_ANALYZER_IDS, assertStaticAnalyzersAvailableSync, type StaticAnalyzer } from "./static-analyzers.js";
+import { projectTaskSpecificationInput } from "./task-projection.js";
+import { TestStrategyResolver } from "@bflow/test-strategy";
 function originalReviewContext(context: unknown) {
   const parsed = QualityGateContextSchema.parse(context);
   const { hostCandidateBehavioralEvidence: _candidate, hostQaBehavioralObservation: _measurement, hostReworkVerification: _rework, hostTestIntegrityObservation: _integrity, ...input } = record(parsed.input);
@@ -149,13 +149,18 @@ export class HostVerification {
     /** Owner real-app checks; `leaseDirectory` holds the host-local lease that serializes the single gate browser. */
     appChecks: { suites: readonly AppCheckSuite[]; leaseDirectory?: string; now?: () => Date } = { suites: [] },
     /** Host review checks (e.g. defaultHostChecks) or explicit boolean capability. */
-    private readonly reviewChecks: readonly QualityGateDefinition[] = []) {
+    private readonly reviewChecks: readonly QualityGateDefinition[] = [],
+    staticAnalyzers: readonly StaticAnalyzer[] = DEFAULT_STATIC_ANALYZERS) {
     this.runners = runners instanceof TestRunnerSource ? runners : new TestRunnerSource(parseBehavioralCommands(runners));
     this.appSuites = appChecks.suites;
     this.appLeases = appChecks.leaseDirectory === undefined ? undefined : new AppCheckBrowserLeases(appChecks.leaseDirectory, appChecks.now);
+    this.staticAnalyzers = staticAnalyzers;
+    this.ownerStaticAnalyzers = staticAnalyzers.filter(a => a.id !== "whitespace" && !RESERVED_BUILTIN_ANALYZER_IDS.has(a.id));
   }
   private readonly appSuites: readonly AppCheckSuite[];
   private readonly appLeases: AppCheckBrowserLeases | undefined;
+  private readonly staticAnalyzers: readonly StaticAnalyzer[];
+  private readonly ownerStaticAnalyzers: readonly StaticAnalyzer[];
   hasReviewCapability(): boolean {
     return this.reviewChecks.some(input => {
       const check = QualityGateDefinitionSchema.parse(input), config = record(check.configuration);
@@ -282,36 +287,86 @@ export class HostVerification {
       return { ...baseCapture, command, ...result, output: result.output || "TypeScript compiler passed" };
     };
     if (automaticCheckMethod(command) === "typecheck") return compile();
-    const changed = (await this.git(cwd, ["diff", "--name-only", "--diff-filter=ACMR", base, revision, "--"]))
-      .split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0 && !/\.(md|txt|rst)$/i.test(line));
+    const changed = (await this.observedChangedPaths(cwd, base, revision))
+      .filter(file => !/\.(md|txt|rst)$/i.test(file));
     const typescript = changed.filter(file => /\.[cm]?tsx?$/i.test(file));
+    let tsHandledByProfile = false;
     if (typescript.length) {
       const profile = this.runners.typecheckForRevision(base);
-      if (!profile) return { ...baseCapture, command, exitCode: 1,
-        output: `${command} cannot analyze ${typescript.join(", ")}; configure a TypeScript analyzer for these files` };
-      const timeoutMs = Math.min(30000, deadlineAt === undefined ? 30000 : deadlineAt - Date.now() - 90000);
-      if (timeoutMs < 1) throw new Error("Independent syntax phase budget exhausted");
-      const result = await captureTypeScriptSyntax({ ...profile, runner: { ...profile.runner, timeoutMs } }, cwd, revision, typescript, base, testPaths);
-      if (result.exitCode !== 0) return { ...baseCapture, command, ...result };
-    }
-    const unsupported = changed.filter(file => !/\.([cm]?js|[cm]?ts|tsx|json)$/i.test(file));
-    if (unsupported.length) return { ...baseCapture, command, exitCode: 1,
-      output: `${command} cannot analyze ${unsupported.join(", ")}; configure an owner static_analysis runner for these files` };
-    const checked: string[] = [];
-    for (const file of changed) {
-      if (/\.[cm]?tsx?$/i.test(file)) { checked.push(file); continue; }
-      try {
-        if (/\.json$/i.test(file)) JSON.parse(await readFile(join(cwd, file), "utf8"));
-        else await execFileAsync(process.execPath, ["--check", file], { cwd, timeout: 15_000 });
-        checked.push(file);
-      } catch (error) {
-        const failure = error as { code?: unknown; stdout?: string; stderr?: string };
-        const exitCode = typeof failure.code === "number" ? failure.code : 1;
-        const output = ((failure.stdout ?? "") + (failure.stderr ?? "")).trim() || `Syntax check failed for ${file}: ${String(error)}`;
-        return { ...baseCapture, command, exitCode, output };
+      if (profile) {
+        const timeoutMs = Math.min(30000, deadlineAt === undefined ? 30000 : deadlineAt - Date.now() - 90000);
+        if (timeoutMs < 1) throw new Error("Independent syntax phase budget exhausted");
+        const result = await captureTypeScriptSyntax({ ...profile, runner: { ...profile.runner, timeoutMs } }, cwd, revision, typescript, base, testPaths);
+        if (result.exitCode !== 0) return { ...baseCapture, command, ...result };
+        tsHandledByProfile = true;
       }
     }
-    return { ...baseCapture, command, output: checked.length ? `Syntax check passed for ${checked.join(", ")}` : "No changed code files to check" };
+    const nonTs = tsHandledByProfile ? changed.filter(file => !/\.[cm]?tsx?$/i.test(file)) : changed;
+    const unhandled: string[] = [];
+    const checked: string[] = tsHandledByProfile ? [...typescript] : [];
+    const batches = new Map<StaticAnalyzer, string[]>();
+    for (const file of nonTs) {
+      const matched = this.staticAnalyzers.filter(a => a.id !== "whitespace" && a.id !== "typescript" && a.matches(file));
+      if (!matched.length) {
+        unhandled.push(file);
+        continue;
+      }
+      const available: StaticAnalyzer[] = [];
+      const missingReasons: string[] = [];
+      for (const analyzer of matched) {
+        const detectStatus = await analyzer.detect({ cwd, base, revision, runners: this.runners });
+        if (detectStatus.status === "available") {
+          available.push(analyzer);
+        } else {
+          missingReasons.push(`${analyzer.id}: ${detectStatus.reason}`);
+        }
+      }
+      if (available.length === 0) {
+        throw new TaskBlocker("static_analyzer_missing",
+          `No available static analyzer for ${file}: ${missingReasons.join("; ")}`,
+          { paths: [file], missingAnalyzers: matched.map(m => m.id) });
+      }
+
+      // If an owner analyzer is available, prefer it over default built-in
+      const ownerAvailable = available.filter(a => !RESERVED_BUILTIN_ANALYZER_IDS.has(a.id));
+      const toRun = ownerAvailable.length > 0 ? ownerAvailable : available;
+
+      for (const analyzer of toRun) {
+        const batch = batches.get(analyzer) ?? [];
+        batch.push(file);
+        batches.set(analyzer, batch);
+      }
+      checked.push(file);
+    }
+    if (unhandled.length > 0) {
+      const tsUnhandled = unhandled.filter(file => /\.[cm]?tsx?$/i.test(file));
+      if (tsUnhandled.length > 0) {
+        return {
+          ...baseCapture,
+          command,
+          exitCode: 1,
+          output: `${command} cannot analyze ${tsUnhandled.join(", ")}; configure a TypeScript analyzer for these files`
+        };
+      }
+      throw new TaskBlocker("static_analyzer_missing",
+        `${command} cannot analyze ${unhandled.join(", ")}; configure an owner static_analysis runner or add staticAnalyzers in verification.json`,
+        { paths: unhandled, missingAnalyzers: unhandled });
+    }
+    const analyses: string[] = [];
+    for (const [analyzer, files] of batches) {
+      const result = await analyzer.run({ cwd, base, revision, files, deadlineAt, testPaths, runners: this.runners });
+      await this.capture(cwd, base, revision);
+      if (result.exitCode !== 0) return { ...baseCapture, command, ...result };
+      analyses.push(`${analyzer.id}: ${files.join(", ")}`);
+    }
+    await this.capture(cwd, base, revision);
+    return {
+      ...baseCapture,
+      command,
+      output: checked.length
+        ? `Phân tích cú pháp và cấu trúc. Không chứng minh hành vi CI. Syntax check passed for ${checked.join(", ")}${analyses.length ? ` (${analyses.join("; ")})` : ""}`
+        : "No changed code files to check"
+    };
   }
   private parseCapture(input: unknown) {
     const value = record(input);
@@ -474,17 +529,161 @@ export class HostVerification {
     return [...owner, ...boundChecks, ...policyChecks, ...regression];
   }
   /** Methods with a runner: owner-configured, or Runtime-detected. Fixed per owner configuration; detection may refresh. */
-  configuredMethods(): string[] { return [...new Set([...this.runners.owner.map(command => command.method), ...this.runners.profiles.map(profile => profile.method),
+  configuredMethods(): string[] {
+    const hasStatic = this.runners.automatic || this.ownerStaticAnalyzers.length > 0 || this.runners.owner.some(command => (command.method as string) === "static_analysis");
+    return [...new Set([...this.runners.owner.map(command => command.method), ...this.runners.profiles.map(profile => profile.method),
     ...(this.runners.typecheck ? ["typecheck"] : []),
+    ...(hasStatic ? ["static_analysis"] : []),
     // Owner real-app suites are the runner for e2e_test criteria (see appGate).
     ...(this.appSuites.length ? ["e2e_test"] : [])])]; }
+  assertWorkflowSupported(input: unknown, strategyInput?: unknown, definitionInput?: unknown): void {
+    const parsedSpec = SpecificationSchema.parse(normalizeSpecificationOptionals(input));
+    if (definitionInput === undefined) {
+      return this.assertSupported(input, strategyInput);
+    }
+    const definition = WorkflowDefinitionSchema.parse(normalizeWorkflowDefinitionOptionals(definitionInput));
+    const parsedStrategy = strategyInput === undefined ? undefined : TestStrategySchema.parse(strategyInput);
+    const activeCriteria = parsedSpec.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
+    const criteriaById = new Map(parsedSpec.acceptanceCriteria.map(criterion => [criterion.id, criterion]));
+
+    // 1. Verify all tasks have non-empty criteria and valid mapping
+    const assignedIds = new Set<string>();
+    for (const task of definition.tasks) {
+      if (!task.acceptanceCriteria.length) {
+        throw new WorkflowProposalRejected({
+          code: "missing_test_mapping",
+          reason: `Task ${task.id} has no mapped acceptance criteria`,
+          options: [`Map at least one acceptance criterion to task ${task.id}`]
+        });
+      }
+      const ownedPaths = strings(record(task.metadata).ownedPaths);
+      if (!ownedPaths.length) {
+        throw new WorkflowProposalRejected({
+          code: "missing_test_paths",
+          reason: `Task ${task.id} has empty metadata.ownedPaths`,
+          options: [`Specify non-empty ownedPaths in task ${task.id} metadata`]
+        });
+      }
+      for (const id of task.acceptanceCriteria) {
+        if (!criteriaById.has(id)) {
+          throw new WorkflowProposalRejected({
+            code: "invalid_specification",
+            reason: `Task ${task.id} references unknown acceptance criterion: ${id}`,
+            options: ["Check workflow definition criteria mapping against specification"]
+          });
+        }
+        assignedIds.add(id);
+      }
+    }
+
+    // 2. Verify all active criteria are assigned to at least one task
+    const unassigned = activeCriteria.filter(criterion => !assignedIds.has(criterion.id)).map(criterion => criterion.id);
+    if (unassigned.length > 0) {
+      throw new WorkflowProposalRejected({
+        code: "missing_test_mapping",
+        reason: `Active criteria not assigned to any task in workflow definition: ${unassigned.join(", ")}`,
+        options: ["Assign all active criteria to tasks in workflow definition"]
+      });
+    }
+
+    // 3. Per-task evidence separation, projection and runner checks
+    const allTaskMethods = new Set<string>();
+    for (const task of definition.tasks) {
+      const taskCriteria = task.acceptanceCriteria.map(id => criteriaById.get(id)!).filter(Boolean);
+      const manual = taskCriteria.filter(criterion => criterion.verificationMethod === "manual_review");
+      const behavioral = taskCriteria.filter(criterion => ["unit_test", "integration_test", "e2e_test"].includes(criterion.verificationMethod));
+      if (manual.length > 0 && behavioral.length > 0) {
+        throw new WorkflowProposalRejected({
+          code: "task_evidence_mixed",
+          reason: `Task ${task.id} mixes manual review (${manual.map(criterion => criterion.id).join(", ")}) and behavioral (${behavioral.map(criterion => criterion.id).join(", ")}) criteria; separate into distinct tasks.`,
+          options: ["Tách tiêu chí manual_review sang task riêng sở hữu tệp tài liệu."]
+        });
+      }
+
+      const taskTdd = task.metadata?.conditionalTdd as any;
+      if (taskTdd && typeof taskTdd === "object") {
+        const rootRisk = parsedSpec.riskLevel ?? (parsedSpec.metadata?.sdd as any)?.assessment?.risk;
+        const RISK_RANK: Record<string, number> = { low: 1, medium: 2, high: 3, critical: 4 };
+        const rootRank = RISK_RANK[rootRisk ?? ""] ?? 0;
+        const taskRank = RISK_RANK[taskTdd.riskClassification ?? ""] ?? 0;
+        if (taskRank < rootRank && !taskCriteria.every(c => c.verificationMethod === "manual_review")) {
+          throw new WorkflowProposalRejected({
+            code: "task_policy_gap",
+            reason: `Task ${task.id} attempts to downgrade risk (${taskTdd.riskClassification}) below workflow risk level (${rootRisk})`,
+            options: [`Set task ${task.id} riskClassification to ${rootRisk} or remove the lower-risk override.`]
+          });
+        }
+      }
+
+      for (const criterion of taskCriteria) {
+        allTaskMethods.add(criterion.verificationMethod);
+      }
+
+      const ownedPaths = strings(record(task.metadata).ownedPaths);
+      const taskSpec = projectTaskSpecificationInput(
+        parsedSpec,
+        task.id,
+        taskCriteria,
+        digest(task.id).slice(0, 12),
+        task.metadata?.conditionalTdd ?? parsedSpec.metadata?.conditionalTdd,
+        ownedPaths
+      );
+
+      const hasStatic = taskCriteria.some(criterion => criterion.verificationMethod === "static_analysis");
+      if (hasStatic) {
+        assertStaticAnalyzersAvailableSync(taskSpec.affectedPaths, this.staticAnalyzers, this.runners);
+      }
+
+      let taskStrategy: TestStrategy | undefined;
+      if (parsedStrategy) {
+        try {
+          taskStrategy = new TestStrategyResolver().resolve(taskSpec);
+        } catch (error) {
+          throw new WorkflowProposalRejected({
+            code: "task_policy_gap",
+            reason: `Task ${task.id} test strategy resolution failed: ${error instanceof Error ? error.message : String(error)}`,
+            options: ["Ensure task affected paths and mapped criteria conform to test policy requirements"]
+          });
+        }
+      }
+      if (taskStrategy) {
+        this.assertTaskSupported(taskSpec, taskStrategy, ownedPaths);
+      }
+    }
+
+    // 4. Policy union coverage invariant (W ⊆ ∪ T_i)
+    if (parsedStrategy) {
+      const reqMethods = record(parsedStrategy.metadata?.conditionalTdd).requiredVerificationMethods;
+      const requiredMethods: string[] = Array.isArray(reqMethods) ? reqMethods.filter((m): m is string => typeof m === "string") : [];
+      const missing = requiredMethods.filter(method => !allTaskMethods.has(method));
+      if (missing.length > 0) {
+        throw new WorkflowProposalRejected({
+          code: "task_policy_gap",
+          reason: `Workflow policy requires methods [${missing.join(", ")}] but no task covers them.`,
+          methods: missing,
+          options: ["Ensure all policy verification methods are covered across the workflow tasks."]
+        });
+      }
+      if (requiredMethods.includes("manual_review") && !allTaskMethods.has("manual_review")) {
+        throw new WorkflowProposalRejected({
+          code: "task_policy_gap",
+          reason: "Workflow policy requires manual_review but no task has manual_review criteria.",
+          methods: ["manual_review"],
+          options: ["Add a dedicated documentation task with manual_review criteria."]
+        });
+      }
+    }
+  }
+
   /**
    * Fail closed at proposal ingress. Owner mode keeps the explicit owner checks. Automatic mode fails with structured
    * rejections: runner and mapping codes are Coordinator-fixable and silent; policy and sandbox codes reach the user.
    */
   assertSupported(input: unknown, strategyInput?: unknown, definitionInput?: unknown) {
+    if (definitionInput !== undefined) {
+      return this.assertWorkflowSupported(input, strategyInput, definitionInput);
+    }
     const parsedSpec = SpecificationSchema.parse(normalizeSpecificationOptionals(input));
-    if (definitionInput !== undefined) WorkflowDefinitionSchema.parse(normalizeWorkflowDefinitionOptionals(definitionInput));
     const parsedStrategy = strategyInput === undefined ? undefined : TestStrategySchema.parse(strategyInput);
     // Real-app criteria are verified by their own gate; the runner rules below apply to the remaining criteria only.
     const split = parsedStrategy ? splitAppCriteria(parsedSpec, parsedStrategy, this.appSuites) : undefined;
@@ -492,7 +691,11 @@ export class HostVerification {
     const strategy = split?.rest.strategy ?? parsedStrategy;
     const realAppEvidence = (split?.app.length ?? 0) > 0;
     const active = spec.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
-    const deterministic = this.runners.automatic ? active.filter(criterion => ["typecheck", "static_analysis"].includes(criterion.verificationMethod)) : [];
+    const hasStaticAnalyzers = this.runners.automatic || this.ownerStaticAnalyzers.length > 0 || this.runners.owner.some(command => (command.method as string) === "static_analysis");
+    const deterministic = active.filter(criterion =>
+      (this.runners.automatic && criterion.verificationMethod === "typecheck") ||
+      ((this.runners.automatic || hasStaticAnalyzers) && criterion.verificationMethod === "static_analysis")
+    );
     const automated = active.filter(criterion => criterion.verificationMethod !== "manual_review" && !deterministic.includes(criterion));
     if (deterministic.length) {
       if (!strategy) throw new Error("Compiler/static criteria require an accepted strategy and host-selected command");
@@ -509,7 +712,13 @@ export class HostVerification {
       if (spec.affectedPaths.some(path => !/\.(md|txt|rst)$/i.test(path)) && !realAppEvidence) throw new Error("Behavioral development requires configured independent behavioral acceptance checks");
       return;
     }
-    if (active.some(criterion => criterion.verificationMethod === "manual_review")) throw new Error("Mixed manual and behavioral TDD criteria require separate tasks with complete independent evidence");
+    if (active.some(criterion => criterion.verificationMethod === "manual_review")) {
+      throw new WorkflowProposalRejected({
+        code: "task_evidence_mixed",
+        reason: "Mixed manual and behavioral TDD criteria require separate tasks with complete independent evidence",
+        options: ["Tách tiêu chí manual_review sang task riêng sở hữu tệp tài liệu."]
+      });
+    }
     if (this.runners.automatic) {
       this.assertDetectedSupported(spec, automated, strategy, new Set(split?.app.map(binding => binding.criterion.verificationMethod) ?? []));
       return;
@@ -521,7 +730,7 @@ export class HostVerification {
         const mapping = strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id);
         if (!mapping?.testNames.length || !this.runners.owner.some(command => strategy.targetCommands.includes(command.command) && command.method === criterion.verificationMethod && mapping.testNames.every(name => includesTestIdentity(command.testNames, name)))) throw new Error(`No complete owner-configured test mapping for ${criterion.id}`);
       }
-      for (const command of strategy.targetCommands) if (!this.runners.owner.some(config => config.command === command)) throw new Error(`No owner-configured argv for ${command}`);
+      for (const command of strategy.targetCommands) if (!isAutomaticStaticCommand(command) && !this.runners.owner.some(config => config.command === command)) throw new Error(`No owner-configured argv for ${command}`);
       if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
     }
   }
@@ -840,14 +1049,17 @@ export class HostVerification {
     } };
   }
   behavioralGates(): QualityGate[] {
+    const hasDeterministicStatic = this.runners.automatic || this.ownerStaticAnalyzers.length > 0;
     return [...this.runners.owner.map(command => this.ownerGate(command)),
       ...this.mutations.map(check => this.mutationGate(check)),
       ...(this.runners.automatic ? [
         ...this.runners.availableProfiles.map(runner => this.automaticGate(runner)),
         ...(this.regression.scope !== "mapped_only"
           ? this.runners.availableProfiles.filter(profile => !profile.adapter).map(profile => this.regressionGate(profile))
-          : []),
-        ...AUTOMATIC_STATIC_COMMANDS.map(command => this.policyDeterministicGate(staticGateId(command), command))
+          : [])
+      ] : []),
+      ...(hasDeterministicStatic ? [
+        ...AUTOMATIC_STATIC_COMMANDS.filter(cmd => this.runners.automatic || cmd === "auto:static").map(command => this.policyDeterministicGate(staticGateId(command), command))
       ] : []),
       ...this.appSuites.map(suite => this.appGate(suite))];
   }
