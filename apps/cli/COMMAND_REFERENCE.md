@@ -23,6 +23,10 @@ Sau [bootstrap một lần](../../docs/guide/installation.md) bằng `node apps/
 | `bflow config-migrate` | Chuyển `.yaml`/`.json` cũ sang `.yml`, giữ byte gốc trong `.bak` |
 | `bflow up [--timeout <ms>] [--expect-plan <file>]` | Prepare persistent host/platform, preflight, launch qua Herdr, verify activated health; `--expect-plan` dừng nếu execution plan hiện tại lệch khỏi preview đã lưu |
 | `bflow web [--port N] [--no-open]` | Mở UI web tiếng Việt trên `127.0.0.1:4317` (mặc định) qua Local Server; ghép nối bằng URL fragment một lần, không hỗ trợ `--json`. Ctrl-C chỉ đóng web, phiên dự án vẫn chạy. Không tự setup/init/index. [Web README](../web/README.md) |
+| `bflow director start [--provider <p>] [--restart] [--json]` | Đăng ký phiên điều phối Director và in token; hỗ trợ các provider `claude`, `codex`, `agy` |
+| `bflow open [--provider <p>]` | Mở terminal chạy CLI nhà cung cấp với `/bflow-start` để làm việc cùng Director |
+| `bflow progress [--follow] [--json]` | Xem tiến độ điều phối và trạng thái của Director |
+| `bflow queue list\|show\|retry\|dismiss` | Quản lý hàng đợi sự cố/nhiệm vụ chờ xử lý của Director |
 | `bflow attach` | TTY trực tiếp vào Conversation pane |
 | `bflow status` | Environment/host status; truyền `<run-id>` không kèm `--telemetry` hoặc dùng filters chuyển sang legacy Runtime query |
 | `bflow status <run-id> --telemetry [--json]` | Báo cáo metric chỉ đọc cho `<run-id>` qua agentic host đang chạy ([TELEMETRY-SPEC.md](../../packages/runtime/TELEMETRY-SPEC.md)) |

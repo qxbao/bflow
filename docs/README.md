@@ -11,7 +11,7 @@ Bắt đầu từ [README](../README.md), [cài đặt](guide/installation.md) v
 | Cập nhật, mã thẻ/việc và câu trả lời | [Conversation updates](guide/conversation-updates.md) |
 | Chạy phiên đầu tiên trong repo độc lập | [Getting started](guide/getting-started.md) |
 | Init, up, attach, down, config và recovery | [User guide](guide/README.md) |
-| UI web cục bộ (`bflow web`) | [Cẩm nang sử dụng (có ảnh từng bước)](guide/web-manual.md) · [Web README](../apps/web/README.md) · [Local Server](../apps/local-server/README.md) |
+| Giao diện Web & Văn phòng 3D (`bflow web`, `bflow director start`) | [Cẩm nang sử dụng (có ảnh từng bước)](guide/web-manual.md) · [Web README](../apps/web/README.md) · [Local Server](../apps/local-server/README.md) |
 | Xem trước execution plan, gói bàn giao offline | [ADR 0005](adr/0005-execution-preview.md) · [High-level commands](../apps/cli/docs/command-reference.md) |
 | Cú pháp và phạm vi các lệnh | [CLI reference](../apps/cli/COMMAND_REFERENCE.md) · [High-level commands](../apps/cli/docs/command-reference.md) |
 | Runner được phát hiện, owner override, sandbox | [Verification runners](verification-runners.md) |
