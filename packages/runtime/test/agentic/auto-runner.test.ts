@@ -84,7 +84,7 @@ describe("automatic test runner proposals (no owner configuration)", () => {
     expect(strategy.targetCommands).toEqual(["auto:unit"]);
     const verification = verificationWith(runners);
     expect(() => verification.assertSupported(specification, strategy)).not.toThrow();
-    expect(verification.configuredMethods()).toEqual(["unit_test", "integration_test", "e2e_test"]);
+    expect(verification.configuredMethods()).toEqual(["unit_test", "integration_test", "e2e_test", "static_analysis"]);
   });
 
   it("accepts a planned test directory before its tests exist and registers its independent gate", async () => {

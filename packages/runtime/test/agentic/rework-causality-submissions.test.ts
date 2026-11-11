@@ -83,6 +83,11 @@ describe("Rework root-cause explanation & independent verification through Runti
       runId: "run-1",
       taskId: "implement"
     })) as any;
+    expect(staleCheckWork).toMatchObject({
+      sourceRevision: devStatus.head,
+      reworkGeneration: 1,
+      evidence: { artifactId: expect.stringMatching(/^check-work-/) }
+    });
 
     await writeFile(join(rework.handle.target.worktreePath, "guide.md"), "v2 fixed\n");
     const committed = (await f.development.commit(rework.developerBinding, {

@@ -45,8 +45,14 @@ describe("historical workflow proposal binding", () => {
   });
   it("accepts the same criteria and verification methods split into dependency-ordered tasks", async () => {
     const base = definition.tasks[0]!;
+    const assessment = spec.metadata!.conditionalTdd as Record<string, unknown>;
     const split = WorkflowDefinitionSchema.parse({ ...definition, tasks: [
-      { ...base, id: "unit", acceptanceCriteria: ["ac-1", "ac-3"] },
+      { ...base, id: "unit", acceptanceCriteria: ["ac-1", "ac-3"], metadata: {
+        ...base.metadata,
+        // The unit slice has a local refactoring surface; the dependent task retains integration coverage.
+        conditionalTdd: { ...assessment, taskType: "refactoring",
+          changeImpact: { ...(assessment.changeImpact as Record<string, unknown>), surfaces: ["refactoring"] } }
+      } },
       { ...base, id: "integration", acceptanceCriteria: ["ac-2"] }
     ], dependencies: [{ taskId: "integration", dependsOnTaskId: "unit", condition: "succeeded" }] });
     const host = await verification();
