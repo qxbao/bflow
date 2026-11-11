@@ -24,6 +24,7 @@ import { AgenticJournal, digest, record, syncFileHandle, textField } from "./jou
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
 import { parseMutationChecks, type MutationCheck } from "./mutation-check.js";
 import { parseAppChecks, type AppCheckSuite } from "./app-check-config.js";
+import { parseStaticAnalyzers, type OwnerStaticAnalyzer } from "./static-analyzers.js";
 import { AgenticHostPlatformOptionsSchema, HostPrepareResponseSchema, type AgenticHostPlatformOptions, type HostPrepareResponse } from "../platform/host-options.js";
 import { HostPlatformStatusSchema, rewritePersistedPlatform, type HostPlatformStatus } from "./host-platform.js";
 import { CancellationReconciliationReportSchema, type CancellationReconciliationReport } from "./cancellation-stop.js";
@@ -59,6 +60,8 @@ export interface AgenticHostOptions {
   mutationChecks?: readonly MutationCheck[];
   /** Owner real-app checks (`appChecks` in `.bflow/verification.json`); pinned with the other verification authority. */
   appChecks?: readonly AppCheckSuite[];
+  /** Owner static analyzers (`staticAnalyzers` in `.bflow/verification.json`). */
+  staticAnalyzers?: readonly OwnerStaticAnalyzer[];
   /** P30 platform configuration; absent keeps the legacy Claude-native host behavior. */
   platform?: AgenticHostPlatformOptions;
   /** Session layout (ADR 0009): `director` hosts no Conversation/Coordinator role and needs a v3 manifest. Absent means `legacy_v2`. */
@@ -153,6 +156,7 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
   for (const key of ["repositoryPath", "sessionId", "directory", "socketPath", "token"]) textField(value[key]);
   parseMutationChecks(value.mutationChecks, parseBehavioralCommands(value.behavioralCommands));
   parseAppChecks(value.appChecks);
+  if (value.staticAnalyzers !== undefined) parseStaticAnalyzers(value.staticAnalyzers, value.repositoryPath as string);
   if (value.platform !== undefined) value.platform = AgenticHostPlatformOptionsSchema.parse(value.platform);
   assertHostLayoutOptions(value);
   if (value.executionResolution !== undefined) value.executionResolution = ExecutionResolutionSourcesSchema.parse(value.executionResolution);
@@ -217,6 +221,7 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.behavioralCommands !== undefined ? { behavioralCommands: persisted.behavioralCommands } : {}),
     ...(persisted.mutationChecks !== undefined ? { mutationChecks: persisted.mutationChecks } : {}),
     ...(persisted.appChecks !== undefined ? { appChecks: persisted.appChecks } : {}),
+    ...(persisted.staticAnalyzers !== undefined ? { staticAnalyzers: persisted.staticAnalyzers } : {}),
     ...(persisted.policy !== undefined ? { policy: persisted.policy } : {}),
     ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}),
     ...(persisted.layout !== undefined ? { layout: persisted.layout } : {}),
@@ -415,6 +420,9 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
     throw new Error("Persisted mutation checks differ from owner configuration; quiesce and reconcile before changing verification authority");
   if (digest(parseAppChecks(configuration.appChecks)) !== digest(parseAppChecks(options.appChecks)))
     throw new Error("Persisted real-app checks differ from owner configuration; quiesce and reconcile before changing verification authority");
+  if (digest(parseStaticAnalyzers(configuration.staticAnalyzers, configuration.repositoryPath)) !==
+      digest(parseStaticAnalyzers(options.staticAnalyzers, options.repositoryPath)))
+    throw new Error("Persisted static analyzers differ from owner configuration; quiesce and reconcile before changing verification authority");
   // Platform, policy and impactIndex changes are only admissible while no host process owns the endpoint.
   const requestedPlatform = options.platform === undefined ? undefined : AgenticHostPlatformOptionsSchema.parse(options.platform);
   assertHostLayoutOptions({ ...options, ...(requestedPlatform ? { platform: requestedPlatform } : {}) });

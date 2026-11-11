@@ -167,13 +167,16 @@ function object(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-class Deadline {
+export class Deadline {
   readonly controller = new AbortController();
   readonly signal: AbortSignal;
   context: string | undefined;
+  stage: string | undefined;
   readonly expires: number;
+  readonly timeoutMs: number;
   constructor(timeoutMs: number, parent?: AbortSignal) {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) fail("Timeout must be an integer from 1 to 600000 milliseconds");
+    this.timeoutMs = timeoutMs;
     this.expires = Date.now() + timeoutMs;
     this.signal = parent ? AbortSignal.any([parent, this.controller.signal]) : this.controller.signal;
   }
@@ -186,8 +189,9 @@ class Deadline {
   }
   timeout(): never {
     this.controller.abort();
+    const stageInfo = this.stage ? ` during ${this.stage}` : "";
     throw new EnvironmentError({ code: "timeout", retryable: true, retrySafety: "observation_only",
-      message: `Environment operation timed out. ${this.context ?? "Delivery may have occurred; run bflow status/doctor and reconcile the existing session before retrying."}` });
+      message: `Environment operation timed out after ${this.timeoutMs}ms${stageInfo}. ${this.context ?? "Delivery may have occurred; run bflow status/doctor and reconcile the existing session before retrying."}` });
   }
   options(): OperationOptions { return { timeoutMs: this.remaining(), signal: this.signal, deadline: new Date(this.expires).toISOString() }; }
   async call<T>(operation: (options: OperationOptions) => Promise<T>): Promise<T> {
@@ -196,7 +200,7 @@ class Deadline {
     try {
       return await Promise.race([operation(this.options()), new Promise<never>((_, reject) => {
         onAbort = () => reject(this.controller.signal.aborted
-          ? new EnvironmentError({ code: "timeout", retryable: true, retrySafety: "observation_only", message: `Environment operation timed out. ${this.context ?? "Session/state preserved; run bflow status, then bflow up to reconcile or bflow down --yes to stop safely."}` })
+          ? new EnvironmentError({ code: "timeout", retryable: true, retrySafety: "observation_only", message: `Environment operation timed out after ${this.timeoutMs}ms${this.stage ? ` during ${this.stage}` : ""}. ${this.context ?? "Session/state preserved; run bflow status, then bflow up to reconcile or bflow down --yes to stop safely."}` })
           : new EnvironmentError({ code: "cancelled", retryable: false, message: "Command interrupted; session/state preserved. Run bflow up to resume or bflow down --yes to stop safely." }));
         this.signal.addEventListener("abort", onAbort, { once: true });
         if (this.signal.aborted) onAbort();
@@ -420,6 +424,7 @@ export class EnvironmentLifecycle {
       if (storedSession?.schemaVersion === 2 && storedSession.status !== "down")
         fail(V2_SESSION_RUNNING_MESSAGE, { component: "session", remediation: "bflow down" });
       const deadline = new Deadline(timeoutMs ?? config.environment.startupTimeoutMs, this.dependencies.signal);
+      deadline.stage = "dependency_validation";
       this.progress("Đang xác minh các phụ thuộc và xác thực provider...");
 
       // Step 2: validate_required_providers
@@ -713,6 +718,7 @@ export class EnvironmentLifecycle {
       }
 
       // Step 7: verify_agent_readiness_preflight
+      deadline.stage = "provider_preflight";
       for (const cli of distinctRequiredClis) {
         const override = this.dependencies.providerOverrides?.[cli];
         if (override?.blocked === true || override?.readiness === "blocked") {
@@ -725,6 +731,7 @@ export class EnvironmentLifecycle {
       }
 
       this.progress("Đang khởi tạo tích hợp quản lý vòng đời phiên...");
+      deadline.stage = "composition";
       const compositionConfig = fallbackNotices.length > 0
         ? { ...config, environment: { ...config.environment, roles: rolesToRun } }
         : config;
@@ -801,6 +808,7 @@ export class EnvironmentLifecycle {
           await this.writeIntent(repository, "manager_pending");
           cleanupEligible = true;
           roleDispatchAttempted = true;
+          deadline.stage = "provider_launch";
           this.progress("Đang khởi chạy các vai trò agent...");
           await checkExpectation?.();
           checkExpectation?.assertResolved();
@@ -848,6 +856,7 @@ export class EnvironmentLifecycle {
           }
 
           if (this.ready(manifest, config) && nativeReady) {
+            deadline.stage = "activation";
             if (integration.activate) {
               if (!reportedActivating) {
                 this.progress("Đang kích hoạt tiến trình Runtime nền...");

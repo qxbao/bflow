@@ -163,6 +163,186 @@ printf 'Welcome to Gradle!\\nBroken banner without version\\n'
     });
   });
 
+  it("detects multi-module Maven reactor and binds relaxed failIfNoTests flags and declared submodule report paths", async () => {
+    const context = await fixture({
+      "pom.xml": "<project><modules><module>core</module><module>web</module></modules></project>",
+      "core/pom.xml": "<project/>",
+      "core/src/test/java/com/example/CoreTest.java": "",
+      "web/pom.xml": "<project/>",
+      "web/src/test/java/com/example/WebTest.java": ""
+    });
+    const result = await createManagedAdapters(host(join(context.root, "home"))).find(adapter => adapter.id === "maven")!.detect(context);
+    expect(result.notes).toEqual([]);
+    expect(result.runners).toHaveLength(3);
+    const rootRunner = result.runners.find(r => r.projectDirectory === ".")!;
+    expect(rootRunner).toBeDefined();
+    const bound = rootRunner.bind({ testNames: ["com.example.CoreTest.testOne"], testPaths: ["core/src/test/java/com/example/CoreTest.java"] }, "/tmp/reports");
+    expect(bound).toEqual({
+      args: ["--offline", "--batch-mode", "--no-transfer-progress", "-Dmaven.repo.local=/bflow-cache/maven", "-Dtest=com.example.CoreTest#testOne", "-DfailIfNoTests=false", "-Dsurefire.failIfNoSpecifiedTests=false", "test"],
+      reportPaths: [
+        "target/surefire-reports/TEST-*.xml",
+        "core/target/surefire-reports/TEST-*.xml",
+        "web/target/surefire-reports/TEST-*.xml"
+      ]
+    });
+    const leafRunner = result.runners.find(r => r.projectDirectory === "core")!;
+    expect(leafRunner).toBeDefined();
+    expect(leafRunner.bind({ testNames: ["com.example.CoreTest.testOne"], testPaths: ["core/src/test/java/com/example/CoreTest.java"] }, "/tmp/reports")).toEqual({
+      args: ["--offline", "--batch-mode", "--no-transfer-progress", "-Dmaven.repo.local=/bflow-cache/maven", "-Dtest=com.example.CoreTest#testOne", "-DfailIfNoTests=true", "-Dsurefire.failIfNoSpecifiedTests=true", "test"],
+      reportPaths: ["core/target/surefire-reports/TEST-*.xml"]
+    });
+  });
+
+  it("exercises multi-module reactor report collection and proves independent parser rejects missing/unmatched tests", async () => {
+    const { collectRunnerReports } = await import("../../src/agentic/runner-reports.js");
+    const { parseRunnerResult } = await import("../../src/agentic/runner-results.js");
+
+    const checkoutDir = await realpath(await mkdtemp(join(tmpdir(), "bflow-reactor-reports-")));
+    try {
+      const reportsDir = join(checkoutDir, "reports");
+      await mkdir(reportsDir, { recursive: true });
+
+      await mkdir(join(checkoutDir, "core/target/surefire-reports"), { recursive: true });
+      await mkdir(join(checkoutDir, "web/target/surefire-reports"), { recursive: true });
+
+      const coreReport = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.CoreTest" time="0.123" tests="1" errors="0" skipped="0" failures="0">
+  <testcase name="testOne" classname="com.example.CoreTest" time="0.050"/>
+</testsuite>`;
+      await writeFile(join(checkoutDir, "core/target/surefire-reports/TEST-com.example.CoreTest.xml"), coreReport);
+
+      const patterns = [
+        "target/surefire-reports/TEST-*.xml",
+        "core/target/surefire-reports/TEST-*.xml",
+        "web/target/surefire-reports/TEST-*.xml"
+      ];
+
+      const collected = await collectRunnerReports(patterns, checkoutDir, reportsDir);
+      expect(collected).toHaveLength(1);
+      expect(collected[0]).toContain('classname="com.example.CoreTest"');
+
+      const outcome = { exitCode: 0, stdout: "[INFO] BUILD SUCCESS", stderr: "", cwd: checkoutDir, timedOut: false, outputTruncated: false };
+
+      // 1. All selected tests match -> parses successfully
+      const parsed = parseRunnerResult("junit", outcome, ["com.example.CoreTest.testOne"], collected);
+      expect(parsed.tests).toBe(1);
+      expect(parsed.passed).toBe(1);
+      expect(parsed.failed).toBe(0);
+
+      // 2. Missing selected test from another module -> rejects with identity mismatch
+      expect(() =>
+        parseRunnerResult("junit", outcome, ["com.example.CoreTest.testOne", "com.example.WebTest.testMissing"], collected)
+      ).toThrow();
+
+      // 3. Zero tests in report -> rejects
+      const emptyReport = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.EmptyTest" time="0.0" tests="0" errors="0" skipped="0" failures="0">
+</testsuite>`;
+      expect(() =>
+        parseRunnerResult("junit", outcome, ["com.example.EmptyTest.none"], [emptyReport])
+      ).toThrow();
+
+      // 4. Failed test in report -> reported as failed
+      const failedReport = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.CoreTest" time="0.123" tests="1" errors="0" skipped="0" failures="1">
+  <testcase name="testOne" classname="com.example.CoreTest" time="0.050">
+    <failure message="assertion failed">AssertionError: expected true but was false</failure>
+  </testcase>
+</testsuite>`;
+      const parsedFail = parseRunnerResult("junit", { ...outcome, exitCode: 1 }, ["com.example.CoreTest.testOne"], [failedReport]);
+      expect(parsedFail.failed).toBe(1);
+      expect(parsedFail.targetFailure).toBe(true);
+    } finally {
+      await rm(checkoutDir, { recursive: true, force: true });
+    }
+  });
+
+  it("handles nested Maven aggregator reactor (root -> group -> leaf) and collects nested surefire reports", async () => {
+    const context = await fixture({
+      "pom.xml": "<project><modules><module>group</module></modules></project>",
+      "group/pom.xml": "<project><modules><module>leaf</module></modules></project>",
+      "group/leaf/pom.xml": "<project/>",
+      "group/leaf/src/test/java/com/example/LeafTest.java": ""
+    });
+    const result = await createManagedAdapters(host(join(context.root, "home"))).find(adapter => adapter.id === "maven")!.detect(context);
+    expect(result.notes).toEqual([]);
+    expect(result.runners).toHaveLength(3);
+
+    // 1. Root aggregator traverses group and leaf recursively
+    const rootRunner = result.runners.find(r => r.projectDirectory === ".")!;
+    expect(rootRunner).toBeDefined();
+    const rootBound = rootRunner.bind({ testNames: ["com.example.LeafTest.testLeaf"], testPaths: ["group/leaf/src/test/java/com/example/LeafTest.java"] }, "/tmp/reports");
+    expect(rootBound.args).toContain("-DfailIfNoTests=false");
+    expect(rootBound.reportPaths).toContain("target/surefire-reports/TEST-*.xml");
+    expect(rootBound.reportPaths).toContain("group/target/surefire-reports/TEST-*.xml");
+    expect(rootBound.reportPaths).toContain("group/leaf/target/surefire-reports/TEST-*.xml");
+
+    // 2. Intermediate group aggregator also traverses leaf
+    const groupRunner = result.runners.find(r => r.projectDirectory === "group")!;
+    expect(groupRunner).toBeDefined();
+    const groupBound = groupRunner.bind({ testNames: ["com.example.LeafTest.testLeaf"], testPaths: ["group/leaf/src/test/java/com/example/LeafTest.java"] }, "/tmp/reports");
+    expect(groupBound.args).toContain("-DfailIfNoTests=false");
+    expect(groupBound.reportPaths).toContain("group/target/surefire-reports/TEST-*.xml");
+    expect(groupBound.reportPaths).toContain("group/leaf/target/surefire-reports/TEST-*.xml");
+
+    // 3. Leaf runner is not a reactor, has strict flags and only its own reports
+    const leafRunner = result.runners.find(r => r.projectDirectory === "group/leaf")!;
+    expect(leafRunner).toBeDefined();
+    const leafBound = leafRunner.bind({ testNames: ["com.example.LeafTest.testLeaf"], testPaths: ["group/leaf/src/test/java/com/example/LeafTest.java"] }, "/tmp/reports");
+    expect(leafBound.args).toContain("-DfailIfNoTests=true");
+    expect(leafBound.reportPaths).toEqual(["group/leaf/target/surefire-reports/TEST-*.xml"]);
+
+    // 4. Report collection on nested leaf
+    const { collectRunnerReports } = await import("../../src/agentic/runner-reports.js");
+    const { parseRunnerResult } = await import("../../src/agentic/runner-results.js");
+    const checkoutDir = await realpath(await mkdtemp(join(tmpdir(), "bflow-nested-reactor-reports-")));
+    try {
+      const reportsDir = join(checkoutDir, "reports");
+      await mkdir(reportsDir, { recursive: true });
+      await mkdir(join(checkoutDir, "group/leaf/target/surefire-reports"), { recursive: true });
+
+      const leafReport = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.LeafTest" time="0.05" tests="1" errors="0" skipped="0" failures="0">
+  <testcase name="testLeaf" classname="com.example.LeafTest" time="0.05"/>
+</testsuite>`;
+      await writeFile(join(checkoutDir, "group/leaf/target/surefire-reports/TEST-com.example.LeafTest.xml"), leafReport);
+
+      const collected = await collectRunnerReports(rootBound.reportPaths, checkoutDir, reportsDir);
+      expect(collected).toHaveLength(1);
+
+      const outcome = {
+        executable: "/usr/bin/mvn",
+        args: rootBound.args,
+        cwd: checkoutDir,
+        exitCode: 0,
+        signal: null,
+        stdout: "BUILD SUCCESS",
+        stderr: "",
+        combinedOutput: "BUILD SUCCESS",
+        durationMs: 100,
+        timedOut: false,
+        aborted: false,
+        outputTruncated: false
+      };
+      const parsed = parseRunnerResult("junit", outcome, ["com.example.LeafTest.testLeaf"], collected);
+      expect(parsed.passed).toBe(1);
+      expect(parsed.failed).toBe(0);
+
+      // Skipped test in report -> rejected
+      const skippedReport = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.LeafTest" time="0.05" tests="1" errors="0" skipped="1" failures="0">
+  <testcase name="testLeaf" classname="com.example.LeafTest" time="0.05">
+    <skipped message="test skipped"/>
+  </testcase>
+</testsuite>`;
+      expect(() =>
+        parseRunnerResult("junit", outcome, ["com.example.LeafTest.testLeaf"], [skippedReport])
+      ).toThrow();
+    } finally {
+      await rm(checkoutDir, { recursive: true, force: true });
+    }
+  });
+
   it("detects Gradle Kotlin with read-only dependency cache, no daemon, and exact filters", async () => {
     const { runner } = await detected("gradle", { "app/build.gradle.kts": "plugins {}", "app/settings.gradle.kts": "", "app/src/test/kotlin/FooTest.kt": "" });
     expect(runner.environment).toMatchObject({ GRADLE_USER_HOME: "/tmp/bflow-gradle", GRADLE_RO_DEP_CACHE: "/bflow-cache/gradle/caches" });

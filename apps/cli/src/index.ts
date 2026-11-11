@@ -99,7 +99,7 @@ export {
   type ProfileSyncReport
 } from "./profile-setup.js";
 
-export { EnvironmentLifecycle, EnvironmentError } from "./environment.js";
+export { EnvironmentLifecycle, EnvironmentError, Deadline } from "./environment.js";
 export type {
   EnvironmentIntegration,
   EnvironmentDependencies,

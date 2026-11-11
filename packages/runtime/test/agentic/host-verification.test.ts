@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { TestStrategyResolver } from "@bflow/test-strategy";
 import { spec as behavioralSpec } from "../../../test-strategy/test/fixtures.js";
-import { VerificationResultSchema, QualityGateResultSchema } from "@bflow/contracts";
+import { VerificationResultSchema, QualityGateResultSchema, SpecificationSchema, TestStrategySchema } from "@bflow/contracts";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -35,6 +35,35 @@ async function fixture() {
   return {repository,head,base,git,binding,context,outbound,state,receipts,artifacts:opened.value,restore,host:restore()};
 }
 describe("trusted host observations",()=>{
+  it("batches static analysis of committed JVM files in one compiler invocation", async () => {
+    const f = await fixture();
+    await writeFile(join(f.repository, "One.java"), "class One {}\n");
+    await writeFile(join(f.repository, "Two.java"), "class Two {}\n");
+    f.git("add", "."); f.git("commit", "-m", "add compilation batch");
+    const revision = f.git("rev-parse", "HEAD");
+    const calls: string[][] = [];
+    const host = new HostVerification(() => { throw new Error("unused runtime"); }, () => f.artifacts,
+      undefined, [], undefined, undefined, [], { suites: [] }, [], [{ id: "jvm-compile",
+        matches: path => path.endsWith(".java"), detect: async () => ({ status: "available" }),
+        run: async input => { calls.push([...input.files]); return { exitCode: 0, output: "compiled batch" }; } }]);
+    const result = await (host as any).captureStaticAnalysis(f.repository, f.head, revision, "auto:static");
+    expect(result.exitCode).toBe(0);
+    expect(calls).toEqual([["One.java", "Two.java"]]);
+  });
+
+  it("rejects a source change that happens while a static analyzer is running", async () => {
+    const f = await fixture();
+    await writeFile(join(f.repository, "sample.json"), "{}\n");
+    f.git("add", "."); f.git("commit", "-m", "add checked input");
+    const revision = f.git("rev-parse", "HEAD");
+    const host = new HostVerification(() => { throw new Error("unused runtime"); }, () => f.artifacts,
+      undefined, [], undefined, undefined, [], { suites: [] }, [], [{ id: "concurrent-check",
+        matches: path => path.endsWith(".json"), detect: async () => ({ status: "available" }),
+        run: async () => { await writeFile(join(f.repository, "sample.json"), "changed\n");
+          return { exitCode: 0, output: "checked stale source" }; } }]);
+    await expect((host as any).captureStaticAnalysis(f.repository, f.head, revision, "auto:static"))
+      .rejects.toThrow(/dirty|revision changed/);
+  });
   it("captures the actual pinned diff before accepting an independent verdict and rejects altered receipts",async()=>{
     const f=await fixture();
     const observation=await f.host.inspectReview(f.binding,{messageId:"request"}) as {reviewId:string;observation:{diff:string}};
@@ -135,6 +164,134 @@ describe("trusted host observations",()=>{
     expect((ts.metadata?.verification as {summary:string}).summary).toContain("cannot analyze feature.ts");
     f.git("rm","-q","feature.ts");await writeFile(join(f.repository,"broken.js"),"const value = ;\n");f.git("add","broken.js");f.git("commit","-m","js");
     expect((await evaluate(f.git("rev-parse","HEAD"))).status).toBe("failed");
+  });
+
+  it("distinguishes owner-configured static analyzers from built-ins and activates auto:static only when configured", async () => {
+    const f = await fixture();
+    const ownerRunner = [{
+      command: "owner:test",
+      executable: process.execPath,
+      args: ["--test"],
+      method: "unit_test" as const,
+      levels: ["unit" as const],
+      testPaths: ["test/a.test.js"],
+      testNames: ["testOne"],
+      timeoutMs: 10000
+    }];
+    const source = new TestRunnerSource(ownerRunner); // Owner mode: runners.automatic is false
+
+    // 1. Without owner static analyzers: legacy owner mode
+    const legacyHost = new HostVerification(
+      () => ({ inspect: async () => ({ outbound: f.outbound }) }) as unknown as AgenticWorkflowRuntime,
+      () => { throw new Error("no artifacts"); },
+      undefined,
+      source
+    );
+    expect(legacyHost.configuredMethods()).toEqual(["unit_test"]);
+    expect(legacyHost.behavioralGates().some(g => g.id === "host-static-auto-static")).toBe(false);
+
+    const { assessment } = await import("../../../test-strategy/test/fixtures.js");
+    const baseAssessment = assessment("domain_logic", {
+      infrastructure: {
+        readiness: "ready",
+        commands: [
+          { method: "unit_test", command: "owner:test", level: "unit" },
+          { method: "static_analysis", command: "auto:static", level: "unit" }
+        ]
+      }
+    });
+    const specOnlyStatic = behavioralSpec(baseAssessment, "static_analysis");
+    // In legacy owner mode, throws No owner-configured
+    expect(() => legacyHost.assertSupported(specOnlyStatic)).toThrow("No owner-configured behavioral runner for static_analysis");
+
+    // 2. With owner-configured static analyzers: additive extension
+    const outsideDir = await realpath(await mkdtemp(join(tmpdir(), "bflow-outside-owner-static-")));
+    const checker = join(outsideDir, "my-checker.sh");
+    await writeFile(checker, "#!/bin/sh\nexit 0\n");
+    await chmod(checker, 0o755);
+
+    const { buildStaticAnalyzers } = await import("../../src/agentic/static-analyzers.js");
+    const staticAnalyzers = buildStaticAnalyzers([
+      { id: "custom-static", executable: checker, args: [], include: ["**/*.ts", "**/*.js"], timeoutMs: 10000 }
+    ], f.repository);
+
+    const extendedHost = new HostVerification(
+      () => ({ inspect: async () => ({ outbound: f.outbound }), ports: { artifactStore: { put: async () => ({ ok: true, value: { artifactId: "art-1" } }) } } }) as any,
+      () => ({ put: async () => ({ ok: true, value: { artifactId: "art-1" } }) } as any),
+      undefined,
+      source,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      staticAnalyzers
+    );
+    expect(extendedHost.configuredMethods()).toContain("static_analysis");
+    expect(extendedHost.behavioralGates().some(g => g.id === "host-static-auto-static")).toBe(true);
+
+    const extendedSpec = SpecificationSchema.parse({
+      ...behavioralSpec(baseAssessment, "unit_test"),
+      affectedPaths: ["test/a.test.js", "packages/example/src/logic.ts"],
+      acceptanceCriteria: [
+        {
+          id: "ac-1",
+          description: "Unit test passes",
+          category: "functional",
+          verificationMethod: "unit_test",
+          required: true,
+          status: "pending",
+          evidenceArtifactIds: []
+        },
+        {
+          id: "ac-2",
+          description: "Static check passes",
+          category: "non_functional",
+          verificationMethod: "static_analysis",
+          required: true,
+          status: "pending",
+          evidenceArtifactIds: []
+        }
+      ]
+    });
+    const strategy = TestStrategySchema.parse({
+      ...new TestStrategyResolver().resolve(extendedSpec),
+      targetCommands: ["owner:test", "auto:static"],
+      criterionMappings: [
+        { criterionId: "ac-1", testNames: ["testOne"] },
+        { criterionId: "ac-2", testNames: ["static"] }
+      ]
+    });
+
+    // In extended mode, assertSupported accepts the deterministic static check
+    expect(() => extendedHost.assertSupported(extendedSpec, strategy)).not.toThrow();
+
+    // Measurement through policyDeterministicGate executes the owner analyzer
+    const gate = extendedHost.behavioralGates().find(g => g.id === "host-static-auto-static")!;
+    const definition = QualityGateDefinitionSchema.parse({
+      id: "host-static-auto-static",
+      name: "static",
+      evaluator: "host-static-analysis",
+      required: true,
+      timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
+      configuration: { kind: "deterministic", method: "static_analysis", command: "auto:static", criterionIds: ["ac-2"], testNames: ["static"], role: "quality_gate", levels: [] }
+    });
+    await writeFile(join(f.repository, "feature.ts"), "export const value: number = 1;\n");
+    f.git("add", "feature.ts");
+    f.git("commit", "-m", "add ts feature");
+    const commitHead = f.git("rev-parse", "HEAD");
+
+    const evalRes = await gate.evaluate({
+      ...f.context,
+      definition,
+      input: { ...f.context.input as object, sourceRevision: commitHead, sourceWorktreePath: f.repository, baseRevision: f.head }
+    });
+    expect(evalRes.ok).toBe(true);
+    if (evalRes.ok) {
+      expect(evalRes.value.status).toBe("passed");
+      expect(evalRes.value.metadata.verification.summary).toContain("Syntax check passed");
+    }
+    await rm(outsideDir, { recursive: true, force: true });
   });
 
   it("includes host-regression-* checks only when scope is affected, not owner-configured, and profile has no adapter",async()=>{

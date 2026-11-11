@@ -583,7 +583,7 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
   }
 }
 /** Reuse only the isolated raw execution boundary: compiler exits are never parsed as test results or Red evidence. */
-export async function measureCompiler(profile: RunnerProfile, cwd: string, revision: string, originalRevision?: string, testPaths: string[] = []) {
+export async function measureCompiler(profile: Omit<RunnerProfile, "checkoutDependencyRoots" | "dependencySource" | "source"> & Partial<Pick<RunnerProfile, "checkoutDependencyRoots" | "dependencySource">> & { source?: string }, cwd: string, revision: string, originalRevision?: string, testPaths: string[] = []) {
   if (testPaths.some(path => !testFilePattern.test(path))) throw new Error("Compiler test exceptions must be selected behavioral test paths");
   const command: BoundBehavioralCommand = { ...profile, reporter: "node_tap", testNames: [], testPaths,
     ...(originalRevision ? { originalRevision } : {}) };

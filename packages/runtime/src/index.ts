@@ -112,6 +112,9 @@ export { parseMutationChecks } from "./agentic/mutation-check.js";
 export type { MutationCheck } from "./agentic/mutation-check.js";
 export { parseAppChecks, appCheckDefinitions, appCheckIdentity, parseAppCheckIdentity } from "./agentic/app-check-config.js";
 export type { AppCheck, AppCheckSuite, AppCheckUi, AppCheckApi } from "./agentic/app-check-config.js";
+export { parseStaticAnalyzers, buildStaticAnalyzers, DEFAULT_STATIC_ANALYZERS, OwnerStaticAnalyzerSchema } from "./agentic/static-analyzers.js";
+export type { OwnerStaticAnalyzer, StaticAnalyzer } from "./agentic/static-analyzers.js";
+export { projectTaskSpecificationInput, intersectPathsWithOwned, taskPolicyAssessment } from "./agentic/task-projection.js";
 export type {
   BehavioralCommand,
   RegressionCommand,

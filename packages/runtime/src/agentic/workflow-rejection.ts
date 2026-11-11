@@ -7,7 +7,7 @@ import { redactString } from "../resilience/redaction.js";
  */
 export const WorkflowRejectionCodeSchema = z.enum(["missing_behavioral_runner", "unsupported_verification", "policy_violation",
   "no_test_runner_detected", "runner_setup_required", "verification_sandbox_unavailable", "missing_test_paths", "missing_test_mapping", "unknown_test_command", "unsupported_method",
-  "invalid_specification"]);
+  "invalid_specification", "task_evidence_mixed", "task_policy_gap", "static_analyzer_missing"]);
 export type WorkflowRejectionCode = z.infer<typeof WorkflowRejectionCodeSchema>;
 
 /**
@@ -15,7 +15,7 @@ export type WorkflowRejectionCode = z.infer<typeof WorkflowRejectionCodeSchema>;
  * Coordinator sets up a missing runner itself through repository_setup. Only the remaining classes are reported to the user.
  */
 export const AGENT_FIXABLE_REJECTIONS: readonly WorkflowRejectionCode[] = ["no_test_runner_detected", "runner_setup_required", "missing_test_paths", "missing_test_mapping", "unknown_test_command", "unsupported_method",
-  "invalid_specification"];
+  "invalid_specification", "task_evidence_mixed", "task_policy_gap", "static_analyzer_missing"];
 
 /** Whether Runtime should tell Conversation (and through it the user) about this refusal. */
 export function reportsToUser(rejection: WorkflowRejection): boolean {

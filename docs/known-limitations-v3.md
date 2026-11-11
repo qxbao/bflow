@@ -45,6 +45,7 @@
 | RTK | Compression có thể passthrough hoặc degraded; raw status/output vẫn là evidence. Không hứa tỷ lệ giảm token từ test formatter hoặc chạy lại command để lấy output |
 | Skills | Bundle pins là instruction, không là permission. Tool skill thiếu grant bị skip/block theo requiredness. Startup không hỗ trợ custom `catalogDir`/`bindingsPath`; không sửa bundle đã publish mà giữ version/digest |
 | Legacy required lists | `requiredTools`/`requiredMcpServices` thiếu role/operation allowlist cần migration; không tự cấp mọi operation |
+| Director admission & verification | Tách biệt workflow-wide admission khỏi per-task evidence: task đơn lẻ không được trộn `manual_review` và behavioral (`task_evidence_mixed`), DAG phải bao phủ đủ required policy methods (`task_policy_gap`), tệp literal không có analyzer tĩnh bị từ chối (`static_analyzer_missing`). Static analyzer (YAML, GitHub Actions, shell, JVM compile, XML, JS, JSON) kiểm tra cú pháp và cấu trúc, không chứng minh hành vi CI. Multi-module Maven reactor tự động nhận diện submodule report paths và cờ `failIfNoTests`. User stop intent bền vững qua mọi đường wake/start; mở lại phiên dừng cần cờ tường minh `--restart` |
 
 ## Local web và các extension chưa nối host
 

@@ -7,7 +7,7 @@ import {
   SessionManifestSchema, type SessionLifecycleManager, type SessionManifest, type RuntimeService,
   type RecoveryCheckpoint, type WorkflowRunSnapshot, type CreateCheckpointCommand
 } from "@bflow/contracts";
-import { EnvironmentConfigSchema, EnvironmentError, EnvironmentLifecycle, defaultEnvironmentConfig, identifyRepository, main, namedSessionEnvironment, parseCliArgs, parseConfigYaml,
+import { EnvironmentConfigSchema, EnvironmentError, EnvironmentLifecycle, Deadline, defaultEnvironmentConfig, identifyRepository, main, namedSessionEnvironment, parseCliArgs, parseConfigYaml,
   readEnvironmentConfig, renderEnvironmentConfigYaml, runCli, upsertEnvironmentConfig, environmentProcessRunner, formatCommandError, type EnvironmentProcessRequest, type EnvironmentProcessRunner } from "../src/index.js";
 import { PaneManagerLifecycleAdapter, openPaneManagerEnvironment } from "../src/pane-manager-integration.js";
 import { createWebWorkspaceServices } from "../src/web-workspace-services.js";
@@ -647,6 +647,67 @@ describe("P12 repository environment lifecycle", () => {
     const json = JSON.parse(formatCommandError(failure.contractError, "up", true));
     expect(json.error.message).toBe(failure.message);
     expect(original.message).toBe(message);
+  });
+  it.each([
+    "dependency_validation",
+    "provider_preflight",
+    "composition",
+    "provider_launch",
+    "activation"
+  ] as const)("reports stage %s and configured budget on timeout", async (stage) => {
+    const deadline = new Deadline(12345);
+    deadline.stage = stage;
+    try {
+      deadline.timeout();
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(EnvironmentError);
+      expect((error as EnvironmentError).contractError).toMatchObject({
+        code: "timeout",
+        retryable: true,
+        retrySafety: "observation_only"
+      });
+      expect((error as EnvironmentError).message).toContain(`timed out after 12345ms during ${stage}`);
+    }
+
+    const shortDeadline = new Deadline(15);
+    shortDeadline.stage = stage;
+    await expect(shortDeadline.call(() => new Promise((_, reject) => setTimeout(() => reject(new Error("hang")), 100))))
+      .rejects.toThrow(new RegExp(`timed out after 15ms during ${stage}`));
+  });
+  linuxIt("cleans up session and retains user stop intent when activation times out", async () => {
+    const stopIntent = {
+      version: 1 as const,
+      repositoryId: repository.id,
+      sessionName: repository.sessionName,
+      source: "web" as const,
+      requestedAt: now
+    };
+    await writeUserStopIntent(dir, stopIntent);
+
+    const composed = new EnvironmentLifecycle(dir, {
+      runner,
+      integration: {
+        manager: fixture.manager,
+        runtime: mockRuntime(),
+        quiesce: async () => ({ ok: true, value: undefined }),
+        activate: async () => {
+          throw new EnvironmentError({
+            code: "timeout",
+            retryable: true,
+            retrySafety: "observation_only",
+            message: "Environment operation timed out after 5000ms during activation."
+          });
+        }
+      }
+    });
+
+    const failure = await composed.up().catch(error => error);
+    expect(failure).toBeInstanceOf(EnvironmentError);
+    expect(failure.message).toContain("during activation");
+    expect(failure.message).toContain("Automatic cleanup completed successfully.");
+    expect(fixture.manager.down).toHaveBeenCalledTimes(1);
+    expect(await readUserStopIntent(dir, repository.id, repository.sessionName)).toEqual(stopIntent);
   });
   linuxIt("stops the idle composed host without creating Herdr when readiness preflight blocks startup", async () => {
     const path = join(dir, ".bflow/config.yml");
