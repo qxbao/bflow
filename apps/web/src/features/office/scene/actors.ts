@@ -129,8 +129,8 @@ export class Choreographer {
       upsert(agent.instanceId, agent.role, agent.certainty, agent.pose, home, false);
       if (isIdle(agent.pose)) lounge.push(agent.instanceId);
     }
-    // A running session has a full staff: every desk without an agent gets an anonymous staff member, who is not working.
-    if (model.tier === 'full') plan.seats.forEach((seat, i) => {
+    // A running (or degraded) session has a full staff: every desk without an agent gets an anonymous staff member, who is not working.
+    if (model.tier !== 'closed') plan.seats.forEach((seat, i) => {
       if (occupied.has(seat)) return;
       const id = `staff:${seat}`;
       upsert(id, seatRole(seat), 'confirmed', 'sleeping', plan.desks[i] as Cell, true);
@@ -143,9 +143,9 @@ export class Choreographer {
     // A cue for an actor that left the model, or that is away from its desk, can never play: purge it so it cannot start later or hold budget.
     this.queue = this.queue.filter(c => c.kind !== 'walk' || (this.actors.has(c.actor) && this.actors.get(c.actor)?.spot === undefined));
     const walks = cues.filter(c => c.kind === 'walk');
-    const playable = walks.filter(c => this.actors.has(c.actor) && this.actors.get(c.actor)?.spot === undefined);
+    const playable = walks.filter(c => this.actors.get(c.actor)?.spot === undefined);
     if (playable.length > 0) this.queue = enqueue(this.queue, playable, WALK_LIMITS);
-    return playable.map(c => c.handoffId);
+    return walks.map(c => c.handoffId);
   }
 
   /**

@@ -182,10 +182,17 @@ Từ phiên bản giao diện **Văn phòng 3D (Office 3D HUD)** và chế độ
 
 ### 1. Toàn cảnh Văn phòng 3D và Thanh tác vụ thông minh
 
-Ngay khi mở `http://127.0.0.1:4317`, bạn quan sát thấy toàn bộ bàn làm việc của từng vai trò cùng hệ thống HUD điều khiển nổi đồng bộ phong cách game 3D (viền đậm sắc nét, bóng đổ khối nổi, bảng màu giấy kem ấm áp):
+Ngay khi mở `http://127.0.0.1:4317`, bạn quan sát thấy toàn bộ không gian làm việc mô phỏng 3D đối xứng hài hòa cùng hệ thống HUD điều khiển nổi đồng bộ phong cách game retro (viền đậm sắc nét, bóng đổ khối nổi, bảng màu giấy kem ấm áp):
+- **Bố cục các phòng ban chuyên trách:**
+  - **Phòng Giám đốc (Director Office) & Director Team:** Nơi Director và nhóm điều phối làm việc với bàn gỗ lớn, giá sách, sofa tiếp khách và ghế da giám đốc màu đen sang trọng.
+  - **Khu Lập trình (Developer Zone):** Dãy bàn làm việc với máy tính PC, bình nước và ghế nhựa đỏ không tựa đặc trưng.
+  - **Khu Kiểm chứng (QA / Reviewer):** Bàn làm việc của Reviewer (tóc đỏ crimson dài, kính tròn) và QA (tóc dựng đen, áo phông đội ngũ màu đen).
+  - **Khu Sáng tạo & Thư giãn (Creative Space):** Trung tâm văn phòng gồm **4 bàn bi-a**, 2 máy chơi game arcade cổ điển, quầy bar uốn cong phía trước tủ rượu lớn và một **Bartender** làm việc thường trực (sơ mi trắng, gile đen) di chuyển phục vụ giữa các vị trí.
+  - **Hồ bơi ngoài trời (Swimming Pool):** Nằm ngay dưới khu QA/Reviewer với bể bơi dài và cầu nhảy ở hai đầu.
+- **Hành vi nhân vật sống động (Random leisure):** Khi có nhiệm vụ, các Developer gõ phím nhanh/chậm trên bàn làm việc trong worktree riêng. Khi rảnh rỗi (`idle`), các nhân vật sẽ tự động tản bộ sang khu Creative Space để chơi bi-a, chơi arcade, uống nước ở quầy bar hoặc lội nước bơi lội tại hồ bơi; ngay khi có tác vụ mới, nhân vật sẽ tự động đi bộ trở về đúng bàn làm việc của mình!
 - **Góc trái trên (`Bflow Office`):** Chọn nhanh dự án đang mở (tự động ưu tiên các dự án thực tế trên máy trước các thư mục thử nghiệm tạm thời `/tmp/`), xem trạng thái công việc đang chạy và tình trạng kết nối trực tiếp.
 - **Thanh lối tắt gọn phía dưới:** Các nút bấm nổi **Tổng quan**, **Công việc**, **Quyết định**, **Trò chuyện**, **Sự cố**, **Nhân viên**, **Tài liệu**, **Cài đặt** và **Thao tác đã gửi** được gom gọn, không che khuất tầm nhìn 3D và không bao giờ bị các cửa sổ nổi đè lên.
-- **Thanh tác vụ đáy màn hình:** Chứa nút menu `◆ Bflow`, danh sách cửa sổ đang mở, ô nhập nhanh **Trò chuyện với Director…** và nút chuyển đổi tức thì giữa chế độ **Web** (2D cổ điển) và **3D**.
+- **Thanh tác vụ đáy màn hình:** Chứa nút menu `◆ Bflow`, danh sách cửa sổ đang mở, ô nhập nhanh **Trò chuyện với Director…** và nút chuyển đổi tức thì giữa chế độ **Web** (2D cổ điển) và **3D** với hiệu ứng View Transitions mượt mà.
 
 ![Toàn cảnh Văn phòng 3D với Director đang hoạt động và thanh lối tắt gọn gàng](../assets/guide/web-3d-office-overview.png)
 
@@ -209,6 +216,9 @@ Bấm nút **Công việc** trên thanh lối tắt (hoặc nhấp vào **Bảng
 - Tìm kiếm theo tên công việc hoặc lọc theo giai đoạn (`Chờ làm rõ`, `Chờ bạn duyệt`, `Đang lập trình`, `Đang kiểm chứng`, `Hoàn tất`).
 - Mỗi luồng công việc được hiển thị dưới dạng **thẻ nhiệm vụ nổi (Quest Card)** kèm huy hiệu trạng thái (`HOÀN TẤT`, `ĐANG CHẠY`, `CHỜ BẠN`) và **thanh tiến độ kẻ sọc xanh lá (XP/Quest Progress Bar)** phản ánh số nhiệm vụ con đã hoàn thành (ví dụ `2/2 nhiệm vụ hoàn thành`).
 - Với các công việc lớn được phân rã thành nhiều nhánh độc lập (DAG), Bflow cấp phát tự động mỗi `Developer` một Git worktree riêng biệt để lập trình song song.
+- **Lập trình song song và bóng thoại tiến độ:** Mỗi Developer nhận nhiệm vụ sẽ ngồi vào bàn làm việc riêng trong khu Developer Zone. Phía trên đầu nhân vật hiển thị bóng thoại terminal trực tiếp (*terminal snapshot*) thể hiện suy nghĩ và công cụ AI đang gọi theo thời gian thực.
+
+![Developer lập trình song song trong Git worktree riêng với bóng thoại tiến độ thời gian thực](../assets/web-manual/bflow-3d-parallel-execution.png)
 
 ![Cửa sổ Công việc hiển thị các thẻ nhiệm vụ và thanh tiến độ phong cách game 3D](../assets/guide/web-3d-work-progress.png)
 
